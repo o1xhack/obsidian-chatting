@@ -5,6 +5,7 @@ import type {
   ContentBlock,
   AgentCallbacks,
   SelectionScope,
+  ImageAttachment,
 } from "../types";
 import { sendMessage } from "../api/client";
 import { clearOpenAIState } from "../api/openai";
@@ -107,9 +108,12 @@ export class AgentLoop {
         // Content blocks
         for (const block of msg.content) {
           if (block.type === "text" && block.text) {
-            parts.push(`### Assistant`);
+            parts.push(`### ${msg.role === "user" ? "User" : "Assistant"}`);
             parts.push(``);
             parts.push(block.text);
+            parts.push(``);
+          } else if (block.type === "image" && block.image) {
+            parts.push(`[Image attachment: ${block.image.fileName}]`);
             parts.push(``);
           } else if (block.type === "tool_use") {
             parts.push(`### Tool Call: \`${block.name}\``);
@@ -137,7 +141,8 @@ export class AgentLoop {
   async run(
     userMessage: string,
     callbacks: AgentCallbacks,
-    selection?: SelectionScope | null
+    selection?: SelectionScope | null,
+    images: ImageAttachment[] = []
   ): Promise<void> {
     this.aborted = false;
 
@@ -162,7 +167,13 @@ export class AgentLoop {
       fullMessage = `${contextPrefix}\n\n${userMessage}`;
     }
 
-    this.messages.push({ role: "user", content: fullMessage });
+    const content: string | ContentBlock[] = images.length > 0
+      ? [
+          ...images.map((image): ContentBlock => ({ type: "image", image })),
+          { type: "text", text: fullMessage },
+        ]
+      : fullMessage;
+    this.messages.push({ role: "user", content });
 
     // Prune if conversation is too long
     this.pruneHistory();
@@ -170,7 +181,12 @@ export class AgentLoop {
     // System prompt is static (cache-friendly). Built once, identical every call.
     const systemPrompt = buildSystemPrompt();
 
-    debugLog(this.app, "USER_MESSAGE", { userMessage, hasSelection: !!selection });
+    debugLog(this.app, "USER_MESSAGE", {
+      userMessage,
+      hasSelection: !!selection,
+      imageCount: images.length,
+      imageNames: images.map((image) => image.fileName),
+    });
 
     const maxIterations = this.settings.maxIterations || 20;
 

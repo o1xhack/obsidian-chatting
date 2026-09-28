@@ -77,6 +77,8 @@ The agent uses find-and-replace scoped to the selection text. Everything outside
 | **OpenAI** | API key | Codex 5.3 | Responses API, reasoning, web search. |
 | **ChatGPT account** | Sign in with ChatGPT | GPT-5.5 | Uses your ChatGPT plan instead of an OpenAI API key. |
 
+Attach up to four images to a message, including by pasting an image from the clipboard. Images are sent with that message to the selected provider; large photos are resized before sending.
+
 > **About ChatGPT account login.** This provider signs you in with your ChatGPT account and routes requests through the ChatGPT/Codex backend (not `api.openai.com`). It requires an active ChatGPT plan with Codex access. The available models mirror the Codex CLI catalog.
 
 ## 🚀 Quick start
@@ -156,7 +158,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 - [x] Selection scope
 - [x] Official Obsidian Community Plugins listing
 - [ ] Multi-conversation history with archive / search
-- [ ] Image attachments where the provider supports them
+- [x] Image attachments where the provider supports them
 - [ ] More upstream provider models picked up automatically as they ship
 
 Have a request? Open an issue.
@@ -166,7 +168,7 @@ Have a request? Open an issue.
 <details>
 <summary><b>Will my notes be uploaded somewhere?</b></summary>
 
-Only what the agent needs for the current turn. When you ask a question, the agent decides which tools to call — `read_document`, `search_vault`, etc. — and the contents fetched by those calls (plus the active note context) are sent to your chosen provider. Nothing is uploaded in the background. There is no vault index.
+Only what the agent needs for the current turn. When you ask a question, the agent decides which tools to call — `read_document`, `search_vault`, etc. — and the contents fetched by those calls (plus the active note context) are sent to your chosen provider. Images you attach are sent with that message and retained in local chat history until you clear the conversation. Nothing is uploaded in the background. There is no vault index.
 
 </details>
 
@@ -194,7 +196,7 @@ Probably not — keeping the provider list small is a deliberate choice. Two API
 <details>
 <summary><b>Where is chat history stored? Will it sync?</b></summary>
 
-Locally in `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json`. It is **not** synced by Obsidian Sync (plugin data files are excluded by default). API keys live in the OS keychain via SecretStorage and are also not synced.
+Locally in `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json`. It is **not** synced by Obsidian Sync (plugin data files are excluded by default). API keys live in the OS keychain via SecretStorage and are also not synced. Attached image data is retained in this local chat history until you clear the conversation.
 
 </details>
 

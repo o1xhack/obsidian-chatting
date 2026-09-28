@@ -7,7 +7,7 @@ import {
   TFile,
   type TAbstractFile,
 } from "obsidian";
-import type { ChatSettings, SelectionScope } from "./types";
+import type { ChatSettings, SelectionScope, ImageAttachment } from "./types";
 import { DEFAULT_SETTINGS, CHATGPT_OAUTH_DEFAULT_MODEL } from "./types";
 import { ChatSettingTab, getModelDisplayName } from "./settings";
 import { ObsidianChatView, VIEW_TYPE_CHAT } from "./ui/chat-view";
@@ -30,7 +30,14 @@ export default class ChatPlugin extends Plugin {
   /** ChatGPT OAuth service (used by the chatgpt-oauth provider). */
   chatgptOAuth!: ChatGPTOAuthService;
   /** Chat messages for replaying into the UI when the view reopens */
-  chatHistory: Array<{ type: string; text?: string; toolName?: string; toolInput?: Record<string, unknown>; toolResult?: { result: string; isError: boolean } }> = [];
+  chatHistory: Array<{
+    type: string;
+    text?: string;
+    images?: ImageAttachment[];
+    toolName?: string;
+    toolInput?: Record<string, unknown>;
+    toolResult?: { result: string; isError: boolean };
+  }> = [];
 
   async onload(): Promise<void> {
     await this.migrateLegacyPluginData();

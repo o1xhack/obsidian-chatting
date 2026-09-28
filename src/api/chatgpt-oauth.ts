@@ -369,7 +369,7 @@ function parseSSE(text: string): Array<Record<string, unknown>> {
  *
  * Encoding rules:
  *   - string content        → { type:"message", role, content }
- *   - text block            → { type:"message", role, content:text }
+ *   - text/image blocks     → { type:"message", role, content:[...] }
  *   - tool_use block        → { type:"function_call", call_id, name, arguments }
  *   - tool_result block     → { type:"function_call_output", call_id, output }
  *
@@ -389,10 +389,23 @@ function buildFullHistoryInput(
       continue;
     }
 
+    const content: Array<Record<string, unknown>> = [];
+    const flushContent = () => {
+      if (content.length === 0) return;
+      items.push({ type: "message", role, content: content.splice(0) });
+    };
+
     for (const block of msg.content) {
       if (block.type === "text" && block.text) {
-        items.push({ type: "message", role, content: block.text });
+        content.push({ type: "input_text", text: block.text });
+      } else if (block.type === "image" && block.image) {
+        content.push({
+          type: "input_image",
+          image_url: `data:${block.image.mediaType};base64,${block.image.data}`,
+          detail: "auto",
+        });
       } else if (block.type === "tool_use" && block.name && block.id) {
+        flushContent();
         items.push({
           type: "function_call",
           call_id: block.id,
@@ -400,6 +413,7 @@ function buildFullHistoryInput(
           arguments: JSON.stringify(block.input ?? {}),
         });
       } else if (block.type === "tool_result" && block.tool_use_id) {
+        flushContent();
         items.push({
           type: "function_call_output",
           call_id: block.tool_use_id,
@@ -407,6 +421,7 @@ function buildFullHistoryInput(
         });
       }
     }
+    flushContent();
   }
 
   return items;

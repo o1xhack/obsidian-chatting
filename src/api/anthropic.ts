@@ -237,6 +237,16 @@ function toAnthropicMessage(msg: UnifiedMessage): Record<string, unknown> {
         input: block.input,
       };
     }
+    if (block.type === "image" && block.image) {
+      return {
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: block.image.mediaType,
+          data: block.image.data,
+        },
+      };
+    }
     return { type: "text", text: block.text };
   }).filter((b) => !(b.type === "text" && !b.text));
 

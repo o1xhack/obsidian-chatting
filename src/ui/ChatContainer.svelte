@@ -1,12 +1,23 @@
 <script lang="ts">
   import type { App, Component as ObsidianComponent } from "obsidian";
-  import { MarkdownRenderer } from "obsidian";
-  import type { ToolResult, SelectionScope } from "../types";
+  import { MarkdownRenderer, Notice } from "obsidian";
+  import type { ToolResult, SelectionScope, ImageAttachment } from "../types";
+
+  const MAX_IMAGE_COUNT = 4;
+  const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
+  const SUPPORTED_IMAGE_TYPES = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+  ]);
 
   interface ChatMessage {
     id: number;
     type: "user" | "assistant" | "tool-call" | "tool-result" | "error" | "thinking";
     text?: string;
+    images?: ImageAttachment[];
     toolName?: string;
     toolInput?: Record<string, unknown>;
     toolResult?: ToolResult;
@@ -17,7 +28,7 @@
     component: ObsidianComponent;
     provider: string;
     model: string;
-    onSend: (text: string, selection: SelectionScope | null) => void;
+    onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[]) => void;
     onClear: () => void;
     onStop: () => void;
   }
@@ -31,6 +42,8 @@
   let placeholder = $state("Ask anything...");
   let messagesEl: HTMLElement | undefined = $state();
   let textareaEl: HTMLTextAreaElement | undefined = $state();
+  let fileInputEl: HTMLInputElement | undefined = $state();
+  let attachments = $state<ImageAttachment[]>([]);
   let nextId = 0;
 
   // Selection scope (shown as a pill above input)
@@ -57,8 +70,8 @@
 
   // ─── Public API (called from chat-view.ts / chat-modal.ts) ────────────
 
-  export function addUserMessage(text: string): void {
-    messages.push({ id: nextId++, type: "user", text });
+  export function addUserMessage(text: string, images: ImageAttachment[] = []): void {
+    messages.push({ id: nextId++, type: "user", text, images: images.slice() });
   }
 
   export function addAssistantMessage(text: string): void {
@@ -114,6 +127,8 @@
 
   export function clearMessages(): void {
     messages = [];
+    attachments = [];
+    if (fileInputEl) fileInputEl.value = "";
     selection = null;
     hideThinking();
   }
@@ -146,10 +161,17 @@
 
   function handleSend(): void {
     const text = inputText.trim();
-    if (!text) return;
+    if (!text && attachments.length === 0) return;
+
+    if (askUserResolve && attachments.length > 0) {
+      new Notice("Image attachments are not supported when answering a tool question.");
+      return;
+    }
 
     inputText = "";
     resetHeight();
+    const sentImages = attachments.slice();
+    attachments = [];
 
     if (askUserResolve) {
       addUserMessage(text);
@@ -162,10 +184,11 @@
     // Pass current selection and consume it (one-shot per send)
     const currentSelection = selection;
     selection = null;
-    onSend(text, currentSelection);
+    onSend(text, currentSelection, sentImages);
   }
 
   function handleKeydown(e: KeyboardEvent): void {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -181,6 +204,142 @@
   function resetHeight(): void {
     if (!textareaEl) return;
     textareaEl.style.height = "auto";
+  }
+
+  function imageDataUrl(image: ImageAttachment): string {
+    return `data:${image.mediaType};base64,${image.data}`;
+  }
+
+  function openImagePicker(): void {
+    if (inputEnabled) fileInputEl?.click();
+  }
+
+  async function handleImageSelection(event: Event): Promise<void> {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement)) return;
+    const files = Array.from(input.files ?? []);
+    input.value = "";
+    await addImageFiles(files);
+  }
+
+  function handlePaste(event: ClipboardEvent): void {
+    const files = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addImageFiles(files);
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
+    for (const file of files) {
+      if (attachments.length >= MAX_IMAGE_COUNT) {
+        new Notice(`Attach up to ${MAX_IMAGE_COUNT} images per message.`);
+        return;
+      }
+
+      try {
+        const image = await readImageAttachment(file);
+        const currentBytes = attachments.reduce((total, item) => total + item.sizeBytes, 0);
+        if (currentBytes + image.sizeBytes > MAX_TOTAL_IMAGE_BYTES) {
+          new Notice("The combined image size must be 12 MB or less per message.");
+          return;
+        }
+        attachments = [...attachments, image];
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        new Notice(`Could not attach ${file.name || "image"}: ${message}`);
+      }
+    }
+  }
+
+  async function readImageAttachment(file: File): Promise<ImageAttachment> {
+    let mediaType = file.type.toLowerCase() || inferImageMimeType(file.name);
+    const isHeic = mediaType === "image/heic" || mediaType === "image/heif" ||
+      /\.(heic|heif)$/i.test(file.name);
+    let source: Blob = file;
+
+    if (mediaType === "image/svg+xml") {
+      throw new Error("SVG images are not supported. Choose a raster image instead.");
+    }
+    if (!mediaType.startsWith("image/")) {
+      throw new Error("Choose an image file.");
+    }
+
+    if (isHeic || !SUPPORTED_IMAGE_TYPES.has(mediaType) || file.size > MAX_IMAGE_BYTES) {
+      if (mediaType === "image/gif") {
+        throw new Error("GIF files must be 5 MB or smaller.");
+      }
+      try {
+        const bitmap = await createImageBitmap(file);
+        const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Image conversion is unavailable.");
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close();
+        mediaType = mediaType === "image/png" ? "image/png" : "image/jpeg";
+        source = await new Promise<Blob>((resolve, reject) => {
+          canvas.toBlob(
+            (blob) => blob ? resolve(blob) : reject(new Error("Image conversion failed.")),
+            mediaType,
+            0.85,
+          );
+        });
+      } catch {
+        throw new Error("This image could not be converted. Try JPEG or PNG instead.");
+      }
+    }
+
+    if (!SUPPORTED_IMAGE_TYPES.has(mediaType)) {
+      throw new Error("Use a JPEG, PNG, GIF, or WebP image.");
+    }
+    if (source.size > MAX_IMAGE_BYTES) {
+      throw new Error("Images must be 5 MB or smaller after conversion.");
+    }
+
+    const dataUrl = await readAsDataUrl(source);
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) throw new Error("Image could not be read.");
+    return {
+      id: `image-${Date.now()}-${nextId++}`,
+      fileName: file.name || `image.${mediaType.split("/")[1]}`,
+      mediaType,
+      data: dataUrl.slice(comma + 1),
+      sizeBytes: source.size,
+    };
+  }
+
+  function inferImageMimeType(fileName: string): string {
+    const extension = fileName.split(".").pop()?.toLowerCase();
+    const types: Record<string, string> = {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      gif: "image/gif",
+      webp: "image/webp",
+      heic: "image/heic",
+      heif: "image/heif",
+    };
+    return extension ? types[extension] ?? "" : "";
+  }
+
+  function readAsDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === "string"
+        ? resolve(reader.result)
+        : reject(new Error("Image could not be read."));
+      reader.onerror = () => reject(new Error("Image could not be read."));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function removeAttachment(id: string): void {
+    attachments = attachments.filter((image) => image.id !== id);
   }
 
   // Render markdown into a DOM node using Obsidian's renderer
@@ -224,7 +383,16 @@
     {#each messages as msg (msg.id)}
       {#if msg.type === "user"}
         <div class="ochatting-msg ochatting-user-msg">
-          <div class="ochatting-msg-content">{msg.text}</div>
+          {#if msg.images?.length}
+            <div class="ochatting-user-images">
+              {#each msg.images as image (image.id)}
+                <img src={imageDataUrl(image)} alt={image.fileName} />
+              {/each}
+            </div>
+          {/if}
+          {#if msg.text}
+            <div class="ochatting-msg-content">{msg.text}</div>
+          {/if}
         </div>
 
       {:else if msg.type === "assistant"}
@@ -290,8 +458,45 @@
     </div>
   {/if}
 
+  {#if attachments.length > 0}
+    <div class="ochatting-attachment-tray" aria-label="Image attachments">
+      {#each attachments as image (image.id)}
+        <div class="ochatting-attachment-preview">
+          <img src={imageDataUrl(image)} alt={image.fileName} />
+          <span title={image.fileName}>{image.fileName}</span>
+          <button
+            class="ochatting-attachment-remove"
+            type="button"
+            onclick={() => removeAttachment(image.id)}
+            disabled={!inputEnabled}
+            aria-label={`Remove ${image.fileName}`}
+          >×</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   <!-- Input bar -->
   <div class="ochatting-input-bar">
+    <input
+      bind:this={fileInputEl}
+      class="ochatting-file-input"
+      type="file"
+      accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif"
+      multiple
+      onchange={handleImageSelection}
+      aria-label="Choose images"
+    />
+    <button
+      class="ochatting-attach-btn"
+      type="button"
+      onclick={openImagePicker}
+      disabled={!inputEnabled || attachments.length >= MAX_IMAGE_COUNT}
+      aria-label="Attach images"
+      title="Attach images"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+    </button>
     <textarea
       class="ochatting-input"
       bind:this={textareaEl}
@@ -300,6 +505,7 @@
       disabled={!inputEnabled}
       rows="1"
       onkeydown={handleKeydown}
+      onpaste={handlePaste}
       oninput={autoGrow}
     ></textarea>
     {#if inputEnabled}
@@ -401,6 +607,20 @@
     background: var(--interactive-accent);
     color: var(--text-on-accent);
     border-bottom-right-radius: var(--radius-s);
+  }
+
+  .ochatting-user-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .ochatting-user-images img {
+    max-width: min(100%, 280px);
+    max-height: 220px;
+    border-radius: var(--radius-s);
+    object-fit: contain;
   }
 
   .ochatting-assistant-msg {
@@ -523,6 +743,67 @@
   }
 
   /* ─── Input Bar ─────────────────────────────────────────────────────── */
+  .ochatting-file-input {
+    display: none;
+  }
+
+  .ochatting-attachment-tray {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 8px 12px 0;
+    flex-shrink: 0;
+  }
+
+  .ochatting-attachment-preview {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 190px;
+    min-width: 190px;
+    padding: 5px 28px 5px 5px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background: var(--background-secondary);
+  }
+
+  .ochatting-attachment-preview img {
+    width: 38px;
+    height: 38px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    object-fit: cover;
+  }
+
+  .ochatting-attachment-preview span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ochatting-attachment-remove {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--background-modifier-hover);
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .ochatting-attachment-remove:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
   .ochatting-input-bar {
     display: flex;
     align-items: flex-end;
@@ -532,6 +813,33 @@
     border-top: 1px solid var(--background-modifier-border);
     background: transparent;
     flex-shrink: 0;
+  }
+
+  .ochatting-attach-btn {
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .ochatting-attach-btn:hover {
+    background: var(--background-modifier-hover);
+    color: var(--text-normal);
+  }
+
+  .ochatting-attach-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
   }
 
   .ochatting-input {

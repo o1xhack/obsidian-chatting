@@ -32,9 +32,19 @@ export const CHATGPT_OAUTH_DEFAULT_MODEL = "gpt-5.5";
 
 // ─── Unified Message Format ─────────────────────────────────────────────────
 
+export interface ImageAttachment {
+  id: string;
+  fileName: string;
+  mediaType: string;
+  /** Base64 image bytes without the data-URL prefix. */
+  data: string;
+  sizeBytes: number;
+}
+
 export interface ContentBlock {
-  type: "text" | "tool_use" | "tool_result";
+  type: "text" | "image" | "tool_use" | "tool_result";
   text?: string;
+  image?: ImageAttachment;
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
