@@ -140,6 +140,27 @@ function buildCurrentTurnInput(
           role: msg.role === "assistant" ? "assistant" : "user",
           content: msg.content,
         });
+      } else {
+        const content = msg.content.flatMap((block): Array<Record<string, unknown>> => {
+          if (block.type === "text" && block.text) {
+            return [{ type: "input_text", text: block.text }];
+          }
+          if (block.type === "image" && block.image) {
+            return [{
+              type: "input_image",
+              image_url: toImageDataUrl(block.image),
+              detail: "auto",
+            }];
+          }
+          return [];
+        });
+        if (content.length > 0) {
+          items.push({
+            type: "message",
+            role: msg.role === "assistant" ? "assistant" : "user",
+            content,
+          });
+        }
       }
     }
     return items;
@@ -171,17 +192,33 @@ function buildCurrentTurnInput(
     return items;
   }
 
-  // Text content
-  const text = lastMsg.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-  if (text) {
+  // Text and image content
+  const content = lastMsg.content.flatMap((block): Array<Record<string, unknown>> => {
+    if (block.type === "text" && block.text) {
+      return [{ type: "input_text", text: block.text }];
+    }
+    if (block.type === "image" && block.image) {
+      return [{
+        type: "input_image",
+        image_url: toImageDataUrl(block.image),
+        detail: "auto",
+      }];
+    }
+    return [];
+  });
+  if (content.length > 0) {
     items.push({
       type: "message",
       role: lastMsg.role === "assistant" ? "assistant" : "user",
-      content: text,
+      content,
     });
   }
 
   return items;
+}
+
+function toImageDataUrl(image: { mediaType: string; data: string }): string {
+  return `data:${image.mediaType};base64,${image.data}`;
 }
 
 // ─── Response Parsing ───────────────────────────────────────────────────────

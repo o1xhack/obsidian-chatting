@@ -3,7 +3,7 @@ import { mount, unmount } from "svelte";
 import type { Component } from "svelte";
 import type ChatPlugin from "../main";
 import ChatContainer from "./ChatContainer.svelte";
-import type { ToolResult, SelectionScope } from "../types";
+import type { ToolResult, SelectionScope, ImageAttachment } from "../types";
 import { getModelDisplayName } from "../settings";
 
 export const VIEW_TYPE_CHAT = "ochatting-view";
@@ -13,13 +13,13 @@ interface ChatContainerProps {
   component: ObsidianChatView;
   provider: string;
   model: string;
-  onSend: (text: string, selection: SelectionScope | null) => void;
+  onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[]) => void;
   onClear: () => void;
   onStop: () => void;
 }
 
 interface ChatContainerApi extends Record<string, unknown> {
-  addUserMessage(text: string): void;
+  addUserMessage(text: string, images?: ImageAttachment[]): void;
   addAssistantMessage(text: string): void;
   addToolCall(name: string, input: Record<string, unknown>): number;
   updateToolResult(msgId: number, name: string, result: ToolResult): void;
@@ -79,8 +79,8 @@ export class ObsidianChatView extends ItemView {
         component: this,
         provider: this.plugin.settings.provider,
         model: getModelDisplayName(this.plugin.settings.provider, this.plugin.settings.model),
-        onSend: (text: string, selection: SelectionScope | null) => {
-          void this.handleUserMessage(text, selection);
+        onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[]) => {
+          void this.handleUserMessage(text, selection, images);
         },
         onClear: () => this.handleClear(),
         onStop: () => this.handleStop(),
@@ -91,7 +91,7 @@ export class ObsidianChatView extends ItemView {
     for (const msg of this.plugin.chatHistory) {
       switch (msg.type) {
         case "user":
-          this.chatContainer.addUserMessage(msg.text!);
+          this.chatContainer.addUserMessage(msg.text!, msg.images);
           break;
         case "assistant":
           this.chatContainer.addAssistantMessage(msg.text!);
@@ -151,7 +151,8 @@ export class ObsidianChatView extends ItemView {
 
   private async handleUserMessage(
     text: string,
-    selection: SelectionScope | null
+    selection: SelectionScope | null,
+    images: ImageAttachment[] = []
   ): Promise<void> {
     if (this.running) {
       new Notice("Please wait for the current response to complete.");
@@ -162,8 +163,8 @@ export class ObsidianChatView extends ItemView {
     const history = this.plugin.chatHistory;
 
     this.running = true;
-    chat.addUserMessage(text);
-    history.push({ type: "user", text });
+    chat.addUserMessage(text, images);
+    history.push({ type: "user", text, images });
     chat.setInputEnabled(false);
 
     const toolCallIds = new Map<string, number>();
@@ -204,7 +205,7 @@ export class ObsidianChatView extends ItemView {
           chat.addError(error);
           history.push({ type: "error", text: error });
         },
-      }, selection);
+      }, selection, images);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       chat.addError(`Unexpected error: ${msg}`);
