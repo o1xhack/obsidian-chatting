@@ -23,6 +23,7 @@ const bundled = await build({
       export class Modal {}
       export class PluginSettingTab {}
       export class Setting {}
+      export const requireApiVersion = () => globalThis.__supportsNewObsidian === true;
       export class Notice {}
       export class TFile { constructor(path) { this.path = path; this.extension = 'md'; } }
       export const normalizePath = path => path;
@@ -598,7 +599,9 @@ test('Declarative settings stay searchable and reuse the legacy renderers withou
   plugin.settings.provider='chatgpt-oauth'; assert.equal(definitions[1].visible(),false); assert.equal(definitions[2].visible(),true);
   let updates=0,displays=0; tab.display=()=>displays++;
   tab.refreshSettingsTab(); assert.equal(displays,1);
+  globalThis.__supportsNewObsidian=true;
   tab.update=()=>updates++; tab.refreshSettingsTab(); assert.equal(updates,1); assert.equal(displays,1);
+  globalThis.__supportsNewObsidian=false;
 });
 test('OAuth catalog refuses to associate a new account credential with an old cache identity', async () => {
   const state={entries:[]};

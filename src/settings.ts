@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, requireApiVersion, type SettingDefinitionItem } from "obsidian";
 import type ChatPlugin from "./main";
 import type { Provider } from "./types";
 import { CHATGPT_OAUTH_DEFAULT_MODEL, DEFAULT_PROVIDER_MODELS } from "./types";
@@ -66,7 +66,7 @@ export class ChatSettingTab extends PluginSettingTab {
   }
 
   private refreshSettingsTab(): void {
-    if (typeof this.update === "function") this.update();
+    if (requireApiVersion("1.13.0")) this.update();
     else this.display();
   }
 
@@ -243,10 +243,9 @@ export class ChatSettingTab extends PluginSettingTab {
       (row ?? new Setting(containerEl))
         .setName("ChatGPT account")
         .setDesc(`Connected — account ${account}. Token expires ${expires}.`)
-        .addButton((button) =>
+        .addButton((button) => {
           button
             .setButtonText("Disconnect")
-            .setWarning()
             .onClick(async () => {
               this.plugin.chatgptOAuth.clearCredential();
               clearCatalogModels("chatgpt-oauth");
