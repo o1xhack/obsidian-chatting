@@ -9,7 +9,14 @@ export interface ChatSettings {
   model: string;
   maxIterations: number;
   enableWebSearch: boolean;
+  modelCatalog?: import("./api/model-catalog").CatalogState;
 }
+
+export const DEFAULT_PROVIDER_MODELS: Record<Provider, string> = {
+  anthropic: "claude-sonnet-4-6",
+  openai: "gpt-6.1-sol",
+  "chatgpt-oauth": "gpt-5.5",
+};
 
 export const DEFAULT_SETTINGS: ChatSettings = {
   provider: "anthropic",
@@ -22,11 +29,8 @@ export const DEFAULT_SETTINGS: ChatSettings = {
 /**
  * Default model for the ChatGPT OAuth provider.
  *
- * Mirrors the priority-0 entry in the official Codex CLI's bundled
- * `models.json`. The Codex backend rejects models that aren't on this short
- * approved list (the error message shape is `"The 'X' model is not supported
- * when using Codex with a ChatGPT account."`), so we deliberately don't
- * default to anything outside it.
+ * Confirmed working in user reports. Other Codex model IDs may be unavailable
+ * to a particular ChatGPT account even when listed in the CLI catalog.
  */
 export const CHATGPT_OAUTH_DEFAULT_MODEL = "gpt-5.5";
 
@@ -56,6 +60,15 @@ export interface ContentBlock {
 export interface UnifiedMessage {
   role: "user" | "assistant";
   content: string | ContentBlock[];
+  /** Exact provider output for replay, separate from user-visible content. */
+  replay?: ProviderReplay;
+}
+
+export interface ProviderReplay {
+  provider: Provider;
+  model?: string;
+  identity?: string;
+  items: Record<string, unknown>[];
 }
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
@@ -70,7 +83,8 @@ export interface UnifiedToolDef {
 
 export interface UnifiedResponse {
   content: ContentBlock[];
-  stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop";
+  stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop" | "pause_turn";
+  replay?: ProviderReplay;
   usage?: {
     inputTokens: number;
     outputTokens: number;

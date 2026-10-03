@@ -14,12 +14,13 @@ import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
+import { trimHistory } from "./history";
 
 const MAX_CONVERSATION_LENGTH = 50;
 const KEEP_RECENT = 40;
 
 // Debug logging: writes transcript to the vault's plugin config folder
-const DEBUG = true;
+const DEBUG = false;
 
 function debugLog(app: App, label: string, data: unknown): void {
   if (!DEBUG) return;
@@ -48,6 +49,7 @@ export class AgentLoop {
   private app: App;
   private settings: ChatSettings;
   private aborted = false;
+  private runVersion = 0;
 
   constructor(app: App, settings: ChatSettings) {
     this.app = app;
@@ -57,10 +59,12 @@ export class AgentLoop {
   /** Abort a running loop (e.g. user navigates away) */
   abort(): void {
     this.aborted = true;
+    this.runVersion++;
   }
 
   /** Clear conversation history */
   clear(): void {
+    this.runVersion++;
     this.messages = [];
     this.aborted = false;
     clearOpenAIState();
@@ -68,13 +72,15 @@ export class AgentLoop {
   }
 
   /** Export API messages for persistence */
-  exportMessages(): UnifiedMessage[] {
-    return this.messages;
+  exportMessages(limit = 80): UnifiedMessage[] {
+    return trimHistory(this.messages, limit);
   }
 
   /** Restore API messages from persistence */
   importMessages(messages: UnifiedMessage[]): void {
-    this.messages = messages;
+    this.messages = trimHistory(messages, KEEP_RECENT);
+    clearOpenAIState();
+    clearChatGPTOAuthState();
   }
 
   /** Export the full conversation as a readable markdown transcript */
@@ -145,6 +151,10 @@ export class AgentLoop {
     images: ImageAttachment[] = []
   ): Promise<void> {
     this.aborted = false;
+    const version = ++this.runVersion;
+    const isStopped = () => this.aborted || version !== this.runVersion;
+    // Keep one provider/model/credential configuration for this entire turn.
+    const turnSettings = { ...this.settings };
 
     // Build context once per user turn and prepend to the user message
     const context = buildContext(this.app);
@@ -188,22 +198,25 @@ export class AgentLoop {
       imageNames: images.map((image) => image.fileName),
     });
 
-    const maxIterations = this.settings.maxIterations || 20;
+    const maxIterations = turnSettings.maxIterations || 20;
 
     for (let i = 0; i < maxIterations; i++) {
-      if (this.aborted) return;
+      if (isStopped()) return;
 
       callbacks.onThinking();
+      if (isStopped()) return;
 
       let response;
       try {
         response = await sendMessage(
-          this.settings,
+          turnSettings,
           this.messages,
           TOOL_DEFINITIONS,
-          systemPrompt
+          systemPrompt,
+          isStopped
         );
       } catch (e) {
+        if (isStopped()) return;
         const msg = e instanceof Error ? e.message : String(e);
         debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
         callbacks.onError(msg);
@@ -212,7 +225,15 @@ export class AgentLoop {
 
       debugLog(this.app, "API_RESPONSE", { stopReason: response.stopReason, contentTypes: response.content.map(b => b.type), usage: response.usage });
 
-      if (this.aborted) return;
+      if (isStopped()) return;
+
+      // Do not execute or persist truncated tool arguments as a completed call.
+      if (response.stopReason === "max_tokens") {
+        const text = response.content.filter(block => block.type === "text").map(block => block.text).join("");
+        if (text) callbacks.onResponse(text);
+        callbacks.onError("The response reached its token limit before completing. Please try a smaller request.");
+        return;
+      }
 
       // Process response content blocks
       const toolCalls: ContentBlock[] = [];
@@ -233,24 +254,33 @@ export class AgentLoop {
         callbacks.onResponse(textParts.join(""));
       }
 
+      if (isStopped()) return;
+
       // Append assistant message to history
-      this.messages.push({ role: "assistant", content: response.content });
+      this.messages.push({ role: "assistant", content: response.content, replay: response.replay });
 
       // If no tool calls, we're done
       if (toolCalls.length === 0) {
         if (textParts.length > 0) {
           callbacks.onResponse(textParts.join(""));
         }
+        if (response.stopReason === "pause_turn") continue;
         return;
       }
 
       // Execute tool calls and collect results
-      const resultBlocks: ContentBlock[] = [];
+      // Install cancellation results immediately: Stop may allow another user
+      // turn or persistence while a vault operation is still in flight.
+      const resultBlocks: ContentBlock[] = toolCalls.map(tc => ({
+        type: "tool_result", tool_use_id: tc.id,
+        content: "Tool execution cancelled before completion.", is_error: true,
+      }));
+      this.messages.push({ role: "user", content: resultBlocks });
 
-      for (const tc of toolCalls) {
-        if (this.aborted) return;
-
+      for (const [index, tc] of toolCalls.entries()) {
+        if (isStopped()) return;
         callbacks.onToolCall(tc.name!, tc.input!);
+        if (isStopped()) return;
 
         const result = await executeTool(
           this.app,
@@ -259,18 +289,17 @@ export class AgentLoop {
           callbacks.onAskUser
         );
 
-        callbacks.onToolResult(tc.name!, result);
-
-        resultBlocks.push({
+        if (isStopped()) return;
+        resultBlocks[index] = {
           type: "tool_result",
           tool_use_id: tc.id,
           content: result.result,
           is_error: result.isError,
-        });
+        };
+        callbacks.onToolResult(tc.name!, result);
       }
 
-      // Append tool results as user message
-      this.messages.push({ role: "user", content: resultBlocks });
+      if (isStopped()) return;
     }
 
     // If we get here, we hit the iteration limit
@@ -282,7 +311,7 @@ export class AgentLoop {
   /** Drop oldest messages when conversation gets too long, keeping recent context */
   private pruneHistory(): void {
     if (this.messages.length > MAX_CONVERSATION_LENGTH) {
-      this.messages = this.messages.slice(-KEEP_RECENT);
+      this.messages = trimHistory(this.messages, KEEP_RECENT);
     }
   }
 }

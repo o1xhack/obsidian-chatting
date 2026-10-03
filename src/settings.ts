@@ -1,44 +1,34 @@
-import { App, Modal, Notice, PluginSettingTab, Setting, requestUrl } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, requireApiVersion, type SettingDefinitionItem } from "obsidian";
 import type ChatPlugin from "./main";
 import type { Provider } from "./types";
-import { CHATGPT_OAUTH_DEFAULT_MODEL } from "./types";
+import { CHATGPT_OAUTH_DEFAULT_MODEL, DEFAULT_PROVIDER_MODELS } from "./types";
 import type { ChatGPTDeviceAuthorization, PollHandle } from "./auth/chatgptOAuth";
 
-interface ModelOption {
-  value: string;
-  label: string;
-}
+import { type ModelOption, type CatalogState, catalogIdentity, cachedCatalog, refreshCatalog, getCatalogModels, clearCatalogModels, CATALOG_TTL } from "./api/model-catalog";
 
 const FALLBACK_MODELS: Record<string, ModelOption[]> = {
   anthropic: [
     { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { value: "claude-opus-4-7", label: "Claude Opus 4.7" },
+    { value: "claude-opus-5-5", label: "Claude Opus 5.5" },
     { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
   ],
   openai: [
-    { value: "gpt-5.3-codex", label: "Codex 5.3" },
-    { value: "gpt-5.4", label: "GPT-5.4" },
+    { value: "gpt-6.1-sol", label: "GPT-6.1 Sol" },
+    { value: "gpt-5.5", label: "GPT-5.5" },
     { value: "gpt-4o", label: "GPT-4o" },
   ],
-  // Mirrors the bundled `models.json` shipped with the official OpenAI Codex
-  // CLI. These are the slugs the Codex backend currently accepts when the
-  // request is authenticated with a ChatGPT account. Sorted by Codex CLI
-  // priority (lowest first = recommended). Update when upstream changes.
+  // CLI catalog entries are not guaranteed to be available to every account.
+  // Keep the default confirmed by user reports; other IDs remain customizable.
   "chatgpt-oauth": [
     { value: "gpt-5.5", label: "GPT-5.5 (recommended)" },
-    { value: "gpt-5.4", label: "GPT-5.4" },
-    { value: "gpt-5.4-mini", label: "GPT-5.4-Mini" },
-    { value: "gpt-5.3-codex", label: "GPT-5.3-Codex" },
-    { value: "gpt-5.2", label: "GPT-5.2" },
   ],
 };
 
-// Cache fetched models per provider so they survive tab re-opens
-const modelCache = new Map<string, ModelOption[]>();
+
 
 /** Resolve a model ID to its display name */
 export function getModelDisplayName(provider: string, modelId: string): string {
-  const cached = modelCache.get(provider);
+  const cached = getCatalogModels(provider as Provider);
   const models = cached || FALLBACK_MODELS[provider] || [];
   const match = models.find((m) => m.value === modelId);
   return match?.label || modelId;
@@ -48,10 +38,36 @@ export function getModelDisplayName(provider: string, modelId: string): string {
 
 export class ChatSettingTab extends PluginSettingTab {
   plugin: ChatPlugin;
+  private catalogModels?: ModelOption[];
+  private catalogIdentity = "";
+  private loadingCatalog = false;
+  private catalogError = "";
+  private apiKeyEditing = false;
+  private apiKeyTimer?: number;
 
   constructor(app: App, plugin: ChatPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  // Obsidian 1.13+ indexes these definitions; older versions retain display().
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      { name: "Provider", render: setting => this.renderProvider(setting) },
+      { name: "API key", visible: () => this.plugin.settings.provider !== "chatgpt-oauth", render: setting => this.renderApiKeySection(setting.settingEl.parentElement!, setting) },
+      { name: "ChatGPT account", visible: () => this.plugin.settings.provider === "chatgpt-oauth", render: setting => this.renderChatGPTOAuthSection(setting.settingEl.parentElement!, setting) },
+      { name: "Model", aliases: ["Custom model ID", "Refresh models"], render: setting => {
+        this.renderModelSection(setting.settingEl.parentElement!, setting);
+        void this.loadCatalog(false);
+      } },
+      { name: "Web search", render: setting => this.renderWebSearch(setting) },
+      { name: "Max tool iterations", render: setting => this.renderMaxIterations(setting) },
+    ];
+  }
+
+  private refreshSettingsTab(): void {
+    if (requireApiVersion("1.13.0")) this.update();
+    else this.display();
   }
 
   display(): void {
@@ -59,8 +75,27 @@ export class ChatSettingTab extends PluginSettingTab {
     containerEl.empty();
     const s = this.plugin.settings;
 
+    this.renderProvider(new Setting(containerEl));
+
+    // ─── Auth section: API key OR OAuth Connect ───────────────────────
+    if (s.provider === "chatgpt-oauth") {
+      this.renderChatGPTOAuthSection(containerEl);
+    } else {
+      this.renderApiKeySection(containerEl);
+    }
+
+    // ─── Model ────────────────────────────────────────────────────────
+    this.renderModelSection(containerEl);
+    void this.loadCatalog(false);
+
+    this.renderWebSearch(new Setting(containerEl));
+    this.renderMaxIterations(new Setting(containerEl));
+  }
+
+  private renderProvider(setting: Setting): void {
+    const s = this.plugin.settings;
     // ─── Provider ─────────────────────────────────────────────────────
-    new Setting(containerEl)
+    setting
       .setName("Provider")
       .setDesc("Which AI provider to use")
       .addDropdown((dropdown) =>
@@ -72,30 +107,21 @@ export class ChatSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             // Load the new provider's key BEFORE saving,
             // otherwise the old provider's key gets saved under the new provider name
+            clearCatalogModels(s.provider);
+            this.catalogModels = undefined;
+            this.catalogIdentity = "";
             s.provider = value as Provider;
-            s.model = "";
+            s.model = DEFAULT_PROVIDER_MODELS[s.provider];
             this.plugin.reloadApiKeyForProvider();
-            // Set a sensible default model for chatgpt-oauth (no API to fetch from)
-            if (s.provider === "chatgpt-oauth" && !s.model) {
-              s.model = CHATGPT_OAUTH_DEFAULT_MODEL;
-            }
             await this.plugin.saveSettings();
-            window.setTimeout(() => this.display(), 10);
+            window.setTimeout(() => this.refreshSettingsTab(), 10);
           })
       );
 
-    // ─── Auth section: API key OR OAuth Connect ───────────────────────
-    if (s.provider === "chatgpt-oauth") {
-      this.renderChatGPTOAuthSection(containerEl);
-    } else {
-      this.renderApiKeySection(containerEl);
-    }
-
-    // ─── Model ────────────────────────────────────────────────────────
-    this.renderModelSection(containerEl);
-
-    // ─── Web search ───────────────────────────────────────────────────
-    new Setting(containerEl)
+  }
+  private renderWebSearch(setting: Setting): void {
+    const s = this.plugin.settings;
+    setting
       .setName("Web search")
       .setDesc("Allow the model to search the web when it needs current information")
       .addToggle((toggle) =>
@@ -107,8 +133,10 @@ export class ChatSettingTab extends PluginSettingTab {
           })
       );
 
-    // ─── Max iterations ───────────────────────────────────────────────
-    new Setting(containerEl)
+  }
+  private renderMaxIterations(setting: Setting): void {
+    const s = this.plugin.settings;
+    setting
       .setName("Max tool iterations")
       .setDesc("Safety limit for the agent loop (default: 20)")
       .addText((text) =>
@@ -127,10 +155,10 @@ export class ChatSettingTab extends PluginSettingTab {
 
   // ─── API key + test (anthropic / openai) ──────────────────────────────────
 
-  private renderApiKeySection(containerEl: HTMLElement): void {
+  private renderApiKeySection(containerEl: HTMLElement, row?: Setting): void {
     const s = this.plugin.settings;
 
-    const apiKeySetting = new Setting(containerEl)
+    const apiKeySetting = (row ?? new Setting(containerEl))
       .setName("API key")
       .setDesc(s.apiKey ? "Key saved" : "Enter your API key to get started")
       .addText((text) => {
@@ -139,12 +167,22 @@ export class ChatSettingTab extends PluginSettingTab {
           .setPlaceholder("Enter your API key")
           .setValue(s.apiKey)
           .onChange(async (value) => {
-            const hadKey = !!s.apiKey;
+            this.apiKeyEditing = true;
+            window.clearTimeout(this.apiKeyTimer);
+            const hadKey = s.apiKey;
             s.apiKey = value.trim();
+            const editedKey = s.apiKey;
             await this.plugin.saveSettings();
-            if (!hadKey && s.apiKey) {
-              window.setTimeout(() => this.display(), 10);
+            if (s.apiKey !== editedKey) return;
+            if (hadKey !== s.apiKey) {
+              clearCatalogModels(s.provider);
+              this.catalogModels = undefined;
+              this.catalogIdentity = "";
             }
+            this.apiKeyTimer = window.setTimeout(() => {
+              this.apiKeyEditing = false;
+              this.refreshSettingsTab();
+            }, 800);
           });
       });
 
@@ -182,18 +220,19 @@ export class ChatSettingTab extends PluginSettingTab {
 
   // ─── ChatGPT OAuth ────────────────────────────────────────────────────────
 
-  private renderChatGPTOAuthSection(containerEl: HTMLElement): void {
+  private renderChatGPTOAuthSection(containerEl: HTMLElement, row?: Setting): void {
     const credential = this.plugin.chatgptOAuth.getCredential();
 
-    const explainer = containerEl.createEl("div", {
+    const explainer = containerEl.createDiv({
       cls: "setting-item-description ochatting-oauth-explainer",
     });
+    if (row) row.settingEl.before(explainer);
     explainer.createSpan({
       text: "Sign in with your ChatGPT account instead of using an OpenAI API key. Requests are routed through the ChatGPT/Codex backend (not ",
     });
     explainer.createEl("code", { text: "api.openai.com" });
     explainer.createSpan({
-      text: ") and require an active ChatGPT plan with Codex access. The available models mirror the Codex CLI catalog.",
+      text: ") and require an active ChatGPT plan with Codex access. Refresh the model list to see the catalog for your account. Listed models may still depend on account permissions.",
     });
 
     if (credential) {
@@ -201,19 +240,27 @@ export class ChatSettingTab extends PluginSettingTab {
         ? maskAccountId(credential.accountId)
         : "(no account id)";
       const expires = new Date(credential.expiresAt).toLocaleString();
-      new Setting(containerEl)
+      (row ?? new Setting(containerEl))
         .setName("ChatGPT account")
         .setDesc(`Connected — account ${account}. Token expires ${expires}.`)
-        .addButton((button) =>
+        .addButton((button) => {
           button
             .setButtonText("Disconnect")
-            .setWarning()
             .onClick(async () => {
               this.plugin.chatgptOAuth.clearCredential();
+              clearCatalogModels("chatgpt-oauth");
+              this.catalogModels = undefined;
+              this.catalogIdentity = "";
+              if (this.plugin.settings.modelCatalog) {
+                this.plugin.settings.modelCatalog.entries = this.plugin.settings.modelCatalog.entries.filter(e => e.provider !== "chatgpt-oauth");
+                await this.plugin.saveSettings();
+              }
               new Notice("ChatGPT OAuth disconnected.");
-              this.display();
-            })
-        )
+              this.refreshSettingsTab();
+            });
+          if (requireApiVersion("1.13.0")) button.setDestructive();
+          else button.setWarning();
+        })
         .addButton((button) =>
           button.setButtonText("Test").onClick(async () => {
             button.setButtonText("Testing...");
@@ -241,7 +288,7 @@ export class ChatSettingTab extends PluginSettingTab {
           })
         );
     } else {
-      new Setting(containerEl)
+      (row ?? new Setting(containerEl))
         .setName("ChatGPT account")
         .setDesc("Not connected. Sign in with ChatGPT to use this provider.")
         .addButton((button) =>
@@ -253,7 +300,7 @@ export class ChatSettingTab extends PluginSettingTab {
                 const auth = await this.plugin.chatgptOAuth.beginDeviceAuthorization();
                 const handle = this.plugin.chatgptOAuth.pollDeviceAuthorization(auth);
                 const modal = new ChatGPTDeviceLoginModal(this.app, auth, handle, () => {
-                  this.display();
+                  this.refreshSettingsTab();
                 });
                 modal.open();
               } catch (e) {
@@ -267,14 +314,14 @@ export class ChatSettingTab extends PluginSettingTab {
 
   // ─── Model picker ─────────────────────────────────────────────────────────
 
-  private renderModelSection(containerEl: HTMLElement): void {
+  private renderModelSection(containerEl: HTMLElement, row?: Setting): void {
     const s = this.plugin.settings;
-    const cached = modelCache.get(s.provider);
+    const cached = this.catalogModels;
     const models = cached || FALLBACK_MODELS[s.provider] || FALLBACK_MODELS.anthropic;
 
-    const modelSetting = new Setting(containerEl)
+    const modelSetting = (row ?? new Setting(containerEl))
       .setName("Model")
-      .setDesc(cached ? `${cached.length} models from API` : "Using defaults. Click refresh to load from API.")
+      .setDesc(this.catalogError || (cached ? `${cached.length} models. Cached for 24 hours; refresh to check now.` : "Using defaults. Models load automatically when connected."))
       .addDropdown((dropdown) => {
         for (const m of models) {
           dropdown.addOption(m.value, m.label);
@@ -291,7 +338,7 @@ export class ChatSettingTab extends PluginSettingTab {
           if (value === "__custom__") {
             s.model = "";
             await this.plugin.saveSettings();
-            window.setTimeout(() => this.display(), 10);
+            window.setTimeout(() => this.refreshSettingsTab(), 10);
           } else {
             s.model = value;
             await this.plugin.saveSettings();
@@ -299,39 +346,12 @@ export class ChatSettingTab extends PluginSettingTab {
         });
       });
 
-    // Refresh button — only for providers that ship a meaningful model
-    // catalog endpoint behind their auth.
-    //
-    // chatgpt-oauth is intentionally excluded. The Codex backend either
-    // returns the same five slugs we already hardcode, or returns the
-    // chat.com UI catalog (dash-form slugs the /responses endpoint then
-    // rejects). A live fetch adds zero value and creates confusing failure
-    // modes. Users who need a non-default Codex slug can pick "Custom...".
-    const canFetchModels =
-      (s.provider === "anthropic" && !!s.apiKey) ||
-      (s.provider === "openai" && !!s.apiKey);
+    const canFetchModels = s.provider === "chatgpt-oauth" ? !!this.plugin.chatgptOAuth.getCredential() : !!s.apiKey;
     if (canFetchModels) {
-      modelSetting.addButton((btn) =>
-        btn
-          .setIcon("refresh-cw")
-          .setTooltip("Fetch models from API")
-          .onClick(async () => {
-            btn.setDisabled(true);
-            try {
-              const fetched = await fetchModelsFromAPI(s.provider, s.apiKey);
-              modelCache.set(s.provider, fetched);
-              new Notice(`Loaded ${fetched.length} models`);
-              if (!s.model && fetched.length > 0) {
-                s.model = fetched[0].value;
-                await this.plugin.saveSettings();
-              }
-              this.display();
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              new Notice(`Failed to fetch models: ${msg}`);
-            }
-          })
-      );
+      modelSetting.addButton(btn => btn.setIcon("refresh-cw").setTooltip("Refresh models now")
+        .setDisabled(this.loadingCatalog).onClick(async () => {
+          await this.loadCatalog(true);
+        }));
     }
 
     // Custom model text field (shown when Custom... selected or model is empty)
@@ -356,6 +376,57 @@ export class ChatSettingTab extends PluginSettingTab {
         );
     }
   }
+  private credentialIdentity(): string {
+    const s = this.plugin.settings;
+    if (s.provider !== "chatgpt-oauth") return s.apiKey;
+    const credential = this.plugin.chatgptOAuth.getCredential();
+    return credential ? credential.accountId || credential.accessToken : "";
+  }
+
+  private async loadCatalog(force: boolean): Promise<void> {
+    if (this.loadingCatalog || this.apiKeyEditing) return;
+    const s = this.plugin.settings;
+    const provider = s.provider;
+    const secretIdentity = this.credentialIdentity();
+    if (!secretIdentity) return;
+    this.loadingCatalog = true;
+    const current = () => s.provider === provider && this.credentialIdentity() === secretIdentity;
+    let changed = false;
+    try {
+      const identity = await catalogIdentity(provider, secretIdentity);
+      if (!current()) return;
+      const state: CatalogState = s.modelCatalog ??= { entries: [] };
+      const cached = cachedCatalog(state, provider, identity);
+      if (this.catalogIdentity !== identity) {
+        this.catalogIdentity = identity;
+        this.catalogModels = cached?.models;
+        this.catalogError = "";
+        changed = true;
+      }
+      if (changed && cached) this.refreshSettingsTab();
+      if (!force && cached && Date.now() - cached.fetchedAt >= 0 && Date.now() - cached.fetchedAt < CATALOG_TTL) return;
+      const models = await refreshCatalog(state, provider, identity, s.apiKey, this.plugin.chatgptOAuth, force);
+      if (!current()) return;
+      if (models.length && this.catalogModels !== models) {
+        this.catalogModels = models;
+        changed = true;
+        await this.plugin.saveSettings();
+      }
+      this.catalogError = "";
+      if (force) new Notice(`Loaded ${models.length} models`);
+    } catch (error) {
+      if (current()) {
+        this.catalogError = "Could not refresh models. Keeping the last list; use refresh to retry.";
+        changed = true;
+        if (force) new Notice(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      this.loadingCatalog = false;
+      if (current() && (changed || force)) this.refreshSettingsTab();
+      else if (!current()) this.refreshSettingsTab();
+    }
+  }
+
 }
 
 // ─── Device-flow login modal ────────────────────────────────────────────────
@@ -380,7 +451,7 @@ class ChatGPTDeviceLoginModal extends Modal {
     contentEl.createEl("p", {
       text: "1. Open this page in any browser:",
     });
-    const linkRow = contentEl.createEl("div", { cls: "ochatting-device-link-row" });
+    const linkRow = contentEl.createDiv({ cls: "ochatting-device-link-row" });
     const link = linkRow.createEl("a", {
       text: this.authorization.verificationUri,
       href: this.authorization.verificationUri,
@@ -389,7 +460,7 @@ class ChatGPTDeviceLoginModal extends Modal {
     link.setAttr("rel", "noopener");
 
     contentEl.createEl("p", { text: "2. Enter this code on the page:" });
-    const codeRow = contentEl.createEl("div", { cls: "ochatting-device-code-row" });
+    const codeRow = contentEl.createDiv({ cls: "ochatting-device-code-row" });
 
     codeRow.createEl("code", {
       text: this.authorization.userCode,
@@ -409,7 +480,7 @@ class ChatGPTDeviceLoginModal extends Modal {
       cls: "ochatting-device-status",
     });
 
-    const buttons = contentEl.createEl("div", { cls: "ochatting-device-buttons" });
+    const buttons = contentEl.createDiv({ cls: "ochatting-device-buttons" });
 
     const openBtn = buttons.createEl("button", { text: "Open login page" });
     openBtn.classList.add("mod-cta");
@@ -453,103 +524,4 @@ class ChatGPTDeviceLoginModal extends Modal {
 function maskAccountId(accountId: string): string {
   if (accountId.length <= 8) return accountId;
   return `${accountId.slice(0, 4)}…${accountId.slice(-4)}`;
-}
-
-// ─── Model Fetching (only triggered by explicit refresh button click) ───────
-
-async function fetchModelsFromAPI(
-  provider: Provider,
-  apiKey: string
-): Promise<ModelOption[]> {
-  if (provider === "anthropic") {
-    return fetchAnthropicModels(apiKey);
-  }
-  if (provider === "openai") {
-    return fetchOpenAIModels(apiKey);
-  }
-  // chatgpt-oauth never reaches here — the refresh button is hidden for it.
-  // We return the bundled list for type-safety, in case a future caller
-  // bypasses the UI gate.
-  return FALLBACK_MODELS["chatgpt-oauth"];
-}
-
-async function fetchAnthropicModels(apiKey: string): Promise<ModelOption[]> {
-  let response;
-  try {
-    response = await requestUrl({
-      url: "https://api.anthropic.com/v1/models?limit=100",
-      method: "GET",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-    });
-  } catch (e) {
-    throw new Error(e instanceof Error ? e.message : String(e));
-  }
-
-  const models = getModelRecords(response.json as unknown)
-    .filter((m) => m.type === "model")
-    .filter((m): m is ModelRecord & { id: string } => typeof m.id === "string")
-    .map((m) => ({
-      value: m.id,
-      label: typeof m.display_name === "string" ? m.display_name : m.id,
-    }))
-    .sort((a: ModelOption, b: ModelOption) => {
-      const da = a.value.match(/(\d{8})/)?.[1] || "";
-      const db = b.value.match(/(\d{8})/)?.[1] || "";
-      return db.localeCompare(da) || a.label.localeCompare(b.label);
-    });
-
-  return models.length > 0 ? models : FALLBACK_MODELS.anthropic;
-}
-
-async function fetchOpenAIModels(apiKey: string): Promise<ModelOption[]> {
-  let response;
-  try {
-    response = await requestUrl({
-      url: "https://api.openai.com/v1/models",
-      method: "GET",
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-  } catch (e) {
-    throw new Error(e instanceof Error ? e.message : String(e));
-  }
-
-  const chatPrefixes = ["gpt-", "o1", "o3", "o4", "chatgpt-", "codex-", "gpt5"];
-  const excludePatterns = ["realtime", "audio", "transcri", "search"];
-
-  const models = getModelRecords(response.json as unknown)
-    .filter((m): m is ModelRecord & { id: string } => typeof m.id === "string")
-    .filter((m) => {
-      const id = m.id.toLowerCase();
-      return chatPrefixes.some((p) => id.startsWith(p)) &&
-        !excludePatterns.some((p) => id.includes(p));
-    })
-    .sort((a, b) =>
-      numberValue(b.created) - numberValue(a.created)
-    )
-    .map((m) => ({ value: m.id, label: m.id }));
-
-  return models.length > 0 ? models : FALLBACK_MODELS.openai;
-}
-
-interface ModelRecord {
-  id?: unknown;
-  type?: unknown;
-  display_name?: unknown;
-  created?: unknown;
-}
-
-function getModelRecords(value: unknown): ModelRecord[] {
-  if (!isRecord(value) || !Array.isArray(value.data)) return [];
-  return value.data.filter(isRecord);
-}
-
-function numberValue(value: unknown): number {
-  return typeof value === "number" ? value : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }

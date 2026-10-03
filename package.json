@@ -1,6 +1,6 @@
 {
   "name": "chatting-with-ai",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "author": {
     "name": "Yuxiao (o1xhack)",
@@ -15,6 +15,7 @@
     "url": "https://github.com/o1xhack/obsidian-chatting.git"
   },
   "scripts": {
+    "test": "node --test test/provider-history.test.mjs",
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
     "svelte-check": "svelte-check --tsconfig tsconfig.json",
@@ -26,10 +27,13 @@
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
     "esbuild-svelte": "^0.9.4",
-    "obsidian": "^1.11.4",
+    "obsidian": "1.13.1",
     "svelte": "^5.53.12",
     "svelte-check": "^4.4.5",
     "svelte-preprocess": "^6.0.3",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0"
   }
 }

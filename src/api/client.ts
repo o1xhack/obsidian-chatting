@@ -11,9 +11,11 @@ export async function sendMessage(
   settings: ChatSettings,
   messages: UnifiedMessage[],
   tools: UnifiedToolDef[],
-  systemPrompt: string
+  systemPrompt: string,
+  shouldStop: () => boolean = () => false,
 ): Promise<UnifiedResponse> {
   const doSend = () => {
+    if (shouldStop()) throw new Error("Request cancelled.");
     if (settings.provider === "anthropic") {
       return sendAnthropicMessage(settings, messages, tools, systemPrompt);
     }

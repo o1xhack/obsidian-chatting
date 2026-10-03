@@ -8,12 +8,13 @@ import {
   type TAbstractFile,
 } from "obsidian";
 import type { ChatSettings, SelectionScope, ImageAttachment } from "./types";
-import { DEFAULT_SETTINGS, CHATGPT_OAUTH_DEFAULT_MODEL } from "./types";
+import { DEFAULT_SETTINGS, DEFAULT_PROVIDER_MODELS } from "./types";
 import { ChatSettingTab, getModelDisplayName } from "./settings";
 import { ObsidianChatView, VIEW_TYPE_CHAT } from "./ui/chat-view";
 import { AgentLoop } from "./agent/loop";
 import { ChatGPTOAuthStore } from "./auth/chatgptOAuthStore";
 import { ChatGPTOAuthService } from "./auth/chatgptOAuth";
+import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, normalizeCatalogState } from "./api/model-catalog";
 import { setChatGPTOAuthService } from "./api/chatgpt-oauth";
 
 const PLUGIN_ID = "chatting-with-ai";
@@ -293,7 +294,7 @@ export default class ChatPlugin extends Plugin {
     try {
       const state = {
         chatHistory: this.chatHistory.slice(-100), // Cap at 100 UI messages
-        agentMessages: this.agent.exportMessages().slice(-80), // Cap at 80 API messages
+        agentMessages: this.agent.exportMessages(80), // Keep complete API turns
       };
       await this.app.vault.adapter.write(
         this.chatStatePath,
@@ -328,7 +329,7 @@ export default class ChatPlugin extends Plugin {
 
     // Fall back to default model if saved model is empty
     if (!this.settings.model) {
-      this.settings.model = DEFAULT_SETTINGS.model;
+      this.settings.model = DEFAULT_PROVIDER_MODELS[this.settings.provider];
     }
 
     // Migrate ChatGPT OAuth model slugs that an earlier release wrote with
@@ -510,6 +511,7 @@ function normalizeSettings(value: unknown): Partial<ChatSettings> {
   if (typeof value.model === "string") settings.model = value.model;
   if (typeof value.maxIterations === "number") settings.maxIterations = value.maxIterations;
   if (typeof value.enableWebSearch === "boolean") settings.enableWebSearch = value.enableWebSearch;
+  settings.modelCatalog = normalizeCatalogState(value.modelCatalog);
   return settings;
 }
 
@@ -519,50 +521,4 @@ function isProvider(value: unknown): value is ChatSettings["provider"] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-// ─── Settings migrations ─────────────────────────────────────────────────────
-
-/**
- * Migrate a saved ChatGPT OAuth model slug to a Codex-backend-compatible form.
- *
- * Background: 0.1.0 fetched the model list from `chatgpt.com/backend-api/models`
- * (the chat.com UI catalog) as a fallback. That endpoint returns dash-form
- * slugs like `gpt-5-5`, `gpt-5-2-pro` — which the Codex `/responses` endpoint
- * rejects with HTTP 400 ("model is not supported when using Codex with a
- * ChatGPT account"). 0.1.1+ uses the canonical Codex catalog, but settings
- * persisted before the upgrade still hold the broken slugs.
- *
- * Migration rules:
- *   - `gpt-5-N`           → `gpt-5.N`            (dash to dot version)
- *   - `gpt-5-N-codex`     → `gpt-5.N-codex`
- *   - `gpt-5-N-mini`      → `gpt-5.N-mini`
- *   - any other UI-catalog slug not on the known-good list → reset to the
- *     canonical default (`gpt-5.5`).
- */
-const KNOWN_GOOD_OAUTH_SLUGS = new Set([
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex",
-  "gpt-5.2",
-]);
-
-function migrateChatGPTOAuthModelSlug(slug: string): string {
-  if (!slug) return CHATGPT_OAUTH_DEFAULT_MODEL;
-  if (KNOWN_GOOD_OAUTH_SLUGS.has(slug)) return slug;
-
-  // Replace `gpt-5-N` (single-digit version after the model number) with
-  // `gpt-5.N`. Tail can be `-codex`, `-mini`, etc. We only touch the version
-  // dash, not other dashes — so `gpt-5-mini` (which means a *mini variant*,
-  // not a sub-version) stays put and falls through to the default.
-  const dashVersion = slug.match(/^gpt-(5)-(\d+)(.*)$/);
-  if (dashVersion) {
-    const candidate = `gpt-${dashVersion[1]}.${dashVersion[2]}${dashVersion[3]}`;
-    if (KNOWN_GOOD_OAUTH_SLUGS.has(candidate)) return candidate;
-  }
-
-  // Anything else (gpt-5-mini, gpt-5-5-pro, agent, deep-research, o3, …) isn't
-  // valid on the Codex backend. Reset to the safe default.
-  return CHATGPT_OAUTH_DEFAULT_MODEL;
 }

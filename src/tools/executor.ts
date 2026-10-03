@@ -18,6 +18,9 @@ export async function executeTool(
   input: Record<string, unknown>,
   onAskUser: AskUserCallback
 ): Promise<ToolResult> {
+  if (Object.prototype.hasOwnProperty.call(input, "_raw")) {
+    return { result: "Invalid tool arguments: provide a valid JSON object and retry.", isError: true };
+  }
   try {
     switch (toolName) {
       case "read_document":
@@ -405,7 +408,7 @@ async function setProperties(
   }
 
   // Use Obsidian's built-in processFrontMatter for safe YAML handling
-  await app.fileManager.processFrontMatter(file, (frontmatter) => {
+  await app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
     for (const [key, value] of Object.entries(props)) {
       if (value === null) {
         delete frontmatter[key];
