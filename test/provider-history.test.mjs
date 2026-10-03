@@ -7,6 +7,7 @@ const bundled = await build({
   stdin: { contents: `
     export { ChatSettingTab } from './src/settings';
     export * from './src/api/model-catalog';
+    export { sendMessage } from './src/api/client';
     export { AgentLoop } from './src/agent/loop';
     export { trimHistory } from './src/agent/history';
     export { sendAnthropicMessage } from './src/api/anthropic';
@@ -586,4 +587,33 @@ test('Agent freezes provider/model configuration for a multi-tool turn', async (
   await agent.run('read',callbacks({onToolCall(){config.model='claude-opus-5-5';config.provider='openai';config.apiKey='changed';}}));
   assert.equal(requests.length,2);
   assert.equal(requests[0].model,requests[1].model);
+});
+
+test('Declarative settings stay searchable and reuse the legacy renderers without fetching during indexing', () => {
+  const plugin={settings:settings('openai')}; const tab=new api.ChatSettingTab({},plugin);
+  globalThis.__providerRequest=async()=>assert.fail('Indexing must not perform network I/O');
+  const definitions=tab.getSettingDefinitions();
+  assert.deepEqual(definitions.map(d=>d.name),['Provider','API key','ChatGPT account','Model','Web search','Max tool iterations']);
+  assert.equal(definitions[1].visible(),true); assert.equal(definitions[2].visible(),false);
+  plugin.settings.provider='chatgpt-oauth'; assert.equal(definitions[1].visible(),false); assert.equal(definitions[2].visible(),true);
+  let updates=0,displays=0; tab.display=()=>displays++;
+  tab.refreshSettingsTab(); assert.equal(displays,1);
+  tab.update=()=>updates++; tab.refreshSettingsTab(); assert.equal(updates,1); assert.equal(displays,1);
+});
+test('OAuth catalog refuses to associate a new account credential with an old cache identity', async () => {
+  const state={entries:[]};
+  const identity=await api.catalogIdentity('chatgpt-oauth','previous-account');
+  globalThis.__providerRequest=async()=>assert.fail('Wrong account must not make a catalog request');
+  await assert.rejects(api.refreshCatalog(state,'chatgpt-oauth',identity,'',{getUsableCredential:async()=>({accessToken:'fake',accountId:'new-account'})},true),/account changed/);
+  assert.deepEqual(state.entries,[]);
+});
+test('Stopping during rate-limit backoff prevents the retried network request', async () => {
+  let stopped=false,requests=0;
+  const previousWindow=globalThis.window;
+  globalThis.window={setTimeout(fn){stopped=true;queueMicrotask(fn);}};
+  globalThis.__providerRequest=async()=>{requests++;throw new Error('HTTP 429');};
+  try {
+    await assert.rejects(api.sendMessage(settings('openai'),[{role:'user',content:'test'}],[],'test',()=>stopped),/cancelled/);
+    assert.equal(requests,1);
+  } finally { globalThis.window=previousWindow; }
 });

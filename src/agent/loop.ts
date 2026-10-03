@@ -212,7 +212,8 @@ export class AgentLoop {
           turnSettings,
           this.messages,
           TOOL_DEFINITIONS,
-          systemPrompt
+          systemPrompt,
+          isStopped
         );
       } catch (e) {
         if (isStopped()) return;

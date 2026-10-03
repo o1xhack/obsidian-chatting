@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
 import type ChatPlugin from "./main";
 import type { Provider } from "./types";
 import { CHATGPT_OAUTH_DEFAULT_MODEL, DEFAULT_PROVIDER_MODELS } from "./types";
@@ -50,13 +50,52 @@ export class ChatSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  // Obsidian 1.13+ indexes these definitions; older versions retain display().
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      { name: "Provider", render: setting => this.renderProvider(setting) },
+      { name: "API key", visible: () => this.plugin.settings.provider !== "chatgpt-oauth", render: setting => this.renderApiKeySection(setting.settingEl.parentElement!, setting) },
+      { name: "ChatGPT account", visible: () => this.plugin.settings.provider === "chatgpt-oauth", render: setting => this.renderChatGPTOAuthSection(setting.settingEl.parentElement!, setting) },
+      { name: "Model", aliases: ["Custom model ID", "Refresh models"], render: setting => {
+        this.renderModelSection(setting.settingEl.parentElement!, setting);
+        void this.loadCatalog(false);
+      } },
+      { name: "Web search", render: setting => this.renderWebSearch(setting) },
+      { name: "Max tool iterations", render: setting => this.renderMaxIterations(setting) },
+    ];
+  }
+
+  private refreshSettingsTab(): void {
+    if (typeof this.update === "function") this.update();
+    else this.display();
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
     const s = this.plugin.settings;
 
+    this.renderProvider(new Setting(containerEl));
+
+    // ─── Auth section: API key OR OAuth Connect ───────────────────────
+    if (s.provider === "chatgpt-oauth") {
+      this.renderChatGPTOAuthSection(containerEl);
+    } else {
+      this.renderApiKeySection(containerEl);
+    }
+
+    // ─── Model ────────────────────────────────────────────────────────
+    this.renderModelSection(containerEl);
+    void this.loadCatalog(false);
+
+    this.renderWebSearch(new Setting(containerEl));
+    this.renderMaxIterations(new Setting(containerEl));
+  }
+
+  private renderProvider(setting: Setting): void {
+    const s = this.plugin.settings;
     // ─── Provider ─────────────────────────────────────────────────────
-    new Setting(containerEl)
+    setting
       .setName("Provider")
       .setDesc("Which AI provider to use")
       .addDropdown((dropdown) =>
@@ -75,23 +114,14 @@ export class ChatSettingTab extends PluginSettingTab {
             s.model = DEFAULT_PROVIDER_MODELS[s.provider];
             this.plugin.reloadApiKeyForProvider();
             await this.plugin.saveSettings();
-            window.setTimeout(() => this.display(), 10);
+            window.setTimeout(() => this.refreshSettingsTab(), 10);
           })
       );
 
-    // ─── Auth section: API key OR OAuth Connect ───────────────────────
-    if (s.provider === "chatgpt-oauth") {
-      this.renderChatGPTOAuthSection(containerEl);
-    } else {
-      this.renderApiKeySection(containerEl);
-    }
-
-    // ─── Model ────────────────────────────────────────────────────────
-    this.renderModelSection(containerEl);
-    void this.loadCatalog(false);
-
-    // ─── Web search ───────────────────────────────────────────────────
-    new Setting(containerEl)
+  }
+  private renderWebSearch(setting: Setting): void {
+    const s = this.plugin.settings;
+    setting
       .setName("Web search")
       .setDesc("Allow the model to search the web when it needs current information")
       .addToggle((toggle) =>
@@ -103,8 +133,10 @@ export class ChatSettingTab extends PluginSettingTab {
           })
       );
 
-    // ─── Max iterations ───────────────────────────────────────────────
-    new Setting(containerEl)
+  }
+  private renderMaxIterations(setting: Setting): void {
+    const s = this.plugin.settings;
+    setting
       .setName("Max tool iterations")
       .setDesc("Safety limit for the agent loop (default: 20)")
       .addText((text) =>
@@ -123,10 +155,10 @@ export class ChatSettingTab extends PluginSettingTab {
 
   // ─── API key + test (anthropic / openai) ──────────────────────────────────
 
-  private renderApiKeySection(containerEl: HTMLElement): void {
+  private renderApiKeySection(containerEl: HTMLElement, row?: Setting): void {
     const s = this.plugin.settings;
 
-    const apiKeySetting = new Setting(containerEl)
+    const apiKeySetting = (row ?? new Setting(containerEl))
       .setName("API key")
       .setDesc(s.apiKey ? "Key saved" : "Enter your API key to get started")
       .addText((text) => {
@@ -149,7 +181,7 @@ export class ChatSettingTab extends PluginSettingTab {
             }
             this.apiKeyTimer = window.setTimeout(() => {
               this.apiKeyEditing = false;
-              this.display();
+              this.refreshSettingsTab();
             }, 800);
           });
       });
@@ -188,12 +220,13 @@ export class ChatSettingTab extends PluginSettingTab {
 
   // ─── ChatGPT OAuth ────────────────────────────────────────────────────────
 
-  private renderChatGPTOAuthSection(containerEl: HTMLElement): void {
+  private renderChatGPTOAuthSection(containerEl: HTMLElement, row?: Setting): void {
     const credential = this.plugin.chatgptOAuth.getCredential();
 
-    const explainer = containerEl.createEl("div", {
+    const explainer = containerEl.createDiv({
       cls: "setting-item-description ochatting-oauth-explainer",
     });
+    if (row) row.settingEl.before(explainer);
     explainer.createSpan({
       text: "Sign in with your ChatGPT account instead of using an OpenAI API key. Requests are routed through the ChatGPT/Codex backend (not ",
     });
@@ -207,7 +240,7 @@ export class ChatSettingTab extends PluginSettingTab {
         ? maskAccountId(credential.accountId)
         : "(no account id)";
       const expires = new Date(credential.expiresAt).toLocaleString();
-      new Setting(containerEl)
+      (row ?? new Setting(containerEl))
         .setName("ChatGPT account")
         .setDesc(`Connected — account ${account}. Token expires ${expires}.`)
         .addButton((button) =>
@@ -224,7 +257,7 @@ export class ChatSettingTab extends PluginSettingTab {
                 await this.plugin.saveSettings();
               }
               new Notice("ChatGPT OAuth disconnected.");
-              this.display();
+              this.refreshSettingsTab();
             })
         )
         .addButton((button) =>
@@ -254,7 +287,7 @@ export class ChatSettingTab extends PluginSettingTab {
           })
         );
     } else {
-      new Setting(containerEl)
+      (row ?? new Setting(containerEl))
         .setName("ChatGPT account")
         .setDesc("Not connected. Sign in with ChatGPT to use this provider.")
         .addButton((button) =>
@@ -266,7 +299,7 @@ export class ChatSettingTab extends PluginSettingTab {
                 const auth = await this.plugin.chatgptOAuth.beginDeviceAuthorization();
                 const handle = this.plugin.chatgptOAuth.pollDeviceAuthorization(auth);
                 const modal = new ChatGPTDeviceLoginModal(this.app, auth, handle, () => {
-                  this.display();
+                  this.refreshSettingsTab();
                 });
                 modal.open();
               } catch (e) {
@@ -280,12 +313,12 @@ export class ChatSettingTab extends PluginSettingTab {
 
   // ─── Model picker ─────────────────────────────────────────────────────────
 
-  private renderModelSection(containerEl: HTMLElement): void {
+  private renderModelSection(containerEl: HTMLElement, row?: Setting): void {
     const s = this.plugin.settings;
     const cached = this.catalogModels;
     const models = cached || FALLBACK_MODELS[s.provider] || FALLBACK_MODELS.anthropic;
 
-    const modelSetting = new Setting(containerEl)
+    const modelSetting = (row ?? new Setting(containerEl))
       .setName("Model")
       .setDesc(this.catalogError || (cached ? `${cached.length} models. Cached for 24 hours; refresh to check now.` : "Using defaults. Models load automatically when connected."))
       .addDropdown((dropdown) => {
@@ -304,7 +337,7 @@ export class ChatSettingTab extends PluginSettingTab {
           if (value === "__custom__") {
             s.model = "";
             await this.plugin.saveSettings();
-            window.setTimeout(() => this.display(), 10);
+            window.setTimeout(() => this.refreshSettingsTab(), 10);
           } else {
             s.model = value;
             await this.plugin.saveSettings();
@@ -369,7 +402,7 @@ export class ChatSettingTab extends PluginSettingTab {
         this.catalogError = "";
         changed = true;
       }
-      if (changed && cached) this.display();
+      if (changed && cached) this.refreshSettingsTab();
       if (!force && cached && Date.now() - cached.fetchedAt >= 0 && Date.now() - cached.fetchedAt < CATALOG_TTL) return;
       const models = await refreshCatalog(state, provider, identity, s.apiKey, this.plugin.chatgptOAuth, force);
       if (!current()) return;
@@ -388,8 +421,8 @@ export class ChatSettingTab extends PluginSettingTab {
       }
     } finally {
       this.loadingCatalog = false;
-      if (current() && (changed || force)) this.display();
-      else if (!current()) this.display();
+      if (current() && (changed || force)) this.refreshSettingsTab();
+      else if (!current()) this.refreshSettingsTab();
     }
   }
 
@@ -417,7 +450,7 @@ class ChatGPTDeviceLoginModal extends Modal {
     contentEl.createEl("p", {
       text: "1. Open this page in any browser:",
     });
-    const linkRow = contentEl.createEl("div", { cls: "ochatting-device-link-row" });
+    const linkRow = contentEl.createDiv({ cls: "ochatting-device-link-row" });
     const link = linkRow.createEl("a", {
       text: this.authorization.verificationUri,
       href: this.authorization.verificationUri,
@@ -426,7 +459,7 @@ class ChatGPTDeviceLoginModal extends Modal {
     link.setAttr("rel", "noopener");
 
     contentEl.createEl("p", { text: "2. Enter this code on the page:" });
-    const codeRow = contentEl.createEl("div", { cls: "ochatting-device-code-row" });
+    const codeRow = contentEl.createDiv({ cls: "ochatting-device-code-row" });
 
     codeRow.createEl("code", {
       text: this.authorization.userCode,
@@ -446,7 +479,7 @@ class ChatGPTDeviceLoginModal extends Modal {
       cls: "ochatting-device-status",
     });
 
-    const buttons = contentEl.createEl("div", { cls: "ochatting-device-buttons" });
+    const buttons = contentEl.createDiv({ cls: "ochatting-device-buttons" });
 
     const openBtn = buttons.createEl("button", { text: "Open login page" });
     openBtn.classList.add("mod-cta");

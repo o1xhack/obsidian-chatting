@@ -130,6 +130,9 @@ export async function refreshCatalog(state: CatalogState, provider: Provider, id
     if (provider === "chatgpt-oauth") {
       const credential = await oauth.getUsableCredential();
       if (!credential) throw new Error("Connect ChatGPT first");
+      if (await catalogIdentity(provider, credential.accountId || credential.accessToken) !== identity) {
+        throw new Error("ChatGPT account changed while loading models; retry for the current account");
+      }
       const version = await updateClientVersion(state, force);
       const headers: Record<string, string> = { Authorization: `Bearer ${credential.accessToken}`, originator: "opencode", "User-Agent": `chatting-with-ai/${version}`, version };
       if (credential.accountId) headers["ChatGPT-Account-Id"] = credential.accountId;
