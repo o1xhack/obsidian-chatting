@@ -114,8 +114,22 @@ for (const provider of ['chatgpt-oauth', 'openai']) {
     const other = provider === 'openai' ? 'chatgpt-oauth' : 'openai';
     assert.equal(api.buildResponsesInput(saved, other)[0].content[0].type, 'output_text');
   });
-  test(`${provider}: refuses malformed complete tool arguments`, () => {
-    assert.throws(() => api.fromResponsesOutput({ output: [{ ...nativeCall('x', 'create_file', {}), arguments: '{' }] }, provider));
+  test(`${provider}: malformed complete tool arguments recover without vault writes`, async () => {
+    for (const argumentsValue of ['{', 'null', '[]', '"string"', '']) {
+      const { app, files } = vaultApp();
+      const requests = transport((body, index) => {
+        if (!index) return response(provider, [{ ...nativeCall('bad', 'edit_document', {}), arguments: argumentsValue }], 'tool_use', index);
+        if (index === 2) return response(provider, [text('Done')], 'end_turn', index);
+        assert.equal(files.get('Untitled.md'), 'Original');
+        assert.match(body.input.at(-1).output, /Invalid tool arguments/);
+        return response(provider, [text('Retrying'), call('retry', 'edit_document', { path: 'Untitled.md', operation: 'replace_all', content: 'Corrected' })], 'tool_use', index);
+      });
+      const cb = callbacks();
+      await new api.AgentLoop(app, settings(provider)).run('Edit the note', cb);
+      assert.deepEqual(cb.errors, []);
+      assert.equal(requests.length, 3);
+      assert.equal(files.get('Untitled.md'), 'Corrected');
+    }
   });
 }
 

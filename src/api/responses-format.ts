@@ -65,9 +65,16 @@ export function fromResponsesOutput(
         }
       }
     } else if (item.type === "function_call" && data.status !== "incomplete") {
-      const input: unknown = JSON.parse(typeof item.arguments === "string" ? item.arguments : "{}");
-      if (!isRecord(input) || typeof item.call_id !== "string" || typeof item.name !== "string") {
+      if (typeof item.call_id !== "string" || typeof item.name !== "string") {
         throw new Error("Response contained an invalid tool call.");
+      }
+      const raw = typeof item.arguments === "string" ? item.arguments : "";
+      let input: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        input = isRecord(parsed) ? parsed : { _raw: raw };
+      } catch {
+        input = { _raw: raw };
       }
       content.push({ type: "tool_use", id: item.call_id, name: item.name, input });
     }

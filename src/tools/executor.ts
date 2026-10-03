@@ -18,6 +18,9 @@ export async function executeTool(
   input: Record<string, unknown>,
   onAskUser: AskUserCallback
 ): Promise<ToolResult> {
+  if (Object.prototype.hasOwnProperty.call(input, "_raw")) {
+    return { result: "Invalid tool arguments: provide a valid JSON object and retry.", isError: true };
+  }
   try {
     switch (toolName) {
       case "read_document":
