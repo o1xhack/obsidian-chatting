@@ -1,5 +1,18 @@
 # Test harness
 
+## Offline regression tests
+
+```bash
+npm test
+```
+
+Bundles the production provider adapters and agent loop with an in-memory
+vault and mocked `requestUrl`. No credentials or live API calls are needed.
+Tests cover assistant output encoding, native thinking/reasoning/search replay,
+read → create/edit flows, parallel tools, cancellation, history restoration,
+Anthropic `pause_turn` and thinking configuration, and OpenAI conversation
+isolation. These tests do not establish live-service or physical-iOS behavior.
+
 Two Node scripts that exercise the ChatGPT/Codex Responses endpoint
 **without** going through Obsidian, so iteration on the
 `chatgpt-oauth` provider doesn't require BRAT round-trips.
@@ -42,9 +55,10 @@ The script:
 4. Prints HTTP status, parsed event types and counts, the final
    assistant text and any tool calls. Exits 0 on success, 1 on failure.
 
-If this script passes against the real backend, the plugin will
-behave the same way (modulo iOS-specific quirks like the lazy
-`response.json` getter — those still need on-device verification).
+These standalone scripts use hand-built request fixtures. A passing result
+establishes only that those fixtures worked against that account's backend;
+it does not validate the production history converter. Run `npm test` for
+production adapter/loop regression coverage and verify iOS on a physical device.
 
 ## Why this exists
 

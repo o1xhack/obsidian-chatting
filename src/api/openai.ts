@@ -4,21 +4,26 @@ import type {
   UnifiedMessage,
   UnifiedToolDef,
   UnifiedResponse,
-  ContentBlock,
+  ProviderReplay,
 } from "../types";
+
+import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
 
 const DEFAULT_OPENAI_URL = "https://api.openai.com";
 
-/**
- * Stores raw output items from each API response so they can be replayed
- * verbatim in subsequent requests. The Responses API requires exact
- * function_call items (with all fields) when sending function_call_output.
- */
-let previousResponseId: string | null = null;
+interface ConversationState {
+  responseId: string;
+  model: string;
+  apiKey: string;
+  messages: UnifiedMessage[];
+  replay: ProviderReplay | undefined;
+}
 
-/** Clear stored state (call on conversation clear) */
+// Connection tests and other conversations must never replace this chat's cursor.
+let conversations = new WeakMap<UnifiedMessage[], ConversationState>();
+
 export function clearOpenAIState(): void {
-  previousResponseId = null;
+  conversations = new WeakMap();
 }
 
 /**
@@ -36,8 +41,14 @@ export async function sendOpenAIMessage(
   const baseUrl = DEFAULT_OPENAI_URL;
   const model = settings.model || "gpt-5.3-codex";
 
-  // Build input: only the NEW items for this turn
-  const input = buildCurrentTurnInput(messages, systemPrompt);
+  const previous = conversations.get(messages);
+  const canChain = previous?.model === model && previous.apiKey === settings.apiKey &&
+    previous.messages.length < messages.length &&
+    previous.messages.every((message, index) => message === messages[index]) &&
+    messages[previous.messages.length]?.role === "assistant" &&
+    messages[previous.messages.length]?.replay === previous.replay;
+  // Rebuilt/restored histories include native response items and tool pairs.
+  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : messages, "openai");
 
   const body: Record<string, unknown> = {
     model,
@@ -45,13 +56,14 @@ export async function sendOpenAIMessage(
   };
 
   // Chain to previous response for multi-turn context
-  if (previousResponseId) {
-    body.previous_response_id = previousResponseId;
+  if (canChain) {
+    body.previous_response_id = previous.responseId;
   }
 
   // Reasoning for reasoning-capable models
   if (/^o\d/.test(model) || /^gpt-5/.test(model)) {
     body.reasoning = { effort: "medium" };
+    body.include = ["reasoning.encrypted_content"];
   }
 
   // Tools
@@ -60,6 +72,7 @@ export async function sendOpenAIMessage(
     name: t.name,
     description: t.description,
     parameters: t.inputSchema,
+    strict: false,
   }));
 
   if (settings.enableWebSearch) {
@@ -104,173 +117,13 @@ export async function sendOpenAIMessage(
 
   const data = asRecord(response.json as unknown);
 
-  // Store response ID for chaining
-  previousResponseId = typeof data.id === "string" ? data.id : null;
-
-  return fromResponsesOutput(data);
-}
-
-// ─── Input Building ─────────────────────────────────────────────────────────
-
-/**
- * Builds input items for the current turn only.
- * When using previous_response_id, we only need to send:
- * - On first call: system message + user message
- * - On tool result calls: function_call_output items
- * - On follow-up user messages: user message
- */
-function buildCurrentTurnInput(
-  messages: UnifiedMessage[],
-  systemPrompt: string
-): Record<string, unknown>[] {
-  const items: Record<string, unknown>[] = [];
-
-  // If no previous response (first call), include all messages
-  if (!previousResponseId) {
-    items.push({
-      type: "message",
-      role: "developer",
-      content: systemPrompt,
-    });
-
-    for (const msg of messages) {
-      if (typeof msg.content === "string") {
-        items.push({
-          type: "message",
-          role: msg.role === "assistant" ? "assistant" : "user",
-          content: msg.content,
-        });
-      } else {
-        const content = msg.content.flatMap((block): Array<Record<string, unknown>> => {
-          if (block.type === "text" && block.text) {
-            return [{ type: "input_text", text: block.text }];
-          }
-          if (block.type === "image" && block.image) {
-            return [{
-              type: "input_image",
-              image_url: toImageDataUrl(block.image),
-              detail: "auto",
-            }];
-          }
-          return [];
-        });
-        if (content.length > 0) {
-          items.push({
-            type: "message",
-            role: msg.role === "assistant" ? "assistant" : "user",
-            content,
-          });
-        }
-      }
-    }
-    return items;
+  const result = fromResponsesOutput(data, "openai");
+  if (typeof data.id === "string") {
+    conversations.set(messages, { responseId: data.id, model, apiKey: settings.apiKey, messages: [...messages], replay: result.replay });
+  } else {
+    conversations.delete(messages);
   }
-
-  // For subsequent calls, only send the latest turn's items
-  const lastMsg = messages[messages.length - 1];
-  if (!lastMsg) return items;
-
-  if (typeof lastMsg.content === "string") {
-    items.push({
-      type: "message",
-      role: "user",
-      content: lastMsg.content,
-    });
-    return items;
-  }
-
-  // Tool results
-  const toolResults = lastMsg.content.filter((b) => b.type === "tool_result");
-  if (toolResults.length > 0) {
-    for (const tr of toolResults) {
-      items.push({
-        type: "function_call_output",
-        call_id: tr.tool_use_id,
-        output: tr.content || "",
-      });
-    }
-    return items;
-  }
-
-  // Text and image content
-  const content = lastMsg.content.flatMap((block): Array<Record<string, unknown>> => {
-    if (block.type === "text" && block.text) {
-      return [{ type: "input_text", text: block.text }];
-    }
-    if (block.type === "image" && block.image) {
-      return [{
-        type: "input_image",
-        image_url: toImageDataUrl(block.image),
-        detail: "auto",
-      }];
-    }
-    return [];
-  });
-  if (content.length > 0) {
-    items.push({
-      type: "message",
-      role: lastMsg.role === "assistant" ? "assistant" : "user",
-      content,
-    });
-  }
-
-  return items;
-}
-
-function toImageDataUrl(image: { mediaType: string; data: string }): string {
-  return `data:${image.mediaType};base64,${image.data}`;
-}
-
-// ─── Response Parsing ───────────────────────────────────────────────────────
-
-function fromResponsesOutput(data: Record<string, unknown>): UnifiedResponse {
-  const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
-  const content: ContentBlock[] = [];
-  let hasToolCalls = false;
-
-  for (const item of output) {
-    if (item.type === "message" && Array.isArray(item.content)) {
-      for (const part of item.content.filter(isRecord)) {
-        if (part.type === "output_text" && typeof part.text === "string") {
-          content.push({ type: "text", text: part.text });
-        }
-      }
-    } else if (item.type === "function_call") {
-      hasToolCalls = true;
-      let input: Record<string, unknown> = {};
-      try {
-        const parsed: unknown = JSON.parse(typeof item.arguments === "string" ? item.arguments : "{}");
-        input = isRecord(parsed) ? parsed : { _raw: parsed };
-      } catch {
-        input = { _raw: item.arguments };
-      }
-      content.push({
-        type: "tool_use",
-        id: stringValue(item.call_id) || stringValue(item.id),
-        name: stringValue(item.name),
-        input,
-      });
-    }
-  }
-
-  const stopReason = hasToolCalls ? "tool_use" : "end_turn";
-  const usage = isRecord(data.usage) ? data.usage : undefined;
-
-  return {
-    content,
-    stopReason,
-    usage: usage
-      ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) }
-      : undefined,
-  };
-}
-
-function numberValue(value: unknown): number {
-  return typeof value === "number" ? value : 0;
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
+  return result;
 }
 
 function getNestedString(value: unknown, path: string[]): string | undefined {

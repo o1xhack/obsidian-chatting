@@ -15,6 +15,7 @@
     "url": "https://github.com/o1xhack/obsidian-chatting.git"
   },
   "scripts": {
+    "test": "node --test test/provider-history.test.mjs",
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
     "svelte-check": "svelte-check --tsconfig tsconfig.json",

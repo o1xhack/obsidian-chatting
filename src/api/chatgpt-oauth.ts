@@ -23,9 +23,9 @@ import type {
   UnifiedMessage,
   UnifiedToolDef,
   UnifiedResponse,
-  ContentBlock,
 } from "../types";
 import { CHATGPT_OAUTH_DEFAULT_MODEL } from "../types";
+import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
 import {
   ChatGPTOAuthError,
   type ChatGPTOAuthService,
@@ -58,14 +58,8 @@ const ORIGINATOR = "opencode";
  */
 const USER_AGENT = "OpenAI/JS 4.x chatting-with-ai/0.1";
 
-// We deliberately do NOT discover Codex models at runtime. The Codex
-// `/codex/models` endpoint either returns the same handful of slugs we
-// already hardcode in settings.ts FALLBACK_MODELS["chatgpt-oauth"], or
-// returns the chat.com UI catalog (dash-form slugs like `gpt-5-5` that
-// `/codex/responses` rejects with HTTP 400). Either way, live discovery
-// adds no value over the hardcoded list, which is mirrored from the
-// official OpenAI Codex CLI's bundled `models.json`. Users can still pick
-// "Custom..." in the settings dropdown to type any slug.
+// The general ChatGPT model catalog is not a reliable account-specific Codex
+// allowlist. Settings offers the tested default plus custom model IDs.
 
 /** Held by main.ts; injected via setChatGPTOAuthService(). */
 let oauthService: ChatGPTOAuthService | null = null;
@@ -119,7 +113,7 @@ export async function sendChatGPTOAuthMessage(
     model,
     // Replay the full conversation each turn — Codex's `store:false` mode
     // makes server-side `previous_response_id` chaining unavailable.
-    input: buildFullHistoryInput(messages),
+    input: buildResponsesInput(messages, "chatgpt-oauth"),
     instructions: systemPrompt,
     // Required by the Codex backend; omitting it returns
     // 400 {"detail":"Store must be set to false"}.
@@ -245,7 +239,7 @@ async function sendOnce(
   //   - JSON object (non-streaming or `response.completed` already aggregated)
   //   - SSE text body (streaming, buffered by requestUrl)
   const data = parseResponseBody(response);
-  return fromResponsesOutput(data);
+  return fromResponsesOutput(data, "chatgpt-oauth");
 }
 
 function parseResponseBody(response: {
@@ -308,7 +302,7 @@ function parseResponseBody(response: {
     } else if (type === "response.completed") {
       completedResponse = asOptionalRecord(evt.response) ?? {};
     } else if (type === "response.incomplete") {
-      completedResponse = asOptionalRecord(evt.response) ?? {};
+      completedResponse = { ...(asOptionalRecord(evt.response) ?? {}), status: "incomplete" };
     } else if (type === "response.failed") {
       failureMessage = getNestedString(evt.response, ["error", "message"]) ?? "ChatGPT OAuth response failed";
     } else if (type === "error" && typeof evt.message === "string") {
@@ -318,11 +312,11 @@ function parseResponseBody(response: {
 
   if (failureMessage) throw new ChatGPTOAuthError(failureMessage);
 
-  if (completedResponse || itemByIndex.size > 0) {
+  if (completedResponse) {
     // Synthesize a Responses-API-shaped object from the streamed pieces.
     const synthesized: Record<string, unknown> = {
       ...(completedResponse ?? {}),
-      output: Array.from(itemByIndex.values()),
+      output: itemByIndex.size > 0 ? Array.from(itemByIndex.values()) : completedResponse.output ?? [],
     };
     return synthesized;
   }
@@ -360,127 +354,12 @@ function parseSSE(text: string): Array<Record<string, unknown>> {
   return events;
 }
 
-// ─── Input building ─────────────────────────────────────────────────────────
-
-/**
- * Convert the agent loop's full message history into Responses-API input
- * items. The Codex backend rejects `previous_response_id` (because we must
- * send `store:false`), so every request carries the entire conversation.
- *
- * Encoding rules:
- *   - string content        → { type:"message", role, content }
- *   - text/image blocks     → { type:"message", role, content:[...] }
- *   - tool_use block        → { type:"function_call", call_id, name, arguments }
- *   - tool_result block     → { type:"function_call_output", call_id, output }
- *
- * The system prompt is sent separately via the `instructions` field, so we
- * never include it here.
- */
-function buildFullHistoryInput(
-  messages: UnifiedMessage[],
-): Array<Record<string, unknown>> {
-  const items: Array<Record<string, unknown>> = [];
-
-  for (const msg of messages) {
-    const role = msg.role === "assistant" ? "assistant" : "user";
-
-    if (typeof msg.content === "string") {
-      items.push({ type: "message", role, content: msg.content });
-      continue;
-    }
-
-    const content: Array<Record<string, unknown>> = [];
-    const flushContent = () => {
-      if (content.length === 0) return;
-      items.push({ type: "message", role, content: content.splice(0) });
-    };
-
-    for (const block of msg.content) {
-      if (block.type === "text" && block.text) {
-        content.push({ type: "input_text", text: block.text });
-      } else if (block.type === "image" && block.image) {
-        content.push({
-          type: "input_image",
-          image_url: `data:${block.image.mediaType};base64,${block.image.data}`,
-          detail: "auto",
-        });
-      } else if (block.type === "tool_use" && block.name && block.id) {
-        flushContent();
-        items.push({
-          type: "function_call",
-          call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input ?? {}),
-        });
-      } else if (block.type === "tool_result" && block.tool_use_id) {
-        flushContent();
-        items.push({
-          type: "function_call_output",
-          call_id: block.tool_use_id,
-          output: block.content ?? "",
-        });
-      }
-    }
-    flushContent();
-  }
-
-  return items;
-}
-
-// ─── Response parsing (mirrors openai.ts) ───────────────────────────────────
-
-function fromResponsesOutput(data: Record<string, unknown>): UnifiedResponse {
-  const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
-  const content: ContentBlock[] = [];
-  let hasToolCalls = false;
-
-  for (const item of output) {
-    if (item.type === "message" && Array.isArray(item.content)) {
-      for (const part of item.content.filter(isRecord)) {
-        if (part.type === "output_text" && typeof part.text === "string") {
-          content.push({ type: "text", text: part.text });
-        }
-      }
-    } else if (item.type === "function_call") {
-      hasToolCalls = true;
-      let input: Record<string, unknown> = {};
-      try {
-        const parsed: unknown = JSON.parse(typeof item.arguments === "string" ? item.arguments : "{}");
-        input = isRecord(parsed) ? parsed : { _raw: parsed };
-      } catch {
-        input = { _raw: item.arguments };
-      }
-      content.push({
-        type: "tool_use",
-        id: stringValue(item.call_id) || stringValue(item.id),
-        name: stringValue(item.name),
-        input,
-      });
-    }
-  }
-
-  const stopReason = hasToolCalls ? "tool_use" : "end_turn";
-  const usage = isRecord(data.usage) ? data.usage : undefined;
-
-  return {
-    content,
-    stopReason,
-    usage: usage
-      ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) }
-      : undefined,
-  };
-}
-
-function numberValue(value: unknown): number {
-  return typeof value === "number" ? value : 0;
+function outputKey(value: unknown): string | number | undefined {
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
 }
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function outputKey(value: unknown): string | number | undefined {
-  return typeof value === "string" || typeof value === "number" ? value : undefined;
 }
 
 function getNestedString(value: unknown, path: string[]): string | undefined {

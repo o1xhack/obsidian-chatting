@@ -293,7 +293,7 @@ export default class ChatPlugin extends Plugin {
     try {
       const state = {
         chatHistory: this.chatHistory.slice(-100), // Cap at 100 UI messages
-        agentMessages: this.agent.exportMessages().slice(-80), // Cap at 80 API messages
+        agentMessages: this.agent.exportMessages(80), // Keep complete API turns
       };
       await this.app.vault.adapter.write(
         this.chatStatePath,

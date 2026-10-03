@@ -20,16 +20,10 @@ const FALLBACK_MODELS: Record<string, ModelOption[]> = {
     { value: "gpt-5.4", label: "GPT-5.4" },
     { value: "gpt-4o", label: "GPT-4o" },
   ],
-  // Mirrors the bundled `models.json` shipped with the official OpenAI Codex
-  // CLI. These are the slugs the Codex backend currently accepts when the
-  // request is authenticated with a ChatGPT account. Sorted by Codex CLI
-  // priority (lowest first = recommended). Update when upstream changes.
+  // CLI catalog entries are not guaranteed to be available to every account.
+  // Keep the default confirmed by user reports; other IDs remain customizable.
   "chatgpt-oauth": [
     { value: "gpt-5.5", label: "GPT-5.5 (recommended)" },
-    { value: "gpt-5.4", label: "GPT-5.4" },
-    { value: "gpt-5.4-mini", label: "GPT-5.4-Mini" },
-    { value: "gpt-5.3-codex", label: "GPT-5.3-Codex" },
-    { value: "gpt-5.2", label: "GPT-5.2" },
   ],
 };
 
@@ -274,7 +268,9 @@ export class ChatSettingTab extends PluginSettingTab {
 
     const modelSetting = new Setting(containerEl)
       .setName("Model")
-      .setDesc(cached ? `${cached.length} models from API` : "Using defaults. Click refresh to load from API.")
+      .setDesc(s.provider === "chatgpt-oauth"
+        ? "GPT-5.5 is the recommended default. Custom model availability depends on your ChatGPT account."
+        : cached ? `${cached.length} models from API` : "Using defaults. Click refresh to load from API.")
       .addDropdown((dropdown) => {
         for (const m of models) {
           dropdown.addOption(m.value, m.label);
@@ -302,11 +298,8 @@ export class ChatSettingTab extends PluginSettingTab {
     // Refresh button — only for providers that ship a meaningful model
     // catalog endpoint behind their auth.
     //
-    // chatgpt-oauth is intentionally excluded. The Codex backend either
-    // returns the same five slugs we already hardcode, or returns the
-    // chat.com UI catalog (dash-form slugs the /responses endpoint then
-    // rejects). A live fetch adds zero value and creates confusing failure
-    // modes. Users who need a non-default Codex slug can pick "Custom...".
+    // The general ChatGPT catalog does not establish Codex availability for
+    // this account. Non-default Codex model IDs can be entered via Custom.
     const canFetchModels =
       (s.provider === "anthropic" && !!s.apiKey) ||
       (s.provider === "openai" && !!s.apiKey);

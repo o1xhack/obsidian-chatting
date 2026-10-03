@@ -39,13 +39,13 @@ export async function sendAnthropicMessage(
     messages: messages.map(toAnthropicMessage),
   };
 
-  // Enable thinking based on model generation:
-  // - Sonnet 4.6 / Opus 4.6: use adaptive thinking (auto-determines depth)
-  // - Sonnet 4 / Opus 4 / older: use manual thinking with budget
-  const is46Model = model.includes("4-6") || model.includes("4.6");
+  // Opus 4.7+ rejects manual thinking. Keep older models on their budget mode.
+  const generation = model.match(/^claude-(?:sonnet|opus)-(\d+)[-.](\d{1,2})(?:-|$)/);
+  const supportsAdaptive = !!generation && (Number(generation[1]) > 4 ||
+    (Number(generation[1]) === 4 && Number(generation[2]) >= 6));
   const supportsThinking = model.includes("claude-sonnet-4") || model.includes("claude-opus") || model.includes("claude-sonnet-3-7");
 
-  if (is46Model) {
+  if (supportsAdaptive) {
     // Adaptive: Claude decides when/how much to think per request
     body.thinking = { type: "adaptive" };
   } else if (supportsThinking) {
@@ -117,6 +117,9 @@ export async function sendAnthropicMessage(
     content: data.content
       .map(fromAnthropicBlock)
       .filter((b): b is ContentBlock => b !== null),
+    // Thinking signatures, redacted thinking, citations and server tool results
+    // must be returned unchanged. UI content is deliberately separate.
+    replay: { provider: "anthropic", items: data.content },
     stopReason: normalizeStopReason(data.stop_reason),
     usage: data.usage
       ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
@@ -126,8 +129,8 @@ export async function sendAnthropicMessage(
 
 // ─── Format Conversions ─────────────────────────────────────────────────────
 
-interface AnthropicContentBlock {
-  type: "text" | "tool_use" | "web_search_tool_result" | "server_tool_use" | "thinking";
+interface AnthropicContentBlock extends Record<string, unknown> {
+  type: string;
   text?: string;
   thinking?: string;
   id?: string;
@@ -148,7 +151,7 @@ interface AnthropicResponse {
 function parseAnthropicResponse(value: unknown): AnthropicResponse {
   if (!isRecord(value)) return { content: [] };
   const content = Array.isArray(value.content)
-    ? value.content.filter(isRecord).map(toAnthropicContentBlock)
+    ? value.content.filter(isAnthropicContentBlock)
     : [];
   const usage = isRecord(value.usage)
     ? {
@@ -163,37 +166,12 @@ function parseAnthropicResponse(value: unknown): AnthropicResponse {
   };
 }
 
-function toAnthropicContentBlock(value: Record<string, unknown>): AnthropicContentBlock {
-  return {
-    type: isAnthropicBlockType(value.type) ? value.type : "text",
-    text: typeof value.text === "string" ? value.text : undefined,
-    thinking: typeof value.thinking === "string" ? value.thinking : undefined,
-    id: typeof value.id === "string" ? value.id : undefined,
-    name: typeof value.name === "string" ? value.name : undefined,
-    input: isRecord(value.input) ? value.input : undefined,
-    search_results: Array.isArray(value.search_results)
-      ? value.search_results.filter(isSearchResult)
-      : undefined,
-  };
-}
-
-function isAnthropicBlockType(value: unknown): value is AnthropicContentBlock["type"] {
-  return value === "text" ||
-    value === "tool_use" ||
-    value === "web_search_tool_result" ||
-    value === "server_tool_use" ||
-    value === "thinking";
-}
-
-function isSearchResult(value: unknown): value is { title: string; url: string; snippet: string } {
-  return isRecord(value) &&
-    typeof value.title === "string" &&
-    typeof value.url === "string" &&
-    typeof value.snippet === "string";
+function isAnthropicContentBlock(value: unknown): value is AnthropicContentBlock {
+  return isRecord(value) && typeof value.type === "string";
 }
 
 function normalizeStopReason(value: string | undefined): UnifiedResponse["stopReason"] {
-  if (value === "tool_use" || value === "max_tokens" || value === "stop") return value;
+  if (value === "tool_use" || value === "max_tokens" || value === "stop" || value === "pause_turn") return value;
   return "end_turn";
 }
 
@@ -215,6 +193,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toAnthropicMessage(msg: UnifiedMessage): Record<string, unknown> {
+  if (msg.role === "assistant" && msg.replay?.provider === "anthropic") {
+    return { role: msg.role, content: msg.replay.items };
+  }
   if (typeof msg.content === "string") {
     return { role: msg.role, content: msg.content };
   }
