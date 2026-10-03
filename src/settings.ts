@@ -1,23 +1,20 @@
-import { App, Modal, Notice, PluginSettingTab, Setting, requestUrl } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type ChatPlugin from "./main";
 import type { Provider } from "./types";
-import { CHATGPT_OAUTH_DEFAULT_MODEL } from "./types";
+import { CHATGPT_OAUTH_DEFAULT_MODEL, DEFAULT_PROVIDER_MODELS } from "./types";
 import type { ChatGPTDeviceAuthorization, PollHandle } from "./auth/chatgptOAuth";
 
-interface ModelOption {
-  value: string;
-  label: string;
-}
+import { type ModelOption, type CatalogState, catalogIdentity, cachedCatalog, refreshCatalog, getCatalogModels, clearCatalogModels, CATALOG_TTL } from "./api/model-catalog";
 
 const FALLBACK_MODELS: Record<string, ModelOption[]> = {
   anthropic: [
     { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { value: "claude-opus-4-7", label: "Claude Opus 4.7" },
+    { value: "claude-opus-5-5", label: "Claude Opus 5.5" },
     { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
   ],
   openai: [
-    { value: "gpt-5.3-codex", label: "Codex 5.3" },
-    { value: "gpt-5.4", label: "GPT-5.4" },
+    { value: "gpt-6.1-sol", label: "GPT-6.1 Sol" },
+    { value: "gpt-5.5", label: "GPT-5.5" },
     { value: "gpt-4o", label: "GPT-4o" },
   ],
   // CLI catalog entries are not guaranteed to be available to every account.
@@ -27,12 +24,11 @@ const FALLBACK_MODELS: Record<string, ModelOption[]> = {
   ],
 };
 
-// Cache fetched models per provider so they survive tab re-opens
-const modelCache = new Map<string, ModelOption[]>();
+
 
 /** Resolve a model ID to its display name */
 export function getModelDisplayName(provider: string, modelId: string): string {
-  const cached = modelCache.get(provider);
+  const cached = getCatalogModels(provider as Provider);
   const models = cached || FALLBACK_MODELS[provider] || [];
   const match = models.find((m) => m.value === modelId);
   return match?.label || modelId;
@@ -42,6 +38,12 @@ export function getModelDisplayName(provider: string, modelId: string): string {
 
 export class ChatSettingTab extends PluginSettingTab {
   plugin: ChatPlugin;
+  private catalogModels?: ModelOption[];
+  private catalogIdentity = "";
+  private loadingCatalog = false;
+  private catalogError = "";
+  private apiKeyEditing = false;
+  private apiKeyTimer?: number;
 
   constructor(app: App, plugin: ChatPlugin) {
     super(app, plugin);
@@ -66,13 +68,12 @@ export class ChatSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             // Load the new provider's key BEFORE saving,
             // otherwise the old provider's key gets saved under the new provider name
+            clearCatalogModels(s.provider);
+            this.catalogModels = undefined;
+            this.catalogIdentity = "";
             s.provider = value as Provider;
-            s.model = "";
+            s.model = DEFAULT_PROVIDER_MODELS[s.provider];
             this.plugin.reloadApiKeyForProvider();
-            // Set a sensible default model for chatgpt-oauth (no API to fetch from)
-            if (s.provider === "chatgpt-oauth" && !s.model) {
-              s.model = CHATGPT_OAUTH_DEFAULT_MODEL;
-            }
             await this.plugin.saveSettings();
             window.setTimeout(() => this.display(), 10);
           })
@@ -87,6 +88,7 @@ export class ChatSettingTab extends PluginSettingTab {
 
     // ─── Model ────────────────────────────────────────────────────────
     this.renderModelSection(containerEl);
+    void this.loadCatalog(false);
 
     // ─── Web search ───────────────────────────────────────────────────
     new Setting(containerEl)
@@ -133,12 +135,22 @@ export class ChatSettingTab extends PluginSettingTab {
           .setPlaceholder("Enter your API key")
           .setValue(s.apiKey)
           .onChange(async (value) => {
-            const hadKey = !!s.apiKey;
+            this.apiKeyEditing = true;
+            window.clearTimeout(this.apiKeyTimer);
+            const hadKey = s.apiKey;
             s.apiKey = value.trim();
+            const editedKey = s.apiKey;
             await this.plugin.saveSettings();
-            if (!hadKey && s.apiKey) {
-              window.setTimeout(() => this.display(), 10);
+            if (s.apiKey !== editedKey) return;
+            if (hadKey !== s.apiKey) {
+              clearCatalogModels(s.provider);
+              this.catalogModels = undefined;
+              this.catalogIdentity = "";
             }
+            this.apiKeyTimer = window.setTimeout(() => {
+              this.apiKeyEditing = false;
+              this.display();
+            }, 800);
           });
       });
 
@@ -187,7 +199,7 @@ export class ChatSettingTab extends PluginSettingTab {
     });
     explainer.createEl("code", { text: "api.openai.com" });
     explainer.createSpan({
-      text: ") and require an active ChatGPT plan with Codex access. The available models mirror the Codex CLI catalog.",
+      text: ") and require an active ChatGPT plan with Codex access. Refresh the model list to see the catalog for your account. Listed models may still depend on account permissions.",
     });
 
     if (credential) {
@@ -204,6 +216,13 @@ export class ChatSettingTab extends PluginSettingTab {
             .setWarning()
             .onClick(async () => {
               this.plugin.chatgptOAuth.clearCredential();
+              clearCatalogModels("chatgpt-oauth");
+              this.catalogModels = undefined;
+              this.catalogIdentity = "";
+              if (this.plugin.settings.modelCatalog) {
+                this.plugin.settings.modelCatalog.entries = this.plugin.settings.modelCatalog.entries.filter(e => e.provider !== "chatgpt-oauth");
+                await this.plugin.saveSettings();
+              }
               new Notice("ChatGPT OAuth disconnected.");
               this.display();
             })
@@ -263,14 +282,12 @@ export class ChatSettingTab extends PluginSettingTab {
 
   private renderModelSection(containerEl: HTMLElement): void {
     const s = this.plugin.settings;
-    const cached = modelCache.get(s.provider);
+    const cached = this.catalogModels;
     const models = cached || FALLBACK_MODELS[s.provider] || FALLBACK_MODELS.anthropic;
 
     const modelSetting = new Setting(containerEl)
       .setName("Model")
-      .setDesc(s.provider === "chatgpt-oauth"
-        ? "GPT-5.5 is the recommended default. Custom model availability depends on your ChatGPT account."
-        : cached ? `${cached.length} models from API` : "Using defaults. Click refresh to load from API.")
+      .setDesc(this.catalogError || (cached ? `${cached.length} models. Cached for 24 hours; refresh to check now.` : "Using defaults. Models load automatically when connected."))
       .addDropdown((dropdown) => {
         for (const m of models) {
           dropdown.addOption(m.value, m.label);
@@ -295,36 +312,12 @@ export class ChatSettingTab extends PluginSettingTab {
         });
       });
 
-    // Refresh button — only for providers that ship a meaningful model
-    // catalog endpoint behind their auth.
-    //
-    // The general ChatGPT catalog does not establish Codex availability for
-    // this account. Non-default Codex model IDs can be entered via Custom.
-    const canFetchModels =
-      (s.provider === "anthropic" && !!s.apiKey) ||
-      (s.provider === "openai" && !!s.apiKey);
+    const canFetchModels = s.provider === "chatgpt-oauth" ? !!this.plugin.chatgptOAuth.getCredential() : !!s.apiKey;
     if (canFetchModels) {
-      modelSetting.addButton((btn) =>
-        btn
-          .setIcon("refresh-cw")
-          .setTooltip("Fetch models from API")
-          .onClick(async () => {
-            btn.setDisabled(true);
-            try {
-              const fetched = await fetchModelsFromAPI(s.provider, s.apiKey);
-              modelCache.set(s.provider, fetched);
-              new Notice(`Loaded ${fetched.length} models`);
-              if (!s.model && fetched.length > 0) {
-                s.model = fetched[0].value;
-                await this.plugin.saveSettings();
-              }
-              this.display();
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              new Notice(`Failed to fetch models: ${msg}`);
-            }
-          })
-      );
+      modelSetting.addButton(btn => btn.setIcon("refresh-cw").setTooltip("Refresh models now")
+        .setDisabled(this.loadingCatalog).onClick(async () => {
+          await this.loadCatalog(true);
+        }));
     }
 
     // Custom model text field (shown when Custom... selected or model is empty)
@@ -349,6 +342,57 @@ export class ChatSettingTab extends PluginSettingTab {
         );
     }
   }
+  private credentialIdentity(): string {
+    const s = this.plugin.settings;
+    if (s.provider !== "chatgpt-oauth") return s.apiKey;
+    const credential = this.plugin.chatgptOAuth.getCredential();
+    return credential ? credential.accountId || credential.accessToken : "";
+  }
+
+  private async loadCatalog(force: boolean): Promise<void> {
+    if (this.loadingCatalog || this.apiKeyEditing) return;
+    const s = this.plugin.settings;
+    const provider = s.provider;
+    const secretIdentity = this.credentialIdentity();
+    if (!secretIdentity) return;
+    this.loadingCatalog = true;
+    const current = () => s.provider === provider && this.credentialIdentity() === secretIdentity;
+    let changed = false;
+    try {
+      const identity = await catalogIdentity(provider, secretIdentity);
+      if (!current()) return;
+      const state: CatalogState = s.modelCatalog ??= { entries: [] };
+      const cached = cachedCatalog(state, provider, identity);
+      if (this.catalogIdentity !== identity) {
+        this.catalogIdentity = identity;
+        this.catalogModels = cached?.models;
+        this.catalogError = "";
+        changed = true;
+      }
+      if (changed && cached) this.display();
+      if (!force && cached && Date.now() - cached.fetchedAt >= 0 && Date.now() - cached.fetchedAt < CATALOG_TTL) return;
+      const models = await refreshCatalog(state, provider, identity, s.apiKey, this.plugin.chatgptOAuth, force);
+      if (!current()) return;
+      if (models.length && this.catalogModels !== models) {
+        this.catalogModels = models;
+        changed = true;
+        await this.plugin.saveSettings();
+      }
+      this.catalogError = "";
+      if (force) new Notice(`Loaded ${models.length} models`);
+    } catch (error) {
+      if (current()) {
+        this.catalogError = "Could not refresh models. Keeping the last list; use refresh to retry.";
+        changed = true;
+        if (force) new Notice(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      this.loadingCatalog = false;
+      if (current() && (changed || force)) this.display();
+      else if (!current()) this.display();
+    }
+  }
+
 }
 
 // ─── Device-flow login modal ────────────────────────────────────────────────
@@ -446,103 +490,4 @@ class ChatGPTDeviceLoginModal extends Modal {
 function maskAccountId(accountId: string): string {
   if (accountId.length <= 8) return accountId;
   return `${accountId.slice(0, 4)}…${accountId.slice(-4)}`;
-}
-
-// ─── Model Fetching (only triggered by explicit refresh button click) ───────
-
-async function fetchModelsFromAPI(
-  provider: Provider,
-  apiKey: string
-): Promise<ModelOption[]> {
-  if (provider === "anthropic") {
-    return fetchAnthropicModels(apiKey);
-  }
-  if (provider === "openai") {
-    return fetchOpenAIModels(apiKey);
-  }
-  // chatgpt-oauth never reaches here — the refresh button is hidden for it.
-  // We return the bundled list for type-safety, in case a future caller
-  // bypasses the UI gate.
-  return FALLBACK_MODELS["chatgpt-oauth"];
-}
-
-async function fetchAnthropicModels(apiKey: string): Promise<ModelOption[]> {
-  let response;
-  try {
-    response = await requestUrl({
-      url: "https://api.anthropic.com/v1/models?limit=100",
-      method: "GET",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-    });
-  } catch (e) {
-    throw new Error(e instanceof Error ? e.message : String(e));
-  }
-
-  const models = getModelRecords(response.json as unknown)
-    .filter((m) => m.type === "model")
-    .filter((m): m is ModelRecord & { id: string } => typeof m.id === "string")
-    .map((m) => ({
-      value: m.id,
-      label: typeof m.display_name === "string" ? m.display_name : m.id,
-    }))
-    .sort((a: ModelOption, b: ModelOption) => {
-      const da = a.value.match(/(\d{8})/)?.[1] || "";
-      const db = b.value.match(/(\d{8})/)?.[1] || "";
-      return db.localeCompare(da) || a.label.localeCompare(b.label);
-    });
-
-  return models.length > 0 ? models : FALLBACK_MODELS.anthropic;
-}
-
-async function fetchOpenAIModels(apiKey: string): Promise<ModelOption[]> {
-  let response;
-  try {
-    response = await requestUrl({
-      url: "https://api.openai.com/v1/models",
-      method: "GET",
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-  } catch (e) {
-    throw new Error(e instanceof Error ? e.message : String(e));
-  }
-
-  const chatPrefixes = ["gpt-", "o1", "o3", "o4", "chatgpt-", "codex-", "gpt5"];
-  const excludePatterns = ["realtime", "audio", "transcri", "search"];
-
-  const models = getModelRecords(response.json as unknown)
-    .filter((m): m is ModelRecord & { id: string } => typeof m.id === "string")
-    .filter((m) => {
-      const id = m.id.toLowerCase();
-      return chatPrefixes.some((p) => id.startsWith(p)) &&
-        !excludePatterns.some((p) => id.includes(p));
-    })
-    .sort((a, b) =>
-      numberValue(b.created) - numberValue(a.created)
-    )
-    .map((m) => ({ value: m.id, label: m.id }));
-
-  return models.length > 0 ? models : FALLBACK_MODELS.openai;
-}
-
-interface ModelRecord {
-  id?: unknown;
-  type?: unknown;
-  display_name?: unknown;
-  created?: unknown;
-}
-
-function getModelRecords(value: unknown): ModelRecord[] {
-  if (!isRecord(value) || !Array.isArray(value.data)) return [];
-  return value.data.filter(isRecord);
-}
-
-function numberValue(value: unknown): number {
-  return typeof value === "number" ? value : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }

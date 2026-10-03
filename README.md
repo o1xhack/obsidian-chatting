@@ -74,12 +74,18 @@ The agent uses find-and-replace scoped to the selection text. Everything outside
 | Provider | Auth | Default model | Notes |
 |---|---|---|---|
 | **Anthropic** | API key | Claude Sonnet 4.6 | Adaptive thinking, web search, prompt caching. |
-| **OpenAI** | API key | Codex 5.3 | Responses API, reasoning, web search. |
+| **OpenAI** | API key | GPT-6.1 Sol | Responses API, reasoning, web search. |
 | **ChatGPT account** | Sign in with ChatGPT | GPT-5.5 | Uses your ChatGPT plan instead of an OpenAI API key. |
 
 Attach up to four images to a message, including by pasting an image from the clipboard. Images are sent with that message to the selected provider; large photos are resized before sending.
 
-> **About ChatGPT account login.** This provider signs you in with your ChatGPT account and routes requests through the ChatGPT/Codex backend (not `api.openai.com`). It requires an active ChatGPT plan with Codex access. The available models mirror the Codex CLI catalog.
+> **About ChatGPT account login.** This provider signs you in with your ChatGPT account and routes requests through the ChatGPT/Codex backend (not `api.openai.com`). It requires an active ChatGPT plan with Codex access. The model picker fetches the Codex catalog for your account; account permissions still determine whether a model can be used.
+
+### Model list updates
+
+All three providers load their authenticated model catalogs in settings. Lists are cached for 24 hours and survive restarts. Settings show the last list immediately, then refresh it in the background when expired. No daily timer or request on every settings visit is scheduled. The refresh button checks immediately. Failed requests retain the last list and selected model; account/API-key changes use a separate cache.
+
+ChatGPT OAuth discovers the latest stable client version from OpenAI's official GitHub release metadata and keeps the last known version or bundled fallback if discovery fails. Reasoning effort, reasoning summaries and parallel-tool options follow catalog metadata where provided. New model IDs normally require no plugin update, but upstream protocol changes can still require one. Custom model IDs survive reload. Catalog data contains no credentials.
 
 ## 🚀 Quick start
 
@@ -159,7 +165,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 - [x] Official Obsidian Community Plugins listing
 - [ ] Multi-conversation history with archive / search
 - [x] Image attachments where the provider supports them
-- [ ] More upstream provider models picked up automatically as they ship
+- [x] Dynamic provider catalogs with automatic refresh when the 24-hour cache expires
 
 Have a request? Open an issue.
 

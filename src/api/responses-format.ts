@@ -4,10 +4,12 @@ import type { ContentBlock, Provider, UnifiedMessage, UnifiedResponse } from "..
 export function buildResponsesInput(
   messages: UnifiedMessage[],
   provider: Extract<Provider, "openai" | "chatgpt-oauth">,
+  model?: string,
+  identity?: string,
 ): Record<string, unknown>[] {
   const items: Record<string, unknown>[] = [];
   for (const message of messages) {
-    if (message.role === "assistant" && message.replay?.provider === provider) {
+    if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
       items.push(...message.replay.items);
       continue;
     }
@@ -44,6 +46,8 @@ export function buildResponsesInput(
 export function fromResponsesOutput(
   data: Record<string, unknown>,
   provider: Extract<Provider, "openai" | "chatgpt-oauth">,
+  model?: string,
+  identity?: string,
 ): UnifiedResponse {
   if (data.status === "failed" || data.error) {
     const error = isRecord(data.error) ? data.error.message : undefined;
@@ -71,7 +75,7 @@ export function fromResponsesOutput(
   const usage = isRecord(data.usage) ? data.usage : undefined;
   return {
     content,
-    replay: { provider, items: output },
+    replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
     usage: usage ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) } : undefined,
   };

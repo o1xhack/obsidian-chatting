@@ -1,3 +1,4 @@
+import { oauthReasoning, oauthParallelTools, getCodexClientVersion, cachedCatalog, catalogIdentity } from "./model-catalog";
 /**
  * ChatGPT OAuth API client.
  *
@@ -58,8 +59,7 @@ const ORIGINATOR = "opencode";
  */
 const USER_AGENT = "OpenAI/JS 4.x chatting-with-ai/0.1";
 
-// The general ChatGPT model catalog is not a reliable account-specific Codex
-// allowlist. Settings offers the tested default plus custom model IDs.
+// Settings uses the account-specific Codex catalog, preserving custom model IDs.
 
 /** Held by main.ts; injected via setChatGPTOAuthService(). */
 let oauthService: ChatGPTOAuthService | null = null;
@@ -107,13 +107,17 @@ export async function sendChatGPTOAuthMessage(
     );
   }
 
+  const identity = await catalogIdentity("chatgpt-oauth", credential.accountId || credential.accessToken);
+  if (settings.modelCatalog) {
+    cachedCatalog(settings.modelCatalog, "chatgpt-oauth", identity);
+  }
   const model = settings.model || CHATGPT_OAUTH_DEFAULT_MODEL;
 
   const baseBody: Record<string, unknown> = {
     model,
     // Replay the full conversation each turn — Codex's `store:false` mode
     // makes server-side `previous_response_id` chaining unavailable.
-    input: buildResponsesInput(messages, "chatgpt-oauth"),
+    input: buildResponsesInput(messages, "chatgpt-oauth", model, identity),
     instructions: systemPrompt,
     // Required by the Codex backend; omitting it returns
     // 400 {"detail":"Store must be set to false"}.
@@ -122,11 +126,12 @@ export async function sendChatGPTOAuthMessage(
     // (verified against the OpenAI Codex CLI and external references). These
     // fields aren't strictly documented as required, but Codex's response
     // pipeline expects them and at least one is required for reasoning models.
-    parallel_tool_calls: true,
+    parallel_tool_calls: oauthParallelTools(model),
   };
 
-  if (/^o\d/.test(model) || /^gpt-5/.test(model) || /codex/i.test(model)) {
-    baseBody.reasoning = { effort: "medium", summary: "auto" };
+  const reasoning = oauthReasoning(model);
+  if (reasoning) {
+    baseBody.reasoning = reasoning;
     // Codex requires the encrypted reasoning payload to be threaded through
     // the request when reasoning is enabled. Without this, the backend
     // sometimes returns 400 on follow-up turns.
@@ -162,6 +167,7 @@ export async function sendChatGPTOAuthMessage(
     { ...baseBody, stream: true },
     credential.accessToken,
     credential.accountId,
+    identity,
   );
 }
 
@@ -169,12 +175,14 @@ async function sendOnce(
   body: Record<string, unknown>,
   accessToken: string,
   accountId: string | undefined,
+  identity: string,
 ): Promise<UnifiedResponse> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
     Accept: "text/event-stream, application/json",
     "User-Agent": USER_AGENT,
+    version: getCodexClientVersion(),
     originator: ORIGINATOR,
   };
   if (accountId) {
@@ -239,7 +247,7 @@ async function sendOnce(
   //   - JSON object (non-streaming or `response.completed` already aggregated)
   //   - SSE text body (streaming, buffered by requestUrl)
   const data = parseResponseBody(response);
-  return fromResponsesOutput(data, "chatgpt-oauth");
+  return fromResponsesOutput(data, "chatgpt-oauth", typeof body.model === "string" ? body.model : undefined, identity);
 }
 
 function parseResponseBody(response: {

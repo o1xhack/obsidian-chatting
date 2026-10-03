@@ -68,3 +68,8 @@ per iteration of debugging *one error message*. With this harness
 the loop is: edit code (or the script's body builder) → run script →
 see the real server response in milliseconds. We only ship to
 Obsidian once the smoke test is green.
+
+
+Production regression tests also cover dynamic catalogs, 24-hour persistence, request deduplication, failure backoff, manual refresh, account changes during fetch, Anthropic pagination, stable Codex version discovery, GPT-6 reasoning metadata, and model/account isolation of native reasoning replay. Run `npm test`.
+
+Live validation results and their limits are recorded in [oauth-live-validation.md](oauth-live-validation.md).

@@ -1,3 +1,4 @@
+import { catalogIdentity } from "./model-catalog";
 import { requestUrl } from "obsidian";
 import type {
   ChatSettings,
@@ -24,6 +25,7 @@ export async function sendAnthropicMessage(
   systemPrompt: string
 ): Promise<UnifiedResponse> {
   const model = settings.model || "claude-sonnet-4-6";
+  const identity = await catalogIdentity("anthropic", settings.apiKey);
   const body: Record<string, unknown> = {
     model,
     max_tokens: 16384,
@@ -36,7 +38,7 @@ export async function sendAnthropicMessage(
         cache_control: { type: "ephemeral" },
       },
     ],
-    messages: messages.map(toAnthropicMessage),
+    messages: messages.map(msg => toAnthropicMessage(msg, model, identity)),
   };
 
   // Opus 4.7+ rejects manual thinking. Keep older models on their budget mode.
@@ -119,7 +121,7 @@ export async function sendAnthropicMessage(
       .filter((b): b is ContentBlock => b !== null),
     // Thinking signatures, redacted thinking, citations and server tool results
     // must be returned unchanged. UI content is deliberately separate.
-    replay: { provider: "anthropic", items: data.content },
+    replay: { provider: "anthropic", model, identity, items: data.content },
     stopReason: normalizeStopReason(data.stop_reason),
     usage: data.usage
       ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
@@ -192,8 +194,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function toAnthropicMessage(msg: UnifiedMessage): Record<string, unknown> {
-  if (msg.role === "assistant" && msg.replay?.provider === "anthropic") {
+function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string): Record<string, unknown> {
+  if (msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity)) {
     return { role: msg.role, content: msg.replay.items };
   }
   if (typeof msg.content === "string") {

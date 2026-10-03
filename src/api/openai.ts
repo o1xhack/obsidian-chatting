@@ -1,3 +1,4 @@
+import { supportsReasoning, catalogIdentity } from "./model-catalog";
 import { requestUrl } from "obsidian";
 import type {
   ChatSettings,
@@ -39,8 +40,9 @@ export async function sendOpenAIMessage(
   systemPrompt: string
 ): Promise<UnifiedResponse> {
   const baseUrl = DEFAULT_OPENAI_URL;
-  const model = settings.model || "gpt-5.3-codex";
+  const model = settings.model || "gpt-6.1-sol";
 
+  const identity = await catalogIdentity("openai", settings.apiKey);
   const previous = conversations.get(messages);
   const canChain = previous?.model === model && previous.apiKey === settings.apiKey &&
     previous.messages.length < messages.length &&
@@ -48,7 +50,7 @@ export async function sendOpenAIMessage(
     messages[previous.messages.length]?.role === "assistant" &&
     messages[previous.messages.length]?.replay === previous.replay;
   // Rebuilt/restored histories include native response items and tool pairs.
-  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : messages, "openai");
+  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : messages, "openai", model, identity);
 
   const body: Record<string, unknown> = {
     model,
@@ -61,7 +63,7 @@ export async function sendOpenAIMessage(
   }
 
   // Reasoning for reasoning-capable models
-  if (/^o\d/.test(model) || /^gpt-5/.test(model)) {
+  if (supportsReasoning(model)) {
     body.reasoning = { effort: "medium" };
     body.include = ["reasoning.encrypted_content"];
   }
@@ -76,7 +78,7 @@ export async function sendOpenAIMessage(
   }));
 
   if (settings.enableWebSearch) {
-    apiTools.push({ type: "web_search_preview" });
+    apiTools.push({ type: "web_search" });
   }
 
   if (apiTools.length > 0) {
@@ -117,7 +119,7 @@ export async function sendOpenAIMessage(
 
   const data = asRecord(response.json as unknown);
 
-  const result = fromResponsesOutput(data, "openai");
+  const result = fromResponsesOutput(data, "openai", model, identity);
   if (typeof data.id === "string") {
     conversations.set(messages, { responseId: data.id, model, apiKey: settings.apiKey, messages: [...messages], replay: result.replay });
   } else {

@@ -9,7 +9,14 @@ export interface ChatSettings {
   model: string;
   maxIterations: number;
   enableWebSearch: boolean;
+  modelCatalog?: import("./api/model-catalog").CatalogState;
 }
+
+export const DEFAULT_PROVIDER_MODELS: Record<Provider, string> = {
+  anthropic: "claude-sonnet-4-6",
+  openai: "gpt-6.1-sol",
+  "chatgpt-oauth": "gpt-5.5",
+};
 
 export const DEFAULT_SETTINGS: ChatSettings = {
   provider: "anthropic",
@@ -59,6 +66,8 @@ export interface UnifiedMessage {
 
 export interface ProviderReplay {
   provider: Provider;
+  model?: string;
+  identity?: string;
   items: Record<string, unknown>[];
 }
 

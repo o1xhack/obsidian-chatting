@@ -32,5 +32,8 @@
     "svelte-check": "^4.4.5",
     "svelte-preprocess": "^6.0.3",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0"
   }
 }

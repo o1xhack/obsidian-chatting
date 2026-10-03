@@ -5,6 +5,8 @@ import { build } from 'esbuild';
 // Bundle the actual production adapters/loop; only transport and the vault are fake.
 const bundled = await build({
   stdin: { contents: `
+    export { ChatSettingTab } from './src/settings';
+    export * from './src/api/model-catalog';
     export { AgentLoop } from './src/agent/loop';
     export { trimHistory } from './src/agent/history';
     export { sendAnthropicMessage } from './src/api/anthropic';
@@ -17,6 +19,10 @@ const bundled = await build({
     build.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'test' }));
     build.onLoad({ filter: /.*/, namespace: 'test' }, () => ({ contents: `
       export class App {}
+      export class Modal {}
+      export class PluginSettingTab {}
+      export class Setting {}
+      export class Notice {}
       export class TFile { constructor(path) { this.path = path; this.extension = 'md'; } }
       export const normalizePath = path => path;
       export const requestUrl = request => globalThis.__providerRequest(request);
@@ -374,4 +380,187 @@ test('ChatGPT: aggregated completed SSE output is retained without item.done eve
   transport(() => sse([{ type: 'response.completed', response: { id: 'r1', output: [responseMessage('Hello')] } }]));
   const parsed = await api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Hello' }], [], 'System');
   assert.equal(parsed.content[0].text, 'Hello');
+});
+
+
+test('Model catalog: migration preserves future/custom IDs and fixes only version dashes', () => {
+  for (const id of ['gpt-6.1-sol', 'gpt-6-astra', 'o9', 'custom-model', 'gpt-5-mini']) assert.equal(api.migrateOAuthModel(id), id);
+  assert.equal(api.migrateOAuthModel('gpt-6-1-sol'), 'gpt-6.1-sol');
+  assert.equal(api.migrateOAuthModel('gpt-5-5'), 'gpt-5.5');
+});
+test('Catalog persistence rejects credentials and invalid identities', () => {
+  const state = api.normalizeCatalogState({entries:[{provider:'openai',identity:'secret-key',fetchedAt:1,models:[]}],accessToken:'secret'});
+  assert.deepEqual(state, {entries:[]});
+});
+test('Catalog: OAuth stable client discovery, hidden filtering, reasoning metadata, TTL, force refresh and dedupe', async () => {
+  const state = {entries:[]};
+  const identity = await api.catalogIdentity('chatgpt-oauth', 'catalog-account');
+  const requests = [];
+  let releaseCalls = 0;
+  globalThis.__providerRequest = async request => {
+    requests.push(request);
+    if (request.url.includes('api.github.com')) { releaseCalls++; return {status:200,json:{tag_name:'rust-v0.161.0',prerelease:false,draft:false}}; }
+    assert.ok(request.url.includes('client_version=0.161.0'));
+    assert.equal(request.headers['ChatGPT-Account-Id'], 'catalog-account');
+    return {status:200,json:{models:[
+      {slug:'gpt-6.1-sol',display_name:'GPT 6.1',visibility:'list',supported_reasoning_levels:[{effort:'low'},{effort:'ultra'}],default_reasoning_level:'ultra'},
+      {slug:'hidden-review',visibility:'hide'},
+    ]}};
+  };
+  const oauth = {getUsableCredential:async()=>({accessToken:'fake-token',accountId:'catalog-account'})};
+  const [models, duplicate] = await Promise.all([api.refreshCatalog(state,'chatgpt-oauth',identity,'',oauth,true),api.refreshCatalog(state,'chatgpt-oauth',identity,'',oauth,true)]);
+  assert.equal(models,duplicate);
+  assert.deepEqual(models.map(m=>m.value),['gpt-6.1-sol']);
+  assert.equal(api.oauthReasoning('gpt-6.1-sol').effort,'ultra');
+  assert.equal(state.clientVersion.value,'0.161.0');
+  assert.equal(releaseCalls,1);
+  const count = requests.length;
+  await api.refreshCatalog(state,'chatgpt-oauth',identity,'',oauth);
+  assert.equal(requests.length,count);
+  await api.refreshCatalog(state,'chatgpt-oauth',identity,'',oauth,true);
+  assert.equal(requests.length,count+2);
+  assert.ok(!JSON.stringify(state).includes('fake-token'));
+  api.clearCatalogModels('chatgpt-oauth');
+});
+test('Catalog: expired cache failure retained, backoff, manual retry and account isolation', async () => {
+  const identity = await api.catalogIdentity('openai','key-a');
+  const other = await api.catalogIdentity('openai','key-b');
+  const models = [{value:'gpt-6.1-sol',label:'GPT 6.1'}];
+  const state = {entries:[{provider:'openai',identity,models,fetchedAt:Date.now()-api.CATALOG_TTL-1}]};
+  let requests = 0;
+  globalThis.__providerRequest = async()=>{requests++;return {status:429,json:{}};};
+  await assert.rejects(api.refreshCatalog(state,'openai',identity,'key-a',{}));
+  assert.equal(state.entries[0].models,models);
+  assert.equal(await api.refreshCatalog(state,'openai',identity,'key-a',{}),models);
+  assert.equal(requests,1);
+  assert.equal(api.cachedCatalog(state,'openai',other),undefined);
+  assert.equal(api.getCatalogModels('openai'),undefined);
+  globalThis.__providerRequest = async()=>({status:200,json:{data:[{id:'gpt-6.1-sol'},{id:'o9'},{id:'gpt-audio'},{id:'embedding'}]}});
+  const next = await api.refreshCatalog(state,'openai',other,'key-b',{},true);
+  assert.deepEqual(next.map(m=>m.value),['gpt-6.1-sol','o9']);
+  assert.equal(state.entries.length,1);
+  assert.equal(state.entries[0].identity,other);
+});
+test('Anthropic catalog: pagination and aliases for future generations', async () => {
+  const identity = await api.catalogIdentity('anthropic','pagination');
+  const urls = [];
+  globalThis.__providerRequest = async request => {
+    urls.push(request.url);
+    return {status:200,json:urls.length===1 ? {data:[{type:'model',id:'claude-opus-5-5',display_name:'Claude Opus 5.5'}],has_more:true,last_id:'claude-opus-5-5'} : {data:[{type:'model',id:'claude-sonnet-6-1'}],has_more:false}};
+  };
+  const models = await api.refreshCatalog({entries:[]},'anthropic',identity,'pagination',{},true);
+  assert.equal(models.length,2);
+  assert.ok(urls[1].includes('after_id=claude-opus-5-5'));
+});
+test('OAuth catalog: GitHub outage retains bundled version without saving a false successful check', async () => {
+  const state = {entries:[]};
+  const identity = await api.catalogIdentity('chatgpt-oauth','outage');
+  globalThis.__providerRequest = async request => request.url.includes('api.github.com') ? {status:503} : {status:200,json:{models:[{slug:'gpt-6.1-sol',visibility:'list'}]}};
+  await api.refreshCatalog(state,'chatgpt-oauth',identity,'',{getUsableCredential:async()=>({accessToken:'fake',accountId:'outage'})},true);
+  assert.equal(state.clientVersion,undefined);
+  assert.equal(state.entries[0].models[0].value,'gpt-6.1-sol');
+  api.clearCatalogModels('chatgpt-oauth');
+});
+test('GPT 6.1: both adapters include encrypted reasoning, support tools and use canonical web search', async () => {
+  for (const provider of ['openai','chatgpt-oauth']) {
+    const requests = transport(()=>response(provider,[text('OK')]));
+    await (provider==='openai'?api.sendOpenAIMessage:api.sendChatGPTOAuthMessage)({...settings(provider),model:'gpt-6.1-sol'},[{role:'user',content:'test'}],[],'test');
+    assert.equal(requests[0].reasoning.effort,'medium');
+    assert.deepEqual(requests[0].include,['reasoning.encrypted_content']);
+    assert.equal(requests[0].tools[0].type,'web_search');
+  }
+});
+test('Anthropic Opus 5.5: adaptive thinking and model changes strip old signatures while preserving tool pairs', async () => {
+  const requests = transport(()=>response('anthropic',[{type:'thinking',thinking:'private',signature:'signed-old'},text('Reading'),call('read','read_file',{path:'template'})],'tool_use'));
+  const first = await api.sendAnthropicMessage({...settings('anthropic'),model:'claude-opus-5-5'},[{role:'user',content:'test'}],[],'test');
+  await api.sendAnthropicMessage({...settings('anthropic'),model:'claude-sonnet-6-1'},[{role:'user',content:'test'},assistant(first),{role:'user',content:[result('read','contents')]}],[],'test');
+  assert.deepEqual(requests[0].thinking,{type:'adaptive'});
+  assert.ok(!JSON.stringify(requests[1]).includes('signed-old'));
+  assert.equal(requests[1].messages[1].content[1].type,'tool_use');
+  assert.equal(requests[1].messages[2].content[0].tool_use_id,'read');
+});
+test('Responses: model changes rebuild text and tool pairs without encrypted reasoning from the prior model', () => {
+  const input = api.buildResponsesInput([{role:'assistant',content:[text('Reading'),call('a','read_file',{})],replay:{provider:'chatgpt-oauth',model:'gpt-5.5',items:[{type:'reasoning',encrypted_content:'old'}]}},{role:'user',content:[result('a','data')]}],'chatgpt-oauth','gpt-6.1-sol');
+  assert.deepEqual(input.map(i=>i.type),['message','function_call','function_call_output']);
+});
+
+test('Provider replay is isolated across credential changes even with the same model', async () => {
+  for (const provider of ['anthropic','openai','chatgpt-oauth']) {
+    let account = 'first-account';
+    api.setChatGPTOAuthService({getUsableCredential:async()=>({accessToken:'fake',accountId:account})});
+    const native = provider === 'anthropic' ? {type:'thinking',thinking:'private',signature:'old-account-signature'} : {type:'reasoning',encrypted_content:'old-account-signature'};
+    const requests = transport(()=>response(provider,[native,text('Read'),call('r','read_file',{})],'tool_use'));
+    const send = provider==='anthropic'?api.sendAnthropicMessage:provider==='openai'?api.sendOpenAIMessage:api.sendChatGPTOAuthMessage;
+    const first = await send(settings(provider),[{role:'user',content:'test'}],[],'test');
+    account = 'second-account';
+    await send({...settings(provider),apiKey:'different-key'},[{role:'user',content:'test'},assistant(first),{role:'user',content:[result('r','content')]}],[],'test');
+    assert.ok(!JSON.stringify(requests[1]).includes('old-account-signature'));
+    assert.ok(JSON.stringify(requests[1]).includes('read_file'));
+  }
+});
+
+test('Settings: fresh persisted catalog opens repeatedly without network or resetting selected custom model', async () => {
+  const identity = await api.catalogIdentity('openai','settings-cache');
+  const plugin = {settings:{...settings('openai'),apiKey:'settings-cache',model:'future-custom',modelCatalog:{entries:[{identity,provider:'openai',models:[{value:'gpt-6.1-sol',label:'GPT 6.1'}],fetchedAt:Date.now()}]}},saveSettings:async()=>assert.fail('No write needed for fresh cache')};
+  const tab = new api.ChatSettingTab({},plugin);
+  tab.display = ()=>{};
+  globalThis.__providerRequest = async()=>assert.fail('Fresh cache must not request network');
+  await tab.loadCatalog(false);
+  await tab.loadCatalog(false);
+  assert.equal(tab.catalogModels[0].value,'gpt-6.1-sol');
+  assert.equal(plugin.settings.model,'future-custom');
+});
+test('Settings: stale cache renders before background request resolves and failures keep the selection', async () => {
+  const identity = await api.catalogIdentity('openai','settings-stale');
+  const models = [{value:'gpt-5.5',label:'GPT 5.5'}];
+  const plugin = {settings:{...settings('openai'),apiKey:'settings-stale',model:'future-custom',modelCatalog:{entries:[{identity,provider:'openai',models,fetchedAt:0}]}},saveSettings:async()=>{}};
+  const tab = new api.ChatSettingTab({},plugin);
+  const displays=[];
+  tab.display=()=>displays.push(tab.catalogModels);
+  let finish, started;
+  const waiting = new Promise(resolve=>started=resolve);
+  globalThis.__providerRequest=async()=>{started();return new Promise(resolve=>finish=resolve);};
+  const refreshing=tab.loadCatalog(false);
+  await waiting;
+  assert.equal(displays[0],models);
+  finish({status:503,json:{}});
+  await refreshing;
+  assert.equal(tab.catalogModels,models);
+  assert.equal(plugin.settings.model,'future-custom');
+});
+test('Settings: account change during refresh never displays the former account result', async () => {
+  let account='account-a';
+  const plugin={settings:{...settings('chatgpt-oauth'),modelCatalog:{entries:[]}},chatgptOAuth:{getCredential:()=>({accountId:account}),getUsableCredential:async()=>({accessToken:'fake',accountId:account})},saveSettings:async()=>{}};
+  const tab=new api.ChatSettingTab({},plugin);
+  tab.display=()=>{};
+  let finish, started;
+  const waiting=new Promise(resolve=>started=resolve);
+  globalThis.__providerRequest=async request=>request.url.includes('github.com') ? {status:200,json:{tag_name:'rust-v0.160.0'}} : (started(),new Promise(resolve=>finish=resolve));
+  const refreshing=tab.loadCatalog(true);
+  await waiting;
+  account='account-b';
+  finish({status:200,json:{models:[{slug:'only-account-a',visibility:'list'}]}});
+  await refreshing;
+  assert.equal(tab.catalogModels,undefined);
+  globalThis.__providerRequest=async()=>({status:200,json:{models:[{slug:'only-account-b',visibility:'list'}]}});
+  await tab.loadCatalog(false);
+  assert.equal(tab.catalogModels[0].value,'only-account-b');
+});
+
+test('Catalog identity is stable without WebCrypto and scoped to the provider', async () => {
+  const {createHash}=await import('node:crypto');
+  const identity=await api.catalogIdentity('openai','synthetic-key');
+  assert.equal(identity,createHash('sha256').update('openai:synthetic-key').digest('hex'));
+  assert.notEqual(identity,await api.catalogIdentity('anthropic','synthetic-key'));
+});
+
+test('OAuth honors model capability metadata for summary and parallel calls', async () => {
+  const identity=await api.catalogIdentity('chatgpt-oauth','capability-account');
+  const model='future-custom-model';
+  const state={entries:[{provider:'chatgpt-oauth',identity,fetchedAt:Date.now(),models:[{value:model,label:model,reasoningEfforts:['high'],defaultReasoningEffort:'invalid',supportsReasoningSummary:false,supportsParallelTools:false}]}]};
+  api.setChatGPTOAuthService({getUsableCredential:async()=>({accessToken:'fake',accountId:'capability-account'})});
+  const requests=transport(()=>response('chatgpt-oauth',[text('OK')]));
+  await api.sendChatGPTOAuthMessage({...settings('chatgpt-oauth'),model,modelCatalog:state},[{role:'user',content:'test'}],[],'test');
+  assert.deepEqual(requests[0].reasoning,{effort:'high'});
+  assert.equal(requests[0].parallel_tool_calls,false);
 });
