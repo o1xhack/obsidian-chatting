@@ -257,8 +257,10 @@ export class ChatSettingTab extends PluginSettingTab {
               }
               new Notice("ChatGPT OAuth disconnected.");
               this.refreshSettingsTab();
-            })
-        )
+            });
+          if (requireApiVersion("1.13.0")) button.setDestructive();
+          else button.setWarning();
+        })
         .addButton((button) =>
           button.setButtonText("Test").onClick(async () => {
             button.setButtonText("Testing...");
