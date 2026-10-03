@@ -564,3 +564,26 @@ test('OAuth honors model capability metadata for summary and parallel calls', as
   assert.deepEqual(requests[0].reasoning,{effort:'high'});
   assert.equal(requests[0].parallel_tool_calls,false);
 });
+
+for (const provider of ['anthropic','openai','chatgpt-oauth']) {
+  test(`${provider}: stopped request errors cannot affect a newer turn`, async () => {
+    const {app}=vaultApp(); const agent=new api.AgentLoop(app,settings(provider));
+    let rejectRequest, started;
+    const waiting=new Promise(resolve=>started=resolve);
+    globalThis.__providerRequest=async()=>{started();return new Promise((resolve,reject)=>rejectRequest=reject);};
+    const old=callbacks(); const run=agent.run('old',old); await waiting;
+    agent.clear();
+    transport(()=>response(provider,[text('new completed')]));
+    const next=callbacks(); await agent.run('new',next);
+    rejectRequest(new Error('late transport failure')); await run;
+    assert.deepEqual(old.errors,[]); assert.deepEqual(next.errors,[]);
+    assert.equal(agent.exportMessages().length,2);
+  });
+}
+test('Agent freezes provider/model configuration for a multi-tool turn', async () => {
+  const {app}=vaultApp(); const config=settings('anthropic'); const agent=new api.AgentLoop(app,config);
+  const requests=transport((body,index)=>response('anthropic',index===0?[call('r','read_file',{path:'Untitled.md'})]:[text('done')],index===0?'tool_use':'end_turn'));
+  await agent.run('read',callbacks({onToolCall(){config.model='claude-opus-5-5';config.provider='openai';config.apiKey='changed';}}));
+  assert.equal(requests.length,2);
+  assert.equal(requests[0].model,requests[1].model);
+});

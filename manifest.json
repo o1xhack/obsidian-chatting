@@ -1,7 +1,7 @@
 {
   "id": "chatting-with-ai",
   "name": "Chatting with AI",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minAppVersion": "1.11.4",
   "description": "Agentic AI chat assistant that reads, edits, and creates notes through natural conversation. Supports Anthropic, OpenAI, and ChatGPT account sign-in.",
   "author": "Yuxiao (o1xhack)",

@@ -20,7 +20,7 @@ const MAX_CONVERSATION_LENGTH = 50;
 const KEEP_RECENT = 40;
 
 // Debug logging: writes transcript to the vault's plugin config folder
-const DEBUG = true;
+const DEBUG = false;
 
 function debugLog(app: App, label: string, data: unknown): void {
   if (!DEBUG) return;
@@ -153,6 +153,8 @@ export class AgentLoop {
     this.aborted = false;
     const version = ++this.runVersion;
     const isStopped = () => this.aborted || version !== this.runVersion;
+    // Keep one provider/model/credential configuration for this entire turn.
+    const turnSettings = { ...this.settings };
 
     // Build context once per user turn and prepend to the user message
     const context = buildContext(this.app);
@@ -196,22 +198,24 @@ export class AgentLoop {
       imageNames: images.map((image) => image.fileName),
     });
 
-    const maxIterations = this.settings.maxIterations || 20;
+    const maxIterations = turnSettings.maxIterations || 20;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
 
       callbacks.onThinking();
+      if (isStopped()) return;
 
       let response;
       try {
         response = await sendMessage(
-          this.settings,
+          turnSettings,
           this.messages,
           TOOL_DEFINITIONS,
           systemPrompt
         );
       } catch (e) {
+        if (isStopped()) return;
         const msg = e instanceof Error ? e.message : String(e);
         debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
         callbacks.onError(msg);
@@ -248,6 +252,8 @@ export class AgentLoop {
       if (textParts.length > 0 && toolCalls.length > 0 && !hasAskUser) {
         callbacks.onResponse(textParts.join(""));
       }
+
+      if (isStopped()) return;
 
       // Append assistant message to history
       this.messages.push({ role: "assistant", content: response.content, replay: response.replay });
