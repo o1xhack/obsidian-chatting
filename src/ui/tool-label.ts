@@ -91,6 +91,13 @@ function subject(name: string, input: Record<string, unknown>): string {
 }
 
 export function toolLabel(name: string, input: Record<string, unknown> = {}, state: ToolState = "done"): string {
+  // A tool the provider called on an MCP server: "mcp:<server>:<tool>" (`api/mcp.ts`).
+  const mcp = /^mcp:([^:]*):(.*)$/.exec(name);
+  if (mcp) {
+    const [, server, tool] = mcp;
+    if (state === "running") return `Using ${tool} on ${server}…`;
+    return state === "error" ? `Using ${tool} on ${server} failed` : `Used ${tool} on ${server}`;
+  }
   const verbs = VERBS[name];
   if (!verbs) {
     const plain = name.replace(/_/g, " ");

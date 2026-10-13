@@ -13,13 +13,14 @@ import type {
 import { sendMessage } from "../api/client";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, MAX_CONVERSATION_LENGTH } from "./history";
+import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./history";
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
@@ -364,9 +365,16 @@ export class AgentLoop {
           block.type === "text" ? { type: "text", text: block.text }
           : block.type === "tool_use" ? { type: "tool_use", name: block.name, input: block.input }
           : { type: block.type }),
+        ...(response.serverCalls ? { serverCalls: response.serverCalls } : {}),
       });
 
       if (isStopped()) return;
+
+      // Tools the provider called on MCP servers: shown as steps, not run here.
+      for (const call of response.serverCalls ?? []) {
+        callbacks.onToolCall(serverToolName(call), call.input);
+        callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
+      }
 
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {
@@ -399,6 +407,8 @@ export class AgentLoop {
 
       // Append assistant message to history
       this.messages.push({ role: "assistant", content: response.content, replay: response.replay });
+      // Results of MCP calls stay in the replay: bounded like tool text.
+      if (response.serverCalls?.length) this.messages = withoutLargeToolText(this.messages);
 
       // If no tool calls, we're done
       if (toolCalls.length === 0) {

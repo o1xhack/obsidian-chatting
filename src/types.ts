@@ -24,7 +24,30 @@ export interface ChatSettings {
   debugLog: boolean;
   /** The vault folder with the skills, a subfolder with a SKILL.md each (`agent/skills.ts`). */
   skillsFolder: string;
+  /** Remote MCP servers the provider connects to (`api/mcp.ts`); tokens only in SecretStorage. */
+  mcpServers: McpServer[];
   modelCatalog?: import("./api/model-catalog").CatalogState;
+}
+
+/** A remote MCP server, connected by the provider (`api/mcp.ts`). */
+export interface McpServer {
+  id: string;
+  /** How the provider and the chat name it (letters, digits, `-`, `_`). */
+  name: string;
+  /** Its public https address. */
+  url: string;
+  enabled: boolean;
+  /** Its access token, in memory only (SecretStorage `chatting-with-ai-mcp-<id>`; never in data.json). */
+  token?: string;
+}
+
+/** A tool call the provider made on an MCP server, shown in the chat. */
+export interface ServerToolCall {
+  server: string;
+  tool: string;
+  input: Record<string, unknown>;
+  result: string;
+  isError: boolean;
 }
 
 /**
@@ -53,6 +76,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   followEdits: true,
   debugLog: false,
   skillsFolder: "Skills",
+  mcpServers: [],
 };
 
 // ─── Unified Message Format ─────────────────────────────────────────────────
@@ -142,6 +166,8 @@ export interface UnifiedResponse {
     inputTokens: number;
     outputTokens: number;
   };
+  /** Tools the provider called on MCP servers in this request; shown, not run here. */
+  serverCalls?: ServerToolCall[];
 }
 
 // ─── Conversation Context ───────────────────────────────────────────────────

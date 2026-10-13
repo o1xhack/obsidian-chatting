@@ -74,6 +74,12 @@ Every chat knows the names and descriptions of your skills; when a task matches 
 
 **Settings → Skills** sets the folder, lists your skills (each opens its `SKILL.md`) and starts a new one from a template with **New skill**. A skill without a description is listed, but the AI can't tell when to use it.
 
+## 🔌 MCP servers
+
+With an Anthropic or OpenAI API key, the assistant can use the tools of remote MCP servers (Linear, GitHub and others that offer one). Add a server under **Settings → MCP servers**: a name (letters, digits, `-`, `_`), its public https address and, if it needs one, a token. The provider connects to the servers that are on and calls their tools as the assistant decides; each call shows as a step ("Used create_issue on linear").
+
+The tools run without asking, so add only servers you trust. Tokens are kept in SecretStorage, never in `data.json`, and go to the provider with each request. Local servers and the ChatGPT account aren't supported: the provider has to reach the server, and the ChatGPT account's route offers no MCP. When you switch a server off or remove it, its earlier calls are no longer sent back to the provider.
+
 ## 🛠️ 22 vault-native tools
 
 | Group | Tools | What they do |
@@ -119,6 +125,7 @@ Below **Model**, **Thinking level** offers *Default* plus the levels the model l
 - **Follow the AI's edits** — on by default (see [Follow the AI's edits](#-follow-the-ais-edits)); the eye button in the chat header switches it too.
 - **Vault instructions** — opens the vault's `AGENTS.md`, or creates it (see [Your instructions in AGENTS.md](#-your-instructions-in-agentsmd)).
 - **Skills** — the folder with your skills (`Skills` by default), the skills in it and **New skill** (see [Skills](#-skills)).
+- **MCP servers** — remote MCP servers for Anthropic and OpenAI: a name, a public https address, an optional token and on/off each (see [MCP servers](#-mcp-servers)).
 - **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
 
 While an answer is being generated, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.
