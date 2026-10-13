@@ -60,6 +60,10 @@ A root `AGENTS.md` supplies vault-wide instructions; a folder's `AGENTS.md` adds
 
 Skills use the Claude Code / Codex folder format. Their instructions and supporting files can be read; bundled scripts are not executed.
 
+### Talk to it
+
+Press the voice button and say what you want: the assistant answers aloud, you can interrupt it or add to a running task, and the work is done by the chat model you selected, with its steps in the chat. Voice uses your ChatGPT account sign-in (Codex's voice service, included in the plan). See [Voice](docs/user-guide.md#-voice).
+
 ### Review the work and keep conversations going
 
 **Follow the AI's edits** opens changed passages or Canvas cards without taking focus from chat. Finished tool steps fold into a compact row you can expand. Per-answer **Undo** restores recorded edits, creations, renames and deletions; it asks before overwriting files that changed afterward. Snapshots are bounded and kept in memory, so undo is unavailable after a restart or when its snapshots expire.

@@ -1,6 +1,6 @@
 import { App, Modal, Notice, Platform, PluginSettingTab, Setting, SliderComponent, normalizePath, requireApiVersion, type SettingDefinitionItem, type TextComponent } from "obsidian";
 import type ChatPlugin from "./main";
-import type { ChatSettings, McpServer, Provider } from "./types";
+import type { ChatSettings, McpServer, Provider, VoiceMicMode } from "./types";
 import { DEFAULT_PROVIDER_MODELS } from "./types";
 import type { BrowserLogin } from "./auth/chatgptBrowserLogin";
 import type { ChatGPTDeviceAuthorization, PollHandle } from "./auth/chatgptOAuth";
@@ -11,6 +11,7 @@ import { validServerName, validServerUrl } from "./api/mcp";
 import { MIN_COMPACT_TOKENS, compactThreshold, defaultCompactThreshold } from "./agent/compaction";
 import { formatTokens } from "./agent/usage";
 import { formatBytes } from "./images";
+import { VOICES } from "./voice/codex";
 
 import { type ModelOption, type CatalogState, catalogIdentity, cachedCatalog, refreshCatalog, getCatalogModels, clearCatalogModels, catalogModel, catalogDefaultLevel, resolveThinkingLevel, thinkingLevelLabel, CATALOG_TTL } from "./api/model-catalog";
 
@@ -130,6 +131,11 @@ export class ChatSettingTab extends PluginSettingTab {
         { name: "Compaction point", aliases: ["Context", "Summarize", "Compact"], render: setting => this.renderCompactionPoint(setting) },
         { name: "Saved chats", aliases: ["Chat history", "Storage"], render: setting => this.renderSavedChats(setting) },
       ] },
+      { type: "group", heading: "Voice", items: [
+        { name: "ChatGPT account for voice", aliases: ["ChatGPT plan", "Codex"], render: setting => this.renderVoiceAccount(setting) },
+        { name: "Voice", render: setting => this.renderVoiceName(setting) },
+        { name: "Microphone", aliases: ["Hold to talk", "Hands-free"], render: setting => this.renderMicMode(setting) },
+      ] },
       { name: MCP_SERVERS, aliases: ["Connectors", "Model Context Protocol"], render: setting => this.renderMcpHeading(setting) },
       this.mcpServerList(),
       { name: "Debug log", aliases: ["Troubleshooting"], render: setting => this.renderDebugLog(setting) },
@@ -170,6 +176,7 @@ export class ChatSettingTab extends PluginSettingTab {
     this.renderSkills(containerEl);
     this.renderMaxIterations(new Setting(containerEl));
     this.renderChats(containerEl);
+    this.renderVoice(containerEl);
     this.renderMcpServers(containerEl);
     this.renderDebugLog(new Setting(containerEl));
   }
@@ -447,6 +454,60 @@ export class ChatSettingTab extends PluginSettingTab {
       .setName("Saved chats")
       .setDesc(`${chats === 1 ? "1 chat" : `${chats} chats`}, ${formatBytes(bytes)}, in the plugin's chats folder. A chat over 5 MB shows its size in the chat list; delete chats you no longer need there.`);
   }
+  // ─── Voice ─────────────────────────────────────────────────────────────
+
+  /** Before Obsidian 1.13: the Voice heading and its rows. */
+  private renderVoice(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Voice").setHeading();
+    this.renderVoiceAccount(new Setting(containerEl));
+    this.renderVoiceName(new Setting(containerEl));
+    this.renderMicMode(new Setting(containerEl));
+  }
+
+  /** Voice uses the ChatGPT account sign-in (shared with the ChatGPT provider). */
+  private renderVoiceAccount(setting: Setting): void {
+    setting.setName("ChatGPT account for voice");
+    const credential = this.plugin.chatgptOAuth.getCredential();
+    const what = "Voice talks through Codex's voice service, included in the ChatGPT plan; the work runs on the chat model you selected.";
+    if (credential) {
+      setting.setDesc(`${what} Connected (account ${credential.accountId ? maskAccountId(credential.accountId) : "without an ID"}), the same sign-in as the ChatGPT provider.`);
+      return;
+    }
+    setting
+      .setDesc(`${what} Not connected: it uses the same sign-in as the ChatGPT provider.`)
+      .addButton((button) => button.setButtonText("Connect ChatGPT").setCta().onClick(() => void this.connectChatGPT()));
+  }
+
+  private renderVoiceName(setting: Setting): void {
+    const s = this.plugin.settings;
+    setting
+      .setName("Voice")
+      .setDesc("How the assistant sounds.")
+      .addDropdown((dropdown) => {
+        for (const voice of VOICES) dropdown.addOption(voice, voice.charAt(0).toUpperCase() + voice.slice(1));
+        dropdown.setValue(s.voice).onChange(async (value) => {
+          s.voice = value;
+          await this.plugin.saveSettings();
+        });
+      });
+  }
+
+  private renderMicMode(setting: Setting): void {
+    const s = this.plugin.settings;
+    setting
+      .setName("Microphone")
+      .setDesc("Hands-free: just talk; the voice answers when you pause. Hold to talk: the microphone is on only while you hold the button.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("hands-free", "Hands-free")
+          .addOption("hold", "Hold to talk")
+          .setValue(s.voiceMicMode)
+          .onChange(async (value) => {
+            s.voiceMicMode = value as VoiceMicMode;
+            await this.plugin.saveSettings();
+          })
+      );
+  }
 
   // ─── MCP servers ───────────────────────────────────────────────────────
 
@@ -551,7 +612,7 @@ export class ChatSettingTab extends PluginSettingTab {
     const s = this.plugin.settings;
     setting
       .setName("Debug log")
-      .setDesc("For troubleshooting: writes requests and errors to debug.log in the plugin folder, including your messages (never keys). Copy it to send it on.")
+      .setDesc("For troubleshooting: writes requests, errors and voice events to debug.log in the plugin folder, including your messages (never keys). Copy it to send it on.")
       .addToggle((toggle) =>
         toggle
           .setValue(s.debugLog)
@@ -669,6 +730,7 @@ export class ChatSettingTab extends PluginSettingTab {
                 this.plugin.settings.modelCatalog.entries = this.plugin.settings.modelCatalog.entries.filter(e => e.provider !== "chatgpt-oauth");
                 await this.plugin.saveSettings();
               }
+              this.plugin.updateVoiceAvailable();
               new Notice("ChatGPT OAuth disconnected.");
               this.refreshSettingsTab();
             });
@@ -714,16 +776,7 @@ export class ChatSettingTab extends PluginSettingTab {
             .onClick(async () => {
               button.setDisabled(true);
               try {
-                if (Platform.isDesktop) {
-                  const login = await this.plugin.chatgptOAuth.beginBrowserAuthorization();
-                  const modal = new ChatGPTBrowserLoginModal(this.app, login, () => this.refreshSettingsTab());
-                  modal.open();
-                  window.open(login.authUrl, "_blank");
-                } else {
-                  await this.startDeviceLogin();
-                }
-              } catch (e) {
-                new Notice(e instanceof Error ? e.message : "Failed to start ChatGPT login.");
+                await this.connectChatGPT();
               } finally {
                 button.setDisabled(false);
               }
@@ -744,10 +797,34 @@ export class ChatSettingTab extends PluginSettingTab {
       this.plugin.chatgptOAuth.cancelBrowserLogin();
       const auth = await this.plugin.chatgptOAuth.beginDeviceAuthorization();
       const handle = this.plugin.chatgptOAuth.pollDeviceAuthorization(auth);
-      new ChatGPTDeviceLoginModal(this.app, auth, handle, () => this.refreshSettingsTab()).open();
+      new ChatGPTDeviceLoginModal(this.app, auth, handle, () => this.signedIn()).open();
     } catch (e) {
       new Notice(e instanceof Error ? e.message : "Failed to start ChatGPT login.");
     }
+  }
+
+  /**
+   * Sign in with ChatGPT: in the browser on desktop, with a device code on
+   * mobile. The provider's row and the voice row use it.
+   */
+  private async connectChatGPT(): Promise<void> {
+    if (!Platform.isDesktop) {
+      await this.startDeviceLogin();
+      return;
+    }
+    try {
+      const login = await this.plugin.chatgptOAuth.beginBrowserAuthorization();
+      new ChatGPTBrowserLoginModal(this.app, login, () => this.signedIn()).open();
+      window.open(login.authUrl, "_blank");
+    } catch (e) {
+      new Notice(e instanceof Error ? e.message : "Failed to start ChatGPT login.");
+    }
+  }
+
+  /** After a sign-in: the chat's voice button follows it, and the settings show it. */
+  private signedIn(): void {
+    this.plugin.updateVoiceAvailable();
+    this.refreshSettingsTab();
   }
 
   // ─── Model picker ─────────────────────────────────────────────────────────

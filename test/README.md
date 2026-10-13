@@ -154,8 +154,15 @@ compaction (Anthropic's threshold edit and beta header where the model has
 it, OpenAI's and the Codex route's `context_management`, what later requests
 send; the Codex route refusing it; the plugin's summary at the compaction
 point, after another provider's encrypted compaction (once), on a request
-too long, and on Compact now; the transcript). These tests do not establish
-live-service or physical-iOS behavior.
+too long, and on Compact now; the transcript). `voice.test.mjs`: live voice with fake WebRTC, microphone
+and audio (the call on Codex's voice service with the ChatGPT sign-in and
+its errors; the open note told to the voice model, event parsing and
+chunked answers, delegations
+run as chat turns with what was said before them, steering a running
+voice turn, `ask_user` ending a voice turn, hold to talk and mute,
+ending, the voice settings, the background on mobile and desktop, the
+device check's call). These tests do not establish live-service or
+physical-iOS behavior.
 
 Two Node scripts that exercise the ChatGPT/Codex Responses endpoint
 **without** going through Obsidian, so iteration on the
