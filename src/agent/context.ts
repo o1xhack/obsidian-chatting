@@ -1,11 +1,13 @@
 import { App } from "obsidian";
-import type { ConversationContext } from "../types";
+import type { ConversationContext, VoiceTurn } from "../types";
 
 /**
  * Builds a snapshot of the current workspace context.
- * Refreshed each turn so the system prompt reflects the latest state.
+ * Refreshed each turn; it goes into the user message. `voice` marks a
+ * turn from a voice conversation, whose answer will be spoken;
+ * `voiceTranscript` is what was said there since the last request.
  */
-export function buildContext(app: App): ConversationContext {
+export function buildContext(app: App, voice = false, voiceTranscript: VoiceTurn[] = []): ConversationContext {
   const activeFile = app.workspace.getActiveFile();
   let selection: string | null = null;
 
@@ -23,5 +25,7 @@ export function buildContext(app: App): ConversationContext {
     selection,
     vaultName: app.vault.getName(),
     fileCount: app.vault.getMarkdownFiles().length,
+    ...(voice ? { voice: true } : {}),
+    ...(voiceTranscript.length ? { voiceTranscript } : {}),
   };
 }

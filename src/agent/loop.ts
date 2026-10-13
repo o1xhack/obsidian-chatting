@@ -10,6 +10,7 @@ import type {
   MentionContext,
   FileAttachment,
   UnifiedResponse,
+  VoiceTurn,
 } from "../types";
 import { sendMessage } from "../api/client";
 import { ProviderError, StreamCutError } from "../api/errors";
@@ -36,6 +37,13 @@ import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryRequest } from "./summ
 function summaryTurnId(): string {
   return `summary-${newTurnId()}`;
 }
+
+/**
+ * The tool result of `ask_user` in a voice turn: the question ends the
+ * turn as its answer (as Codex's background agent does) and the voice
+ * hands over the user's spoken answer as the next request.
+ */
+export const VOICE_ASK_RESULT = "Asked aloud in the voice conversation. The user's answer comes as their next message.";
 
 /** Sending a request again (a cut-off stream, back from the background); tests shorten the wait. */
 export const RESUME = {
@@ -141,7 +149,9 @@ export class AgentLoop {
   /** The run whose loop is working now (0: none); `steer()` adds to it. */
   private loopVersion = 0;
   /** Messages the user added while the loop works; sent with its next request (`steer`). */
-  private steered: string[] = [];
+  private steered: { text: string; context?: string }[] = [];
+  /** The running turn comes from a voice conversation (`ask_user` ends it). */
+  private voiceTurn = false;
   /** Turns holding this loop (`hold()`). */
   private holds = 0;
   /** The vault root's AGENTS.md as the last turn read it (in the system prompt). */
@@ -165,18 +175,20 @@ export class AgentLoop {
    * Add a message to the running turn, as the chat apps let you steer a
    * running task: it goes with the loop's next request, after the current
    * step. False when no loop is working (start a turn instead). What
-   * arrives after the last step is returned by `takeSteered()`.
+   * arrives after the last step is returned by `takeSteered()`. `context`
+   * goes to the model with it, not into the chat (what was said in voice
+   * before the request).
    */
-  steer(text: string): boolean {
+  steer(text: string, context?: string): boolean {
     if (!this.loopVersion || this.loopVersion !== this.runVersion) return false;
-    this.steered.push(text);
-    debugLog(this.app, "STEER", { text });
+    this.steered.push({ text, ...(context ? { context } : {}) });
+    debugLog(this.app, "STEER", { text, context });
     return true;
   }
 
   /** Added messages the finished turn didn't get to; they need a turn of their own. */
   takeSteered(): string[] {
-    return this.steered.splice(0);
+    return this.steered.splice(0).map((item) => item.text);
   }
 
   /** Stop a running turn and clear the history. */
@@ -453,6 +465,9 @@ export class AgentLoop {
    * `contextTokens`: the conversation's context after its last request;
    * past the compaction point the plugin summarizes first where the
    * provider doesn't compact.
+   * `voice`: the turn comes from a voice conversation (its context asks
+   * for a short, speakable answer), with what was said there before the
+   * request; null for a typed turn.
    */
   async run(
     userMessage: string,
@@ -463,10 +478,12 @@ export class AgentLoop {
     mentioned: MentionContext | null = null,
     notes: string[] = [],
     files: FileAttachment[] = [],
-    contextTokens = 0
+    contextTokens = 0,
+    voice: VoiceTurn[] | null = null
   ): Promise<void> {
     const version = ++this.runVersion;
     const isStopped = () => version !== this.runVersion;
+    this.voiceTurn = !!voice;
     // This turn's selection: the tools change only that text of its note (a
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
@@ -475,8 +492,10 @@ export class AgentLoop {
 
     // Build context once per user turn and prepend to the user message;
     // the files the message links to come next, the message itself last.
-    const context = { ...buildContext(this.app), ...(notes.length ? { notes } : {}) };
-    let contextPrefix = mentioned ? `${buildContextMessage(context)}\n\n${mentioned.text}` : buildContextMessage(context);
+    const context = { ...buildContext(this.app, !!voice, voice ?? []), ...(notes.length ? { notes } : {}) };
+    let contextPrefix = mentioned ? `${buildContextMessage(context)}
+
+${mentioned.text}` : buildContextMessage(context);
     images = [...images, ...mentioned?.images ?? []];
     files = [...files, ...mentioned?.files ?? []];
     const budgetError = attachmentBudgetError(images, files);
@@ -541,7 +560,7 @@ export class AgentLoop {
 
     debugLog(this.app, "USER_MESSAGE", {
       userMessage,
-      // As the model gets it: the context lines first.
+      // As the model gets it: the context lines (open note, voice context, notes, linked files) first.
       sent: fullMessage,
       model: turnSettings.model,
       provider: turnSettings.provider,
@@ -563,6 +582,7 @@ export class AgentLoop {
    */
   async continueTurn(callbacks: AgentCallbacks): Promise<void> {
     const version = ++this.runVersion;
+    this.voiceTurn = false;
     if (!this.owesAnswer()) return;
     debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
     const turnSettings = { ...this.settings };
@@ -761,22 +781,30 @@ export class AgentLoop {
       }));
       this.messages.push({ role: "user", content: resultBlocks });
 
+      let askedAloud = "";
       for (const [index, tc] of toolCalls.entries()) {
         if (isStopped()) return;
         callbacks.onToolCall(tc.name!, tc.input!);
         if (isStopped()) return;
 
+        // In a voice turn the question is spoken as the turn's answer instead of waiting in the input.
+        const voiceQuestion = this.voiceTurn && tc.name === "ask_user" ? (typeof tc.input?.question === "string" ? tc.input.question.trim() : "") : "";
+        if (voiceQuestion) askedAloud = askedAloud ? `${askedAloud}\n\n${voiceQuestion}` : voiceQuestion;
         // A newly discovered rule must reach the model before a write.
         // Rules returned earlier in this same batch have not reached it yet.
         const knownRules = instructionsGiven(afterCompaction(this.messages.slice(0, -1), () => true));
-        const initialRules = await folderInstructionContext(this.app, toolPaths(this.app, tc.name!, tc.input!), knownRules);
+        const initialRules = voiceQuestion
+          ? { text: "", sources: [] as string[] }
+          : await folderInstructionContext(this.app, toolPaths(this.app, tc.name!, tc.input!), knownRules);
         let folderRules = initialRules.text;
         const instructionSources = initialRules.sources;
         if (isStopped()) return;
         const writes = ["edit_document", "create_file", "rename_file", "delete_file", "set_properties", "edit_canvas"];
-        const result = folderRules && writes.includes(tc.name!)
-          ? { result: "No changes made. Read the folder instructions below, then retry the tool if it complies.", isError: true }
-          : await executeTool(this.app, tc.name!, tc.input!, callbacks.onAskUser, scope, callbacks.changes, turnSettings.skillsFolder);
+        const result = voiceQuestion
+          ? { result: VOICE_ASK_RESULT, isError: false, instructionPaths: undefined as string[] | undefined }
+          : folderRules && writes.includes(tc.name!)
+            ? { result: "No changes made. Read the folder instructions below, then retry the tool if it complies.", isError: true }
+            : await executeTool(this.app, tc.name!, tc.input!, callbacks.onAskUser, scope, callbacks.changes, turnSettings.skillsFolder);
         if (result.instructionPaths?.length) {
           const discovered = await folderInstructionContext(this.app, result.instructionPaths, new Set([...knownRules, ...instructionSources]));
           folderRules = [folderRules, discovered.text].filter(Boolean).join("\n\n");
@@ -812,9 +840,14 @@ export class AgentLoop {
       if (isStopped()) return;
       // What the user added meanwhile goes with the next request, after the
       // results; without another request (the last step) it runs next instead.
-      if (i + 1 < maxIterations) for (const text of this.steered.splice(0)) {
-        resultBlocks.push({ type: "text", text: `[The user added while you were working:] ${text}` });
+      if (i + 1 < maxIterations) for (const { text, context } of this.steered.splice(0)) {
+        resultBlocks.push({ type: "text", text: `[The user added while you were working:${context ? ` ${context}` : ""}] ${text}` });
         callbacks.onSteered?.(text);
+      }
+      // A question in a voice turn is its answer; the user's reply starts the next turn.
+      if (askedAloud) {
+        callbacks.onResponse(askedAloud);
+        return;
       }
     }
 
