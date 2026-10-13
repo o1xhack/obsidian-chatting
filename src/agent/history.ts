@@ -1,8 +1,15 @@
 import type { ChatHistoryEntry, ContentBlock, UnifiedMessage } from "../types";
 
+/**
+ * A user message that starts a turn. Tool results never do, also with a
+ * message the user added to the running turn next to them (steering):
+ * cutting there would orphan the results.
+ */
 function startsUserTurn(message: UnifiedMessage): boolean {
-  return message.role === "user" && (typeof message.content === "string" ||
-    message.content.some(block => block.type === "text" || block.type === "image"));
+  if (message.role !== "user") return false;
+  if (typeof message.content === "string") return true;
+  return !message.content.some(block => block.type === "tool_result") &&
+    message.content.some(block => block.type === "text" || block.type === "image");
 }
 
 /**

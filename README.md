@@ -25,6 +25,7 @@
 - **22 vault-native tools** — read, edit, search, create, rename, frontmatter, tags and properties, links, canvases, web pages, images, skills. The agent goes from idea to changed files without leaving the chat.
 - **Mobile-parity, by design** — no localhost callbacks; iOS and Android behave the same as desktop.
 - **Streamed answers** — the answer appears as the model writes it; where a provider doesn't allow that on a phone, it appears at once when it's done.
+- **Add to a running answer** — type and send while the AI is still working: your message joins the running task (shown as *Queued* until the AI takes it in) instead of waiting. The button is Stop while the input is empty.
 - **Selection scope** — highlight text in any note, send it to chat, the assistant edits only inside the selection.
 - **Secrets in the OS keychain** — never in `data.json`, never synced across devices.
 - **MCP servers** — with an Anthropic or OpenAI API key, add remote MCP servers (public https, optional token) in the settings; the provider connects to them and the AI uses their tools, shown as steps in the chat. They run without asking, so add only servers you trust. Not available with the ChatGPT account.

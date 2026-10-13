@@ -116,6 +116,9 @@ unstreamed one, the Codex route with its endpoint and headers; the
 retry only before text is shown; a cut-off stream sent again, at most
 twice). `stream-desktop.test.mjs`: desktop streams through Node's `https`
 (errors, Stop); on mobile a blocked `fetch` switches only that URL.
+`typed-steering.test.mjs`: typing while an answer runs (queued, taken in
+with the next step or run as the next turn; Stop and Clear drop it;
+trimming never starts at tool results with an added message).
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without

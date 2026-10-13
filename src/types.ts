@@ -277,6 +277,8 @@ export interface AgentCallbacks {
   onResponse: (text: string) => void;
   onAskUser: (question: string) => Promise<string>;
   onError: (error: string) => void;
+  /** A message the user added to the running turn (`AgentLoop.steer`) went out with its next step. */
+  onSteered?: (text: string) => void;
   /** Where the turn's tools record their vault changes (undo per answer). */
   changes?: ChangeLog;
 }
