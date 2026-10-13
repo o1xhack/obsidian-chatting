@@ -23,7 +23,8 @@
 
 - **三个 provider,自己挑** —— Anthropic API、OpenAI API,或者直接用你的 ChatGPT 账号登录。不搞一堆半成品 provider 的市场。
 - **14 个 vault 原生工具** —— 读、改、搜索、创建、重命名、frontmatter、backlinks 全覆盖。从想法到改动文件,不用离开聊天框。
-- **手机端不打折** —— 不靠 streaming、不依赖 Node-only 模块、不用 localhost 回调。iOS 和 Android 与桌面表现一致。
+- **手机端不打折** —— 不用 localhost 回调。iOS 和 Android 与桌面表现一致。
+- **流式回答** —— 模型边写，回答边显示；手机上若服务商不允许，则在写完后一次显示。
 - **选区作用域** —— 在笔记里选中一段文字发到聊天里,助手只在选区内动手。
 - **密钥进操作系统钥匙串** —— 绝不写进 `data.json`,不会被同步到别的设备。
 
@@ -141,7 +142,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 
 | 原则 | 含义 |
 |---|---|
-| **移动端不是事后补丁** | 每一次改动都在 iOS 和 Android 上验证过。不用 streaming、不用 Node-only 模块、不用 localhost 回调。 |
+| **移动端不是事后补丁** | 每一次改动都在 iOS 和 Android 上验证过。平台允许时回答以流式显示，否则通过 Obsidian 的 `requestUrl()` 一次送达。不用 localhost 回调。 |
 | **三个靠谱 provider** | Anthropic + OpenAI 保稳定,ChatGPT 账号给那些不想配 API key 的人。 |
 | **密钥进钥匙串** | API key 和 OAuth 凭据都走 Obsidian SecretStorage。绝不进 `data.json`,所以也不会被 Obsidian Sync 同步到别的设备。 |
 | **不做向量索引** | 线性搜索 + 上限保护。可预期、无后台任务、手机内存压力小。 |
@@ -173,7 +174,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>移动端真的能用吗?</b></summary>
 
-可以 —— 整个项目就是围绕这个约束设计的。请求走 Obsidian 的 `requestUrl()`(手机 WebView 强制 CORS),不用 streaming、不用 Node-only 模块、OAuth 也不用 localhost 回调。iOS、Android 跑的是和桌面一模一样的代码路径。
+可以 —— 整个项目就是围绕这个约束设计的。请求走 Obsidian 的 `requestUrl()`(手机 WebView 强制 CORS),只有聊天回答例外，它以流式传输：桌面通过 Node 的 `https`，手机在服务商允许时通过 `fetch`，否则通过 `requestUrl()` 一次送达。OAuth 不用 localhost 回调。iOS 和 Android 拥有与桌面相同的功能。
 
 </details>
 

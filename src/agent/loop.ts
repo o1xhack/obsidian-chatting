@@ -6,15 +6,24 @@ import type {
   AgentCallbacks,
   SelectionScope,
   ImageAttachment,
+  ToolResult,
+  MentionContext,
+  FileAttachment,
+  UnifiedResponse,
 } from "../types";
 import { sendMessage } from "../api/client";
+import { StreamCutError } from "../api/errors";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
+import { folderInstructions, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
+import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { trimHistory } from "./history";
+import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, MAX_CONVERSATION_LENGTH } from "./history";
+import { debugLog } from "../debug";
 
 /**
  * The API history: saving keeps the last 80 messages. Before a turn, a
@@ -23,25 +32,28 @@ import { trimHistory } from "./history";
  * chain to its previous response. Both keep whole user turns, so they
  * round up: a long turn can keep a few more messages.
  */
-const MAX_CONVERSATION_LENGTH = 80;
 const KEEP_RECENT = 60;
 
-// Debug logging: writes transcript to the vault's plugin config folder
-const DEBUG = false;
+/** Requests sent again per turn at most after their stream was cut off; after that the error shows. */
+const MAX_RESENDS = 2;
 
-function debugLog(app: App, label: string, data: unknown): void {
-  if (!DEBUG) return;
-  try {
-    const timestamp = new Date().toISOString();
-    const entry = `\n--- ${label} [${timestamp}] ---\n${JSON.stringify(data, null, 2)}\n`;
-    // Use the adapter to write into the current vault config folder.
-    void app.vault.adapter.append(
-      `${app.vault.configDir}/plugins/chatting-with-ai/debug.log`,
-      entry
-    );
-  } catch {
-    // Debug logging should never break the app
-  }
+/**
+ * What the chat view shows and saves for a tool result: the text and a
+ * marker, never the image or file data, which lives only in the agent
+ * history (otherwise chat-state.json would hold it twice).
+ */
+function displayResult(result: ToolResult): ToolResult {
+  const images = result.images?.length ?? 0;
+  const files = result.files?.length ?? 0;
+  if (!images && !files) return result;
+  const what = [
+    ...(images ? [images === 1 ? "1 image" : `${images} images`] : []),
+    ...(files ? [files === 1 ? "1 file" : `${files} files`] : []),
+  ].join(" and ");
+  return {
+    result: `${result.result}\n\n[${what} sent to the model]`,
+    isError: result.isError,
+  };
 }
 
 /**
@@ -57,6 +69,12 @@ export class AgentLoop {
   private settings: ChatSettings;
   /** Counts runs and stops; a run whose number is no longer current is stopped. */
   private runVersion = 0;
+  /** Cancels the running turn's HTTP request (streamed answers). */
+  private request: AbortController | null = null;
+  /** The vault root's AGENTS.md as the last turn read it (in the system prompt). */
+  private vaultInstructions: string | null = null;
+  /** The skills part of the system prompt, read with the instructions. */
+  private skills: string | null = null;
 
   constructor(app: App, settings: ChatSettings) {
     this.app = app;
@@ -66,6 +84,7 @@ export class AgentLoop {
   /** Abort a running loop (e.g. user navigates away) */
   abort(): void {
     this.runVersion++;
+    this.request?.abort();
   }
 
   /** Stop a running turn and clear the history. */
@@ -74,6 +93,21 @@ export class AgentLoop {
     this.messages = [];
     clearOpenAIState();
     clearChatGPTOAuthState();
+  }
+
+  /**
+   * Stop a running turn and cut the history to just before the turn
+   * `turnId` (editing a message, regenerating). The cut history is
+   * a new array, so OpenAI replays it in full instead of chaining.
+   */
+  cutBeforeTurn(turnId: string): void {
+    this.abort();
+    this.messages = cutBeforeTurn(this.messages, turnId);
+  }
+
+  /** Turn `turnId` can be edited or answered again (the API history still holds it). */
+  canEditTurn(turnId: string): boolean {
+    return editableTurn(this.messages, turnId);
   }
 
   /** Export API messages for persistence */
@@ -95,7 +129,7 @@ export class AgentLoop {
 
   /** Export the full conversation as a readable markdown transcript */
   exportTranscript(): string {
-    const systemPrompt = buildSystemPrompt();
+    const systemPrompt = buildSystemPrompt(this.vaultInstructions, this.skills);
 
     const parts: string[] = [
       `# Chatting with AI Transcript`,
@@ -131,6 +165,9 @@ export class AgentLoop {
           } else if (block.type === "image" && block.image) {
             parts.push(`[Image attachment: ${block.image.fileName}]`);
             parts.push(``);
+          } else if (block.type === "file" && block.file) {
+            parts.push(`[File attachment: ${block.file.fileName}]`);
+            parts.push(``);
           } else if (block.type === "tool_use") {
             parts.push(`### Tool Call: \`${block.name}\``);
             parts.push(``);
@@ -145,6 +182,14 @@ export class AgentLoop {
             parts.push(block.content || "(empty)");
             parts.push("```");
             parts.push(``);
+            for (const image of block.images ?? []) {
+              parts.push(`[Image: ${image.fileName}]`);
+              parts.push(``);
+            }
+            for (const file of block.files ?? []) {
+              parts.push(`[File: ${file.fileName}]`);
+              parts.push(``);
+            }
           }
         }
       }
@@ -153,24 +198,42 @@ export class AgentLoop {
     return parts.join("\n");
   }
 
-  /** Run one user turn through the agentic loop */
+  /**
+   * Run one user turn through the agentic loop; `turnId` marks where it
+   * starts. `mentioned`: the files the message links to, sent before it.
+   * `notes`: what the user did since the last turn (e.g. undid an answer's
+   * changes), for the model.
+   * `files`: PDF, Office and text files the user attached.
+   */
   async run(
     userMessage: string,
     callbacks: AgentCallbacks,
     selection?: SelectionScope | null,
-    images: ImageAttachment[] = []
+    images: ImageAttachment[] = [],
+    turnId: string = newTurnId(),
+    mentioned: MentionContext | null = null,
+    notes: string[] = [],
+    files: FileAttachment[] = []
   ): Promise<void> {
     const version = ++this.runVersion;
     const isStopped = () => version !== this.runVersion;
+    const request = new AbortController();
+    this.request = request;
+    const onTextDelta = (text: string) => {
+      if (!isStopped()) callbacks.onTextDelta?.(text);
+    };
     // This turn's selection: the tools change only that text of its note (a
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
     // Keep one provider/model/credential configuration for this entire turn.
     const turnSettings = { ...this.settings };
 
-    // Build context once per user turn and prepend to the user message
-    const context = buildContext(this.app);
-    const contextPrefix = buildContextMessage(context);
+    // Build context once per user turn and prepend to the user message;
+    // the files the message links to come next, the message itself last.
+    const context = { ...buildContext(this.app), ...(notes.length ? { notes } : {}) };
+    const contextPrefix = mentioned ? `${buildContextMessage(context)}\n\n${mentioned.text}` : buildContextMessage(context);
+    images = [...images, ...mentioned?.images ?? []];
+    files = [...files, ...mentioned?.files ?? []];
 
     // If there's a selection, inject it as scoped context
     let fullMessage: string;
@@ -189,28 +252,38 @@ export class AgentLoop {
       fullMessage = `${contextPrefix}\n\n${userMessage}`;
     }
 
-    const content: string | ContentBlock[] = images.length > 0
+    const content: string | ContentBlock[] = images.length > 0 || files.length > 0
       ? [
           ...images.map((image): ContentBlock => ({ type: "image", image })),
+          ...files.map((file): ContentBlock => ({ type: "file", file })),
           { type: "text", text: fullMessage },
         ]
       : fullMessage;
-    this.messages.push({ role: "user", content });
+    this.messages.push({ role: "user", content, turnId });
 
     // Prune if conversation is too long
     this.pruneHistory();
 
-    // System prompt is static (cache-friendly). Built once, identical every call.
-    const systemPrompt = buildSystemPrompt();
+    // System prompt is static (cache-friendly): the built-in one, the
+    // vault's skills and its AGENTS.md, which rarely change. Read once per turn.
+    this.vaultInstructions = await rootInstructions(this.app);
+    this.skills = skillsPrompt(findSkills(this.app, turnSettings.skillsFolder));
+    const systemPrompt = buildSystemPrompt(this.vaultInstructions, this.skills);
 
     debugLog(this.app, "USER_MESSAGE", {
       userMessage,
+      // As the model gets it: the context lines first.
+      sent: fullMessage,
+      model: turnSettings.model,
+      provider: turnSettings.provider,
       hasSelection: !!selection,
       imageCount: images.length,
       imageNames: images.map((image) => image.fileName),
+      fileNames: files.map((file) => file.fileName),
     });
 
     const maxIterations = turnSettings.maxIterations || 20;
+    let resends = 0;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
@@ -218,26 +291,53 @@ export class AgentLoop {
       callbacks.onThinking();
       if (isStopped()) return;
 
-      let response;
-      try {
-        response = await sendMessage(
-          turnSettings,
-          this.messages,
-          TOOL_DEFINITIONS,
-          systemPrompt,
-          isStopped
-        );
-      } catch (e) {
-        if (isStopped()) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
-        callbacks.onError(msg);
-        return;
+      let response: UnifiedResponse | undefined;
+      while (!response) {
+        try {
+          response = await sendMessage(
+            turnSettings,
+            this.messages,
+            TOOL_DEFINITIONS,
+            systemPrompt,
+            isStopped,
+            { onTextDelta, signal: request.signal }
+          );
+        } catch (e) {
+          if (isStopped()) return;
+          const msg = e instanceof Error ? e.message : String(e);
+          // The stream was cut off (a dropped connection, no provider error):
+          // send the same request again. No tool ran for it, so nothing runs twice.
+          if (e instanceof StreamCutError && resends < MAX_RESENDS) {
+            resends++;
+            debugLog(this.app, "API_RESEND", { error: msg, resend: resends });
+            // The cut attempt's streamed text goes; the answer streams anew.
+            callbacks.onThinking();
+            if (isStopped()) return;
+            continue;
+          }
+          debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
+          callbacks.onError(msg);
+          return;
+        }
       }
 
-      debugLog(this.app, "API_RESPONSE", { stopReason: response.stopReason, contentTypes: response.content.map(b => b.type), usage: response.usage });
+      debugLog(this.app, "API_RESPONSE", {
+        stopReason: response.stopReason, usage: response.usage,
+        // The answer as received: text, and tool calls with their parameters.
+        content: response.content.map((block) =>
+          block.type === "text" ? { type: "text", text: block.text }
+          : block.type === "tool_use" ? { type: "tool_use", name: block.name, input: block.input }
+          : { type: block.type }),
+        ...(response.serverCalls ? { serverCalls: response.serverCalls } : {}),
+      });
 
       if (isStopped()) return;
+
+      // Tools the provider called on MCP servers: shown as steps, not run here.
+      for (const call of response.serverCalls ?? []) {
+        callbacks.onToolCall(serverToolName(call), call.input);
+        callbacks.onToolResult(serverToolName(call), { result: call.result, isError: call.isError });
+      }
 
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {
@@ -299,17 +399,26 @@ export class AgentLoop {
           tc.name!,
           tc.input!,
           callbacks.onAskUser,
-          scope
+          scope,
+          callbacks.changes,
+          turnSettings.skillsFolder
         );
+        debugLog(this.app, "TOOL_CALL", { name: tc.name, input: tc.input, result: result.result, isError: result.isError });
 
         if (isStopped()) return;
+        // A folder's own AGENTS.md comes with the first result touching a file there.
+        const folderRules = await folderInstructions(this.app, toolPaths(this.app, tc.name!, tc.input!), instructionsGiven(this.messages));
+        if (isStopped()) return;
+        if (folderRules) result.result = `${result.result}\n\n${folderRules}`;
         resultBlocks[index] = {
           type: "tool_result",
           tool_use_id: tc.id,
           content: result.result,
           is_error: result.isError,
+          ...(result.images?.length ? { images: result.images } : {}),
+          ...(result.files?.length ? { files: result.files } : {}),
         };
-        callbacks.onToolResult(tc.name!, result);
+        callbacks.onToolResult(tc.name!, displayResult(result));
       }
 
       if (isStopped()) return;

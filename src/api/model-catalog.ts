@@ -1,6 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { requestUrl } from "obsidian";
 import type { Provider } from "../types";
+import { DEFAULT_PROVIDER_MODELS } from "../types";
 import type { ChatGPTOAuthService } from "../auth/chatgptOAuth";
 
 export interface ModelOption {
@@ -10,6 +11,8 @@ export interface ModelOption {
   defaultReasoningEffort?: string;
   supportsReasoningSummary?: boolean;
   supportsParallelTools?: boolean;
+  /** Anthropic thinking mode the model supports (`capabilities.thinking.types`). */
+  thinkingType?: "adaptive" | "enabled";
 }
 export interface CatalogEntry {
   identity: string;
@@ -42,11 +45,12 @@ export function normalizeCatalogState(value: unknown): CatalogState {
           typeof entry.identity !== "string" || !/^[a-f0-9]{64}$/.test(entry.identity) ||
           typeof entry.fetchedAt !== "number" || !Number.isFinite(entry.fetchedAt) || !Array.isArray(entry.models)) continue;
       const models = entry.models.filter(record).filter(m => typeof m.value === "string" && typeof m.label === "string")
-        .map(m => ({ value: m.value as string, label: m.label as string,
+        .map((m): ModelOption => ({ value: m.value as string, label: m.label as string,
           reasoningEfforts: Array.isArray(m.reasoningEfforts) ? m.reasoningEfforts.filter((e): e is string => typeof e === "string") : undefined,
           defaultReasoningEffort: typeof m.defaultReasoningEffort === "string" ? m.defaultReasoningEffort : undefined,
           supportsReasoningSummary: typeof m.supportsReasoningSummary === "boolean" ? m.supportsReasoningSummary : undefined,
-          supportsParallelTools: typeof m.supportsParallelTools === "boolean" ? m.supportsParallelTools : undefined }));
+          supportsParallelTools: typeof m.supportsParallelTools === "boolean" ? m.supportsParallelTools : undefined,
+          thinkingType: m.thinkingType === "adaptive" || m.thinkingType === "enabled" ? m.thinkingType : undefined }));
       state.entries.push({ identity: entry.identity, provider: entry.provider as Provider, fetchedAt: entry.fetchedAt, models });
     }
   }
@@ -61,22 +65,46 @@ export function getCatalogModels(provider: Provider): ModelOption[] | undefined 
 export function clearCatalogModels(provider: Provider): void { activeModels.delete(provider); }
 export function getCodexClientVersion(): string { return clientVersion; }
 export function migrateOAuthModel(slug: string): string {
-  return slug ? slug.replace(/^gpt-(\d+)-(\d{1,2})(?=-|$)/, "gpt-$1.$2") : "gpt-5.5";
+  return slug ? slug.replace(/^gpt-(\d+)-(\d{1,2})(?=-|$)/, "gpt-$1.$2") : DEFAULT_PROVIDER_MODELS["chatgpt-oauth"];
 }
 export function supportsReasoning(model: string): boolean {
   const major = model.match(/^gpt-(\d+)/)?.[1];
   return /^o\d/.test(model) || (!!major && Number(major) >= 5) || /codex/i.test(model);
 }
-export function oauthParallelTools(model: string): boolean {
-  return activeModels.get("chatgpt-oauth")?.find(m => m.value === model)?.supportsParallelTools !== false;
+/** The active catalog's entry for a model, if the provider's list has it. */
+export function catalogModel(provider: Provider, model: string): ModelOption | undefined {
+  return activeModels.get(provider)?.find(m => m.value === model);
 }
-export function oauthReasoning(model: string): Record<string, string> | undefined {
-  const option = activeModels.get("chatgpt-oauth")?.find(m => m.value === model);
+export function oauthParallelTools(model: string): boolean {
+  return catalogModel("chatgpt-oauth", model)?.supportsParallelTools !== false;
+}
+/** The thinking level picked in settings if the model offers it; otherwise undefined (the default). */
+export function resolveThinkingLevel(option: ModelOption | undefined, level: string): string | undefined {
+  return level && option?.reasoningEfforts?.includes(level) ? level : undefined;
+}
+/** The model's default level, if the catalog names one it offers. */
+export function catalogDefaultLevel(option: ModelOption | undefined): string | undefined {
+  const level = option?.defaultReasoningEffort;
+  return level && option.reasoningEfforts?.includes(level) ? level : undefined;
+}
+/** Header text for the thinking level, or undefined when the model offers no levels. */
+export function thinkingLevelLabel(option: ModelOption | undefined, level: string): string | undefined {
+  if (!option?.reasoningEfforts?.length) return undefined;
+  const fallback = catalogDefaultLevel(option);
+  return resolveThinkingLevel(option, level) ?? (fallback ? `${fallback} (default)` : "default");
+}
+/**
+ * Codex reasoning: the level picked in settings if the catalog lists it for
+ * the model, else the catalog's default. Models without catalog data keep
+ * the rule by model name.
+ */
+export function oauthReasoning(model: string, level: string): Record<string, string> | undefined {
+  const option = catalogModel("chatgpt-oauth", model);
   if (option?.reasoningEfforts) {
     const efforts = option.reasoningEfforts;
     if (!efforts.length) return undefined;
-    const effort = option.defaultReasoningEffort && efforts.includes(option.defaultReasoningEffort)
-      ? option.defaultReasoningEffort : efforts.includes("medium") ? "medium" : efforts[0];
+    const effort = resolveThinkingLevel(option, level) ?? catalogDefaultLevel(option) ??
+      (efforts.includes("medium") ? "medium" : efforts[0]);
     return option.supportsReasoningSummary === false ? { effort } : { effort, summary: "auto" };
   }
   return supportsReasoning(model) ? { effort: "medium", summary: "auto" } : undefined;
@@ -116,6 +144,19 @@ async function updateClientVersion(state: CatalogState, force: boolean): Promise
     return clientVersion;
   })().finally(() => { versionRequest = undefined; });
   return versionRequest;
+}
+
+/** Read `capabilities.thinking.types` and `capabilities.effort` of Anthropic `/v1/models`. */
+function anthropicCapabilities(capabilities: unknown): Pick<ModelOption, "thinkingType" | "reasoningEfforts"> {
+  if (!record(capabilities)) return {};
+  const types = record(capabilities.thinking) && record(capabilities.thinking.types) ? capabilities.thinking.types : {};
+  const supported = (value: unknown) => record(value) && value.supported === true;
+  const thinkingType = supported(types.adaptive) ? "adaptive" : supported(types.enabled) ? "enabled" : undefined;
+  const effort = capabilities.effort;
+  // Levels in the API's key order (lightest first); "supported" is the flag for effort as a whole.
+  const reasoningEfforts = record(effort) && effort.supported === true
+    ? Object.entries(effort).filter(([key, value]) => key !== "supported" && supported(value)).map(([key]) => key) : undefined;
+  return { thinkingType, reasoningEfforts };
 }
 
 /** OpenAI families that answer chats, and those that don't (speech, images, search, completions-only, voice). */
@@ -185,7 +226,8 @@ export async function refreshCatalog(state: CatalogState, provider: Provider, id
         models = openaiChatModels(records);
       } else {
         models = records.filter(m => typeof m.id === "string" && m.type === "model")
-          .map(m => ({ value: m.id as string, label: typeof m.display_name === "string" ? m.display_name : m.id as string }));
+          .map(m => ({ value: m.id as string, label: typeof m.display_name === "string" ? m.display_name : m.id as string,
+            ...anthropicCapabilities(m.capabilities) }));
       }
     }
     models = [...new Map(models.map(m => [m.value, m])).values()];

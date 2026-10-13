@@ -1,8 +1,15 @@
 import { App, TFile, getFrontMatterInfo, normalizePath } from "obsidian";
-import type { SelectionScope, ToolResult } from "../types";
-
-/** Images the read tools refuse (SVG is text, so they read it). */
-const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "avif", "ico"];
+import type { SelectionScope, ToolResult, ViewTarget } from "../types";
+import { changedRange, showInView } from "../ui/show-in-view";
+import { listMetadata, queryNotes } from "./metadata-query";
+import { getLinks } from "./links";
+import { applyCanvasOperations, canvasSearchTexts, describeCanvas, isCanvasPath, parseCanvas, serializeCanvas } from "./canvas";
+import { renderCanvas, shortIds } from "./canvas-render";
+import { readWebPage } from "./web-page";
+import type { ChangeLog } from "./undo";
+import { fileAttachment, isDocumentFile } from "../files/attachments";
+import { DEFAULT_SKILLS_FOLDER, useSkill } from "../agent/skills";
+import { createCanvasElement, decodeImage, encodeCanvas, extensionOf, fitImage, formatBytes, imageMediaType, isImagePath } from "../images";
 
 /**
  * Files the read tools refuse because their text would be useless to the
@@ -26,13 +33,16 @@ type AskUserCallback = (question: string) => Promise<string>;
  * - vault.process() for atomic edits
  * - fileManager.renameFile() for link-aware renames
  * - fileManager.trashFile() for safe deletes
+ * Changes to the vault are recorded in `changes` (undo per answer).
  */
 export async function executeTool(
   app: App,
   toolName: string,
   input: Record<string, unknown>,
   onAskUser: AskUserCallback,
-  scope?: SelectionScope
+  scope?: SelectionScope,
+  changes?: ChangeLog,
+  skillsFolder = DEFAULT_SKILLS_FOLDER
 ): Promise<ToolResult> {
   if (Object.prototype.hasOwnProperty.call(input, "_raw")) {
     return { result: "Invalid tool arguments: provide a valid JSON object and retry.", isError: true };
@@ -44,31 +54,48 @@ export async function executeTool(
       case "read_document":
         return await readDocument(app, input);
       case "edit_document":
-        return await editDocument(app, input, scope);
+        return await editDocument(app, input, scope, changes);
       case "search_vault":
         return await searchVault(app, input);
       case "read_file":
         return await readFile(app, input);
+      case "view_image":
+        return await viewImage(app, input);
+      case "read_canvas":
+        return await readCanvas(app, input);
+      case "view_canvas":
+        return await viewCanvas(app, input);
+      case "edit_canvas":
+        return await editCanvas(app, input, changes);
       case "create_file":
-        return await createFile(app, input);
+        return await createFile(app, input, changes);
       case "list_files":
         return await listFiles(app, input);
       case "rename_file":
-        return await renameFile(app, input);
+        return await renameFile(app, input, changes);
       case "delete_file":
-        return await deleteFile(app, input);
+        return await deleteFile(app, input, changes);
       case "get_properties":
         return await getProperties(app, input);
       case "set_properties":
-        return await setProperties(app, input);
-      case "get_backlinks":
-        return await getBacklinks(app, input);
+        return await setProperties(app, input, changes);
+      case "query_notes":
+        return queryNotes(app, input);
+      case "list_metadata":
+        return listMetadata(app, input);
+      case "get_links":
+      case "get_backlinks": // its earlier name, in saved chats
+        return await getNoteLinks(app, input);
       case "get_current_datetime":
         return getCurrentDatetime();
+      case "use_skill":
+        return await useSkill(app, skillsFolder, input);
       case "open_document":
         return await openDocument(app, input);
       case "ask_user":
         return await askUser(input, onAskUser);
+      case "read_web_page":
+        return await readWebPage(input);
       default:
         return { result: `Unknown tool: ${toolName}`, isError: true };
     }
@@ -104,6 +131,10 @@ function scopeGuard(
     return touches ? scopeRefusal(scope.filePath) : null;
   }
   if (toolName === "set_properties" && resolveFile(app, optionalString(input.path))?.path === scope.filePath) {
+    return scopeRefusal(scope.filePath);
+  }
+  // A selection in a canvas card scopes the canvas file.
+  if (toolName === "edit_canvas" && normalizePath(requiredString(input.path)) === scope.filePath) {
     return scopeRefusal(scope.filePath);
   }
   return null;
@@ -218,18 +249,22 @@ function resolveFile(app: App, path?: string): TFile | null {
 }
 
 /** Ensure parent folders exist for a path */
-async function ensureParentFolder(app: App, filePath: string): Promise<void> {
+async function ensureParentFolder(app: App, filePath: string, changes?: ChangeLog): Promise<void> {
   const parentPath = filePath.substring(0, filePath.lastIndexOf("/"));
   if (parentPath && !app.vault.getFolderByPath(parentPath)) {
+    // The folders that didn't exist yet, outermost first (undo removes them again).
+    const parts = parentPath.split("/");
+    const missing = parts.map((_, i) => parts.slice(0, i + 1).join("/")).filter((folder) => !app.vault.getFolderByPath(folder));
     await app.vault.createFolder(parentPath);
+    changes?.foldersCreated(missing);
   }
 }
 
 /** An error for an image or binary file, whose text would be garbage; null for text. */
 function refuseNonText(file: TFile, tool: string): ToolResult | null {
   const extension = file.extension.toLowerCase();
-  if (IMAGE_EXTENSIONS.includes(extension)) {
-    return { result: `${file.path} is an image; ${tool} reads text only. To show it, the user can attach it to a chat message.`, isError: true };
+  if (isImagePath(file.path)) {
+    return { result: `${file.path} is an image; ${tool} reads text only. Use view_image to look at it.`, isError: true };
   }
   if (BINARY_EXTENSIONS.includes(extension)) {
     return { result: `${file.path} is a binary file; ${tool} reads text only.`, isError: true };
@@ -254,6 +289,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** About 50 characters either side of a match, on one line. */
+function snippet(content: string, idx: number, length: number): string {
+  const start = Math.max(0, idx - 50);
+  const end = Math.min(content.length, idx + length + 50);
+  return `...${content.substring(start, end).replace(/\n/g, " ")}...`;
+}
+
+/** The canvas file at `path`, or an error result for the model. */
+function resolveCanvas(app: App, path: string): TFile | ToolResult {
+  if (!path) return { result: "'path' parameter is required.", isError: true };
+  if (!isCanvasPath(path)) {
+    return { result: `${path} is not a canvas. read_canvas, view_canvas and edit_canvas work on .canvas files; use read_document or edit_document for notes.`, isError: true };
+  }
+  const file = app.vault.getFileByPath(normalizePath(path));
+  return file ?? { result: `File not found: ${path}`, isError: true };
+}
+
 // ─── Tool Implementations ───────────────────────────────────────────────────
 
 async function readDocument(
@@ -264,6 +316,10 @@ async function readDocument(
   const file = resolveFile(app, path);
   if (!file) {
     return { result: path ? `File not found: ${path}` : "No active document open.", isError: true };
+  }
+  // A PDF or Office file can be read: read_file attaches it.
+  if (isDocumentFile(file.path) && !isImagePath(file.path)) {
+    return { result: `${file.path} is a PDF or Office file; read_document reads text only. Use read_file, which attaches it.`, isError: true };
   }
   const refusal = refuseNonText(file, "read_document");
   if (refusal) return refusal;
@@ -276,7 +332,8 @@ async function readDocument(
 async function editDocument(
   app: App,
   input: Record<string, unknown>,
-  scope?: SelectionScope
+  scope: SelectionScope | undefined,
+  changes: ChangeLog | undefined
 ): Promise<ToolResult> {
   const operation = requiredString(input.operation);
   // A missing `content` must not become "": replace_all would blank the
@@ -298,9 +355,34 @@ async function editDocument(
   if (scope && file.path === scope.filePath) {
     if (operation !== "find_replace") return scopeRefusal(file.path);
     if (!find) return { result: "'find' parameter is required for find_replace.", isError: true };
-    return await editInScope(app, file, scope, find, content);
+    return await withChange(app, file, changes, () => editInScope(app, file, scope, find, content));
   }
+  return await withChange(app, file, changes, () => applyEdit(app, file, operation, content, find, position));
+}
 
+/**
+ * Runs a change to `file`, records it in `changes` for undo, and adds what
+ * changed (`focus`, unless the change set its own) to its result, for
+ * showing it to the user (`ui/show-in-view.ts`).
+ */
+async function withChange(app: App, file: TFile, changes: ChangeLog | undefined, change: () => Promise<ToolResult>): Promise<ToolResult> {
+  const before = await app.vault.cachedRead(file);
+  const result = await change();
+  if (result.isError) return result;
+  const after = await app.vault.cachedRead(file);
+  changes?.edited(file.path, before, after);
+  const range = result.focus ? null : changedRange(before, after);
+  return range ? { ...result, focus: { path: file.path, ...range } } : result;
+}
+
+async function applyEdit(
+  app: App,
+  file: TFile,
+  operation: string,
+  content: string,
+  find: string | undefined,
+  position: string | undefined
+): Promise<ToolResult> {
   switch (operation) {
     case "replace_all":
       await app.vault.process(file, () => content);
@@ -374,7 +456,8 @@ async function searchVault(
   const searchContent = input.searchContent as boolean | undefined;
   const limit = Math.min((input.limit as number) || 10, 50);
 
-  const files = app.vault.getMarkdownFiles();
+  const canvases = app.vault.getFiles().filter((f) => isCanvasPath(f.path));
+  const files = [...app.vault.getMarkdownFiles(), ...canvases];
   const results: string[] = [];
 
   for (const file of files) {
@@ -385,16 +468,26 @@ async function searchVault(
       continue;
     }
 
-    if (searchContent) {
+    if (searchContent && isCanvasPath(file.path)) {
+      // Card text, group labels and edge labels; positions in the JSON don't count.
+      let texts: ReturnType<typeof canvasSearchTexts>;
+      try {
+        texts = canvasSearchTexts(parseCanvas(await app.vault.cachedRead(file)));
+      } catch {
+        continue; // Not valid JSON Canvas; nothing searchable.
+      }
+      for (const { id, kind, text } of texts) {
+        if (results.length >= limit) break;
+        const idx = text.toLowerCase().indexOf(query);
+        if (idx !== -1) results.push(`- ${file.path} (${kind} ${id}): ${snippet(text, idx, query.length)}`);
+      }
+    } else if (searchContent) {
       // cachedRead() avoids redundant disk reads
       const content = await app.vault.cachedRead(file);
       const lowerContent = content.toLowerCase();
       const idx = lowerContent.indexOf(query);
       if (idx !== -1) {
-        const start = Math.max(0, idx - 50);
-        const end = Math.min(content.length, idx + query.length + 50);
-        const snippet = content.substring(start, end).replace(/\n/g, " ");
-        results.push(`- ${file.path}: ...${snippet}...`);
+        results.push(`- ${file.path}: ${snippet(content, idx, query.length)}`);
       }
     }
   }
@@ -423,6 +516,13 @@ async function readFile(
     return { result: `File not found: ${path}`, isError: true };
   }
 
+  if (isDocumentFile(file.path)) {
+    // PDF and Office files go to the model as files (the provider reads them).
+    const attachment = await fileAttachment(file.path.slice(file.path.lastIndexOf("/") + 1), await app.vault.readBinary(file));
+    if (typeof attachment === "string") return { result: attachment, isError: true };
+    return { result: `${file.path} (${formatBytes(attachment.sizeBytes)}) is attached.`, isError: false, files: [attachment] };
+  }
+
   const refusal = refuseNonText(file, "read_file");
   if (refusal) return refusal;
 
@@ -430,9 +530,167 @@ async function readFile(
   return { result: content, isError: false };
 }
 
-async function createFile(
+async function viewImage(
   app: App,
   input: Record<string, unknown>
+): Promise<ToolResult> {
+  const path = requiredString(input.path);
+  if (!path) {
+    return { result: "'path' parameter is required.", isError: true };
+  }
+  const file = app.vault.getFileByPath(normalizePath(path));
+  if (!file) {
+    return { result: `File not found: ${path}`, isError: true };
+  }
+  const mediaType = imageMediaType(file.path);
+  if (!mediaType) {
+    const hint = isCanvasPath(file.path) ? "Use view_canvas for canvases."
+      : extensionOf(file.path) === "svg" ? "SVG is text: use read_file."
+      : "Other formats (HEIC, BMP, TIFF, AVIF, …) can't be sent; ask the user to convert the image.";
+    return { result: `${file.path} is not a PNG, JPEG, GIF or WebP image. ${hint}`, isError: true };
+  }
+
+  const bytes = await app.vault.readBinary(file);
+  let image;
+  try {
+    image = await fitImage(bytes, mediaType);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { result: `Can't send ${file.path}: ${msg}.`, isError: true };
+  }
+  const original = `${pixels(image.originalWidth, image.originalHeight)}${formatBytes(bytes.byteLength)}`;
+  const sent = !image.reencoded ? "sent unchanged"
+    : `sent as ${pixels(image.width, image.height)}${image.mediaType.slice(6).toUpperCase()}, ${formatBytes(image.sizeBytes)}`;
+  return {
+    result: `${file.path} (${original}), ${sent}.`,
+    isError: false,
+    images: [{
+      id: `view-${Date.now()}`,
+      fileName: file.path.slice(file.path.lastIndexOf("/") + 1),
+      mediaType: image.mediaType,
+      data: image.data,
+      sizeBytes: image.sizeBytes,
+    }],
+  };
+}
+
+/** "1200×800, " or nothing when the size is unknown. */
+function pixels(width?: number, height?: number): string {
+  return width && height ? `${width}×${height}, ` : "";
+}
+
+async function readCanvas(
+  app: App,
+  input: Record<string, unknown>
+): Promise<ToolResult> {
+  const file = resolveCanvas(app, requiredString(input.path));
+  if ("isError" in file) return file;
+
+  let canvas;
+  try {
+    canvas = parseCanvas(await app.vault.cachedRead(file));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { result: `${file.path} is not valid JSON Canvas (${msg}). Use read_file to see the raw text.`, isError: true };
+  }
+  return { result: describeCanvas(file.path, canvas), isError: false };
+}
+
+async function viewCanvas(
+  app: App,
+  input: Record<string, unknown>
+): Promise<ToolResult> {
+  const file = resolveCanvas(app, requiredString(input.path));
+  if ("isError" in file) return file;
+
+  let canvas;
+  try {
+    canvas = parseCanvas(await app.vault.cachedRead(file));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { result: `${file.path} is not valid JSON Canvas (${msg}). Use read_file to see the raw text.`, isError: true };
+  }
+
+  // A full ID, or the short tag drawn on an earlier picture.
+  const wanted = optionalString(input.focus);
+  const focus = wanted && (canvas.nodes.find((n) => n.id === wanted)?.id
+    ?? [...shortIds(canvas.nodes)].find(([, tag]) => tag === wanted)?.[0]);
+  if (wanted && !focus) {
+    return { result: `No node or group with id "${wanted}" in ${file.path}. Use an ID from read_canvas or a tag from an earlier view_canvas legend.`, isError: true };
+  }
+  const rendered = await renderCanvas(canvas, {
+    focus: focus || undefined,
+    createSurface: createCanvasElement,
+    loadImage: async (path) => {
+      const image = app.vault.getFileByPath(normalizePath(path));
+      const mediaType = image ? imageMediaType(image.path) : undefined;
+      if (!image || !mediaType) return null;
+      return decodeImage(await app.vault.readBinary(image), mediaType);
+    },
+  });
+  const png = await encodeCanvas(rendered.surface, "image/png");
+  const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+  return {
+    result: `Picture of ${file.path}: ${rendered.legend}`,
+    isError: false,
+    images: [{
+      id: `canvas-${Date.now()}`,
+      fileName: `${name}.${png.mediaType === "image/png" ? "png" : "jpg"}`,
+      mediaType: png.mediaType,
+      data: png.data,
+      sizeBytes: png.sizeBytes,
+    }],
+  };
+}
+
+async function editCanvas(
+  app: App,
+  input: Record<string, unknown>,
+  changes: ChangeLog | undefined
+): Promise<ToolResult> {
+  const file = resolveCanvas(app, requiredString(input.path));
+  if ("isError" in file) return file;
+  const operations = input.operations;
+  if (!Array.isArray(operations) || operations.length === 0) {
+    return { result: "'operations' must be a non-empty array.", isError: true };
+  }
+  return await withChange(app, file, changes, () => applyCanvasEdit(app, file, operations));
+}
+
+async function applyCanvasEdit(app: App, file: TFile, operations: unknown[]): Promise<ToolResult> {
+  const fileExists = (path: string) => app.vault.getFileByPath(normalizePath(path)) !== null;
+  let summary: string[] = [];
+  let error = "";
+  let changed: string[] = [];
+  // All operations apply, or none: on any error the file is left unchanged.
+  await app.vault.process(file, (data) => {
+    try {
+      const canvas = parseCanvas(data);
+      const before = new Map(canvas.nodes.map((node) => [node.id, JSON.stringify(node)]));
+      summary = applyCanvasOperations(canvas, operations, fileExists);
+      // Cards added or changed, for showing them (`focus`).
+      changed = canvas.nodes.filter((node) => before.get(node.id) !== JSON.stringify(node)).map((node) => node.id);
+      return serializeCanvas(canvas);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      return data;
+    }
+  });
+
+  if (error) {
+    return { result: `No changes made to ${file.path}. ${error}`, isError: true };
+  }
+  return {
+    result: `Updated ${file.path}:\n${summary.map((line) => `- ${line}`).join("\n")}`,
+    isError: false,
+    ...(changed.length ? { focus: { path: file.path, nodes: changed } } : {}),
+  };
+}
+
+async function createFile(
+  app: App,
+  input: Record<string, unknown>,
+  changes: ChangeLog | undefined
 ): Promise<ToolResult> {
   const path = normalizePath(requiredString(input.path));
   const content = requiredString(input.content);
@@ -445,9 +703,10 @@ async function createFile(
     return { result: `File already exists: ${path}. Use edit_document to modify it.`, isError: true };
   }
 
-  await ensureParentFolder(app, path);
+  await ensureParentFolder(app, path, changes);
   await app.vault.create(path, content || "");
-  return { result: `Created ${path}.`, isError: false };
+  changes?.created(path, content || "");
+  return { result: `Created ${path}.`, isError: false, focus: { path, from: 0, to: (content || "").length } };
 }
 
 async function listFiles(
@@ -487,7 +746,8 @@ async function listFiles(
 
 async function renameFile(
   app: App,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  changes: ChangeLog | undefined
 ): Promise<ToolResult> {
   const path = requiredString(input.path);
   const newPath = requiredString(input.new_path);
@@ -507,16 +767,19 @@ async function renameFile(
     return { result: `A file already exists at: ${normalizedNew}`, isError: true };
   }
 
-  await ensureParentFolder(app, normalizedNew);
+  await ensureParentFolder(app, normalizedNew, changes);
 
   // fileManager.renameFile() updates all internal links automatically
+  const from = file.path;
   await app.fileManager.renameFile(file, normalizedNew);
+  changes?.renamed(from, normalizedNew);
   return { result: `Renamed ${path} to ${normalizedNew}.`, isError: false };
 }
 
 async function deleteFile(
   app: App,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  changes: ChangeLog | undefined
 ): Promise<ToolResult> {
   const path = requiredString(input.path);
   if (!path) {
@@ -528,7 +791,8 @@ async function deleteFile(
     return { result: `File not found: ${path}`, isError: true };
   }
 
-  // fileManager.trashFile() respects the user's file deletion preference.
+  // Kept for undo first; trashFile() respects the user's deletion preference.
+  await changes?.deleting(app, file);
   await app.fileManager.trashFile(file);
   return { result: `Moved ${path} to trash.`, isError: false };
 }
@@ -559,7 +823,8 @@ async function getProperties(
 
 async function setProperties(
   app: App,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  changes: ChangeLog | undefined
 ): Promise<ToolResult> {
   const props = requiredRecord(input.properties);
   if (!props) {
@@ -572,27 +837,29 @@ async function setProperties(
     return { result: path ? `File not found: ${path}` : "No active document open.", isError: true };
   }
 
-  // Use Obsidian's built-in processFrontMatter for safe YAML handling
-  await app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
-    for (const [key, value] of Object.entries(props)) {
-      if (value === null) {
-        delete frontmatter[key];
-      } else {
-        frontmatter[key] = value;
+  return await withChange(app, file, changes, async () => {
+    // Use Obsidian's built-in processFrontMatter for safe YAML handling
+    await app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+      for (const [key, value] of Object.entries(props)) {
+        if (value === null) {
+          delete frontmatter[key];
+        } else {
+          frontmatter[key] = value;
+        }
       }
-    }
+    });
+
+    const setKeys = Object.entries(props).filter(([, v]) => v !== null).map(([k]) => k);
+    const removedKeys = Object.entries(props).filter(([, v]) => v === null).map(([k]) => k);
+    const parts: string[] = [];
+    if (setKeys.length > 0) parts.push(`Set: ${setKeys.join(", ")}`);
+    if (removedKeys.length > 0) parts.push(`Removed: ${removedKeys.join(", ")}`);
+
+    return { result: `Updated properties in ${file.path}. ${parts.join(". ")}.`, isError: false };
   });
-
-  const setKeys = Object.entries(props).filter(([, v]) => v !== null).map(([k]) => k);
-  const removedKeys = Object.entries(props).filter(([, v]) => v === null).map(([k]) => k);
-  const parts: string[] = [];
-  if (setKeys.length > 0) parts.push(`Set: ${setKeys.join(", ")}`);
-  if (removedKeys.length > 0) parts.push(`Removed: ${removedKeys.join(", ")}`);
-
-  return { result: `Updated properties in ${file.path}. ${parts.join(". ")}.`, isError: false };
 }
 
-async function getBacklinks(
+async function getNoteLinks(
   app: App,
   input: Record<string, unknown>
 ): Promise<ToolResult> {
@@ -601,26 +868,7 @@ async function getBacklinks(
   if (!file) {
     return { result: path ? `File not found: ${path}` : "No active document open.", isError: true };
   }
-
-  // resolvedLinks maps: source path -> { target path -> link count }
-  const allLinks = app.metadataCache.resolvedLinks;
-  const backlinks: string[] = [];
-
-  for (const [sourcePath, targets] of Object.entries(allLinks)) {
-    if (targets[file.path]) {
-      backlinks.push(sourcePath);
-    }
-  }
-
-  if (backlinks.length === 0) {
-    return { result: `No backlinks found for ${file.path}.`, isError: false };
-  }
-
-  backlinks.sort();
-  return {
-    result: `${backlinks.length} note(s) link to ${file.path}:\n${backlinks.map((p) => `- ${p}`).join("\n")}`,
-    isError: false,
-  };
+  return getLinks(app, file);
 }
 
 function getCurrentDatetime(): ToolResult {
@@ -660,10 +908,28 @@ async function openDocument(
     return { result: `File not found: ${path}`, isError: true };
   }
 
-  // Open in the most recent non-chat leaf so it doesn't replace the sidebar
-  const leaf = app.workspace.getLeaf(false);
-  await leaf.openFile(file);
-  return { result: `Opened ${file.path}.`, isError: false };
+  // The spot to show: a text in a note, or a canvas card.
+  const text = optionalString(input.text);
+  const node = optionalString(input.node_id);
+  let found = "";
+  let target: ViewTarget = { path: file.path };
+  if (node && file.extension === "canvas") {
+    target = { path: file.path, nodes: [node] };
+    found = ` at card ${node}`;
+  } else if (text && file.extension === "md") {
+    const content = await app.vault.cachedRead(file);
+    let at = content.indexOf(text);
+    if (at === -1) at = content.toLowerCase().indexOf(text.toLowerCase());
+    if (at !== -1) {
+      target = { path: file.path, from: at, to: at + text.length };
+      found = " at the text";
+    } else {
+      found = "; the text wasn't found, so it opened at the top";
+    }
+  }
+  // The user asked to see it: bring it forward, also on a phone.
+  await showInView(app, target, { reveal: true });
+  return { result: `Showed ${file.path}${found}.`, isError: false };
 }
 
 async function askUser(

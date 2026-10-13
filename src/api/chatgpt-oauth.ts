@@ -8,9 +8,10 @@ import { oauthReasoning, oauthParallelTools, getCodexClientVersion, cachedCatalo
  * Transport: always `stream: true`. The Codex backend rejects `stream:false`
  * outright with 400 `"Stream must be set to true"`, and the official Codex
  * CLI / other working OAuth-Codex clients never send anything else either.
- * Obsidian's `requestUrl()` buffers the entire SSE response before returning,
- * so we read the final body as text and parse it client-side — no streaming
- * IO required, which keeps mobile compatibility.
+ * The answer streams through `api/stream.ts` like the other providers' (on
+ * desktop through Node's `https`); where that can't reach the backend
+ * (mobile `fetch` blocked by CORS), `requestUrl()` buffers the whole SSE
+ * body and its events are parsed at once, as before.
  *
  * Conversation continuity is **client-side**: we always send `store: false`
  * (the Codex backend rejects requests without it) and replay the full
@@ -18,16 +19,17 @@ import { oauthReasoning, oauthParallelTools, getCodexClientVersion, cachedCatalo
  * `previous_response_id` — it requires the server to persist the previous
  * response, which is incompatible with `store: false`.
  */
-import { requestUrl } from "obsidian";
 import type {
   ChatSettings,
   UnifiedMessage,
   UnifiedToolDef,
   UnifiedResponse,
+  StreamOptions,
 } from "../types";
-import { CHATGPT_OAUTH_DEFAULT_MODEL } from "../types";
-import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
-import { ProviderError, retryAfterMs } from "./errors";
+import { buildResponsesInput, fromResponsesOutput, sendResponsesRequest } from "./responses-format";
+import type { StreamResult } from "./stream";
+import { ProviderError, StreamCutError } from "./errors";
+import { asRecord, getNestedString, isRecord } from "../json";
 import {
   ChatGPTOAuthError,
   type ChatGPTOAuthService,
@@ -54,7 +56,7 @@ const ORIGINATOR = "opencode";
  * `User-Agent` we attach to Codex requests.
  *
  * The OpenAI JS SDK that the official Codex CLI uses sends `OpenAI/JS X.Y.Z`.
- * Obsidian's `requestUrl()` doesn't add an OpenAI-flavored UA on its own,
+ * Obsidian's transports don't add an OpenAI-flavored UA on their own,
  * so we set one explicitly. This is defensive — the backend may or may not
  * gate on UA, but matching the SDK's shape avoids surprises.
  */
@@ -87,6 +89,7 @@ export async function sendChatGPTOAuthMessage(
   tools: UnifiedToolDef[],
   systemPrompt: string,
   shouldStop: () => boolean = () => false,
+  stream: StreamOptions = {},
 ): Promise<UnifiedResponse> {
   if (!oauthService) {
     throw new ChatGPTOAuthError(
@@ -114,7 +117,7 @@ export async function sendChatGPTOAuthMessage(
   if (settings.modelCatalog) {
     cachedCatalog(settings.modelCatalog, "chatgpt-oauth", identity);
   }
-  const model = settings.model || CHATGPT_OAUTH_DEFAULT_MODEL;
+  const model = settings.model;
 
   const baseBody: Record<string, unknown> = {
     model,
@@ -132,7 +135,7 @@ export async function sendChatGPTOAuthMessage(
     parallel_tool_calls: oauthParallelTools(model),
   };
 
-  const reasoning = oauthReasoning(model);
+  const reasoning = oauthReasoning(model, settings.thinkingLevel);
   if (reasoning) {
     baseBody.reasoning = reasoning;
     // Codex requires the encrypted reasoning payload to be threaded through
@@ -164,15 +167,14 @@ export async function sendChatGPTOAuthMessage(
     baseBody.tools = apiTools;
   }
 
-  // Codex backend only accepts streaming requests. We always send
-  // `stream: true` and parse the buffered SSE body client-side.
+  // Codex backend only accepts streaming requests.
   const body = { ...baseBody, stream: true };
   const checkCancelled = () => {
     if (shouldStop()) throw new Error("Request cancelled.");
   };
   checkCancelled();
   try {
-    return await sendOnce(body, credential.accessToken, credential.accountId, identity);
+    return await sendOnce(body, credential.accessToken, credential.accountId, identity, stream);
   } catch (e) {
     // A rejected token (401), e.g. revoked before it expired: refresh once
     // and retry once. A second 401, or a failed refresh, keeps the
@@ -187,7 +189,7 @@ export async function sendChatGPTOAuthMessage(
     }
     checkCancelled();
     if (!renewed) throw e;
-    return sendOnce(body, renewed.accessToken, renewed.accountId, identity);
+    return sendOnce(body, renewed.accessToken, renewed.accountId, identity, stream);
   }
 }
 
@@ -196,6 +198,7 @@ async function sendOnce(
   accessToken: string,
   accountId: string | undefined,
   identity: string,
+  stream: StreamOptions,
 ): Promise<UnifiedResponse> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
@@ -209,16 +212,17 @@ async function sendOnce(
     headers["ChatGPT-Account-Id"] = accountId;
   }
 
-  let response;
+  let data: Record<string, unknown>;
   try {
-    response = await requestUrl({
-      url: CODEX_RESPONSES_URL,
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      throw: false,
+    data = await sendResponsesRequest(CODEX_RESPONSES_URL, headers, body, stream, "ChatGPT", {
+      http: httpError,
+      // Status 0: the error came inside a response that had started.
+      stream: ({ message, code }) => new ProviderError(message, 0, code),
     });
   } catch (e: unknown) {
+    // Answers from the backend, a cut stream and Stop keep their errors;
+    // a request that never got an answer says so.
+    if (e instanceof ProviderError || e instanceof StreamCutError || stream.signal?.aborted) throw e;
     const err = asRecord(e);
     const status = typeof err.status === "number" || typeof err.status === "string" ? String(err.status) : "";
     const message = typeof err.message === "string" ? err.message : String(e);
@@ -226,194 +230,35 @@ async function sendOnce(
       `ChatGPT OAuth request failed (${status}): ${message}`,
     );
   }
+  return fromResponsesOutput(data, "chatgpt-oauth", typeof body.model === "string" ? body.model : undefined, identity);
+}
 
+function httpError(response: StreamResult): Error {
   if (response.status === 401 || response.status === 403) {
     // The status lets the caller refresh the token once after a 401.
-    throw new ProviderError(
+    return new ProviderError(
       `ChatGPT OAuth session rejected by the server (HTTP ${response.status}). Please reconnect your ChatGPT account in settings.`,
       response.status,
     );
   }
-
-  if (response.status < 200 || response.status >= 300) {
-    // Codex returns errors as either `{detail: "..."}` (FastAPI-style) or
-    // `{error: {message: "..."}}` (OpenAI-style). Extract whichever is
-    // present; fall back to the raw body so the cause is never lost.
-    // The .json access is wrapped in try/catch because iOS Obsidian's
-    // lazy `response.json` getter throws on any non-JSON body — see the
-    // long comment in parseResponseBody().
-    let json: Record<string, unknown> | undefined;
-    try {
-      json = asOptionalRecord(response.json);
-    } catch {
-      json = undefined;
-    }
-    const detail = json?.detail;
-    const detailText =
-      typeof detail === "string"
-        ? detail
-        : getNestedString(detail, ["message"]);
-    const apiMsg =
-      detailText ??
-      getNestedString(json, ["error", "message"]) ??
-      response.text?.slice(0, 300) ??
-      `HTTP ${response.status}`;
-    // The Codex backend names a plan's usage limit in `error.type` (also a 429).
-    const code = getNestedString(json, ["error", "code"]) ?? getNestedString(json, ["error", "type"]);
-    throw new ProviderError(
-      `ChatGPT OAuth request failed (${response.status}): ${apiMsg}. The Codex backend may not accept the selected model or request format. Try reconnecting, picking a different model, or switching to OpenAI API Key.`,
-      response.status, code, retryAfterMs(response.headers),
-    );
-  }
-
-  // Two possible response shapes:
-  //   - JSON object (non-streaming or `response.completed` already aggregated)
-  //   - SSE text body (streaming, buffered by requestUrl)
-  const data = parseResponseBody(response);
-  return fromResponsesOutput(data, "chatgpt-oauth", typeof body.model === "string" ? body.model : undefined, identity);
-}
-
-function parseResponseBody(response: {
-  text?: string;
-  json?: unknown;
-}): Record<string, unknown> {
-  // On iOS Obsidian, `requestUrl()` returns a `response.json` that is a
-  // lazy getter calling `JSON.parse(text)` under the hood. When the body
-  // is SSE (which is always true for `/codex/responses`), accessing
-  // `.json` throws a SyntaxError like
-  //   `JSON Parse error: Unexpected identifier "event"`
-  // because the text starts with `event: ...`. Desktop Electron returns
-  // undefined / null instead of throwing, but mobile is stricter. We
-  // wrap the access in try/catch so we always cleanly fall through to
-  // the SSE text parser below.
-  let jsonObj: Record<string, unknown> | undefined;
-  try {
-    jsonObj = asOptionalRecord(response.json);
-  } catch {
-    jsonObj = undefined;
-  }
-  if (jsonObj && (jsonObj.output || jsonObj.id)) {
-    return jsonObj;
-  }
-
-  const text = response.text ?? "";
-  if (!text) {
-    throw new ChatGPTOAuthError("ChatGPT OAuth response was empty.");
-  }
-
-  // SSE: lines beginning with `data: ` are JSON events. We need to do
-  // **client-side reconstruction** of the response, because Codex's
-  // `response.completed` event always has `response.output: []` —
-  // unlike the non-streaming Responses API on `api.openai.com`, the
-  // Codex backend never aggregates the final output server-side.
-  //
-  // Strategy:
-  //   1. Walk every event in order.
-  //   2. Collect each `response.output_item.done` item (deduplicated by
-  //      `output_index`, latest write wins). These are the FINAL forms
-  //      of the output items — they include the full `content` array
-  //      for messages and the complete `arguments` string for tool
-  //      calls.
-  //   3. Use `response.completed` only as the "stream finished" signal
-  //      and to extract the response id and usage stats.
-  //   4. Surface `response.failed` / `error` events as exceptions.
-  const events = parseSSE(text);
-  const itemByIndex = new Map<string | number, Record<string, unknown>>();
-  let completedResponse: Record<string, unknown> | null = null;
-  let failureMessage: string | null = null;
-  let failureCode: string | undefined;
-
-  for (const evt of events) {
-    const type = stringValue(evt.type);
-    if (type === "response.output_item.done") {
-      const item = asOptionalRecord(evt.item);
-      if (item) {
-        const key = outputKey(evt.output_index) ?? (stringValue(item.id) || itemByIndex.size);
-        itemByIndex.set(key, item);
-      }
-    } else if (type === "response.completed") {
-      completedResponse = asOptionalRecord(evt.response) ?? {};
-    } else if (type === "response.incomplete") {
-      completedResponse = { ...(asOptionalRecord(evt.response) ?? {}), status: "incomplete" };
-    } else if (type === "response.failed") {
-      failureMessage = getNestedString(evt.response, ["error", "message"]) ?? "ChatGPT OAuth response failed";
-      failureCode = getNestedString(evt.response, ["error", "code"]);
-    } else if (type === "error" && typeof evt.message === "string") {
-      failureMessage = evt.message;
-      failureCode = typeof evt.code === "string" ? evt.code : undefined;
-    }
-  }
-
-  // Status 0: the error came inside a response that had started.
-  if (failureMessage) throw new ProviderError(failureMessage, 0, failureCode);
-
-  if (completedResponse) {
-    // Synthesize a Responses-API-shaped object from the streamed pieces.
-    const synthesized: Record<string, unknown> = {
-      ...(completedResponse ?? {}),
-      output: itemByIndex.size > 0 ? Array.from(itemByIndex.values()) : completedResponse.output ?? [],
-    };
-    return synthesized;
-  }
-
-  throw new ChatGPTOAuthError(
-    "ChatGPT OAuth stream ended without a completed response.",
+  // Codex returns errors as either `{detail: "..."}` (FastAPI-style) or
+  // `{error: {message: "..."}}` (OpenAI-style). Extract whichever is
+  // present; fall back to the raw body so the cause is never lost.
+  const json = isRecord(response.json) ? response.json : undefined;
+  const detail = json?.detail;
+  const detailText =
+    typeof detail === "string"
+      ? detail
+      : getNestedString(detail, ["message"]);
+  const apiMsg =
+    detailText ??
+    getNestedString(json, ["error", "message"]) ??
+    response.text?.slice(0, 300) ??
+    `HTTP ${response.status}`;
+  // The Codex backend names a plan's usage limit in `error.type` (also a 429).
+  const code = getNestedString(json, ["error", "code"]) ?? getNestedString(json, ["error", "type"]);
+  return new ProviderError(
+    `ChatGPT OAuth request failed (${response.status}): ${apiMsg}. The Codex backend may not accept the selected model or request format. Try reconnecting, picking a different model, or switching to OpenAI API Key.`,
+    response.status, code, response.retryAfterMs,
   );
-}
-
-function parseSSE(text: string): Array<Record<string, unknown>> {
-  const events: Array<Record<string, unknown>> = [];
-  // SSE events are separated by blank lines. Each event has `data:` lines
-  // (potentially multi-line JSON) and optional `event:` / `id:` lines we
-  // can ignore — the JSON payload always carries `type`.
-  const blocks = text.split(/\r?\n\r?\n/);
-  for (const block of blocks) {
-    if (!block.trim()) continue;
-    const lines = block.split(/\r?\n/);
-    const dataLines: string[] = [];
-    for (const line of lines) {
-      if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).replace(/^ /, ""));
-      }
-    }
-    if (dataLines.length === 0) continue;
-    const payload = dataLines.join("\n");
-    if (payload === "[DONE]") continue;
-    try {
-      const event: unknown = JSON.parse(payload);
-      if (isRecord(event)) events.push(event);
-    } catch {
-      // ignore malformed event
-    }
-  }
-  return events;
-}
-
-function outputKey(value: unknown): string | number | undefined {
-  return typeof value === "string" || typeof value === "number" ? value : undefined;
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function getNestedString(value: unknown, path: string[]): string | undefined {
-  let current: unknown = value;
-  for (const key of path) {
-    if (!isRecord(current)) return undefined;
-    current = current[key];
-  }
-  return typeof current === "string" ? current : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
-}
-
-function asOptionalRecord(value: unknown): Record<string, unknown> | undefined {
-  return isRecord(value) ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
