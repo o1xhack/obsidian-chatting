@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 import {
-  bundled, api, assistant, call, callbacks, image, nativeCall, response, responseMessage, result, settings, sse, text, transport, vaultApp
+  bundled, api, assistant, call, callbacks, image, nativeCall, response, responseMessage, result, settings, sse, text, transport, vaultApp, settingsApp
 } from './harness.mjs';
 beforeEach(() => {
   api.clearOpenAIState();
@@ -203,21 +203,34 @@ test('OpenAI: restored legacy history retains function call/output pairs', async
 
 test('ChatGPT: incomplete SSE is rejected instead of executing finished tool items', async () => {
   transport(() => sse([{ type: 'response.output_item.done', output_index: 0, item: nativeCall('write', 'create_file', { path: 'Never.md' }) }]));
-  await assert.rejects(api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Create' }], [], 'System'), /without a completed response/);
+  await assert.rejects(api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Create' }], [], 'System'), /ended before the answer was complete/);
 });
 
-test('History trimming retains complete user turns rather than orphan tool results', () => {
+test('The API history keeps what the last compaction covers only while that has no readable summary', () => {
   const history = [];
   for (let turn = 0; turn < 6; turn++) {
-    history.push({ role: 'user', content: `Turn ${turn}` });
-    for (let step = 0; step < 4; step++) history.push({ role: 'assistant', content: [call(`${turn}_${step}`, 'read_file', {})] }, { role: 'user', content: [result(`${turn}_${step}`, 'value')] });
+    history.push({ role: 'user', content: `Turn ${turn}`, turnId: `t${turn}` });
+    for (let step = 0; step < 2; step++) history.push({ role: 'assistant', content: [call(`${turn}_${step}`, 'read_file', {})] }, { role: 'user', content: [result(`${turn}_${step}`, 'value')] });
   }
-  const trimmed = api.trimHistory(history, 40);
-  assert.equal(trimmed[0].content, 'Turn 1');
-  assert.equal(trimmed.length, 45);
-  assert.equal(api.trimHistory(history.slice(2), 100)[0].content, 'Turn 1');
-  const longTurn = history.slice(0, 9);
-  assert.deepEqual(api.trimHistory(longTurn, 3), longTurn);
+  // No compaction: nothing goes, the same array; every turn can be edited.
+  assert.equal(api.fromLastCompaction(history), history);
+  assert.ok(['t0', 't5'].every(id => api.editableTurn(history, id)));
+  // Anthropic's (readable): from it on; it starts with an assistant message, never with tool results.
+  const anthropic = history.map((message, index) => index === 6 ? { ...message, compaction: { summary: 'S' } } : message);
+  assert.equal(api.fromLastCompaction(anthropic)[0], anthropic[6]);
+  assert.equal(api.fromLastCompaction(anthropic).length, history.length - 6);
+  // OpenAI's (encrypted): kept, from the compaction before it on.
+  const openai = anthropic.map((message, index) => index === 16 ? { ...message, compaction: {} } : message);
+  assert.equal(api.fromLastCompaction(openai)[0], openai[6]);
+  const first = history.map((message, index) => index === 16 ? { ...message, compaction: {} } : message);
+  assert.equal(api.fromLastCompaction(first), first);
+  // Turns before the last compaction can't be edited; cutting there does nothing.
+  assert.equal(api.editableTurn(openai, 't2'), false);
+  // The compaction came in turn t3's request: the summary covers its start.
+  assert.equal(api.editableTurn(openai, 't3'), false);
+  assert.equal(api.editableTurn(openai, 't4'), true);
+  assert.equal(api.cutBeforeTurn(openai, 't0'), openai);
+  assert.equal(api.cutBeforeTurn(openai, 't4').length, 20);
 });
 
 test('Anthropic: mixed server search and client read preserve raw content through agent loop', async () => {
@@ -525,10 +538,10 @@ test('Agent freezes provider/model configuration for a multi-tool turn', async (
 });
 
 test('Declarative settings stay searchable and reuse the legacy renderers without fetching during indexing', () => {
-  const plugin={settings:settings('openai')}; const tab=new api.ChatSettingTab({},plugin);
+  const plugin={settings:settings('openai')}; const tab=new api.ChatSettingTab(settingsApp,plugin);
   globalThis.__providerRequest=async()=>assert.fail('Indexing must not perform network I/O');
   const definitions=tab.getSettingDefinitions();
-  assert.deepEqual(definitions.map(d=>d.name),['Provider','API key','ChatGPT account','Model','Custom model ID','Web search','Max tool iterations']);
+  assert.deepEqual(definitions.map(d=>d.name ?? d.heading),['Provider','API key','ChatGPT account','Model','Custom model ID','Thinking level','Web search','Enter sends message',"Follow the AI's edits",'Vault instructions','Skills',undefined,'Max tool iterations','Chats','MCP servers',undefined,'Debug log']);
   assert.equal(definitions[1].visible(),true); assert.equal(definitions[2].visible(),false);
   plugin.settings.provider='chatgpt-oauth'; assert.equal(definitions[1].visible(),false); assert.equal(definitions[2].visible(),true);
   let updates=0,displays=0; tab.display=()=>displays++;
