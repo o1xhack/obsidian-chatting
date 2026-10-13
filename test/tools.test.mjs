@@ -55,7 +55,8 @@ function propertiesVault(properties = {}) {
   let edits = 0;
   const app = {
     workspace: { getActiveFile: () => null },
-    vault: { getFileByPath: path => (path === 'Note.md' ? { path } : null) },
+    // The note's text stands in as its properties (set_properties reads it before and after).
+    vault: { getFileByPath: path => (path === 'Note.md' ? { path } : null), cachedRead: async () => JSON.stringify(frontmatter) },
     fileManager: { processFrontMatter: async (file, fn) => { edits++; fn(frontmatter); } },
   };
   return { app, frontmatter, edits: () => edits };
@@ -86,7 +87,7 @@ test('set_properties sets and removes keys through processFrontMatter, on the pa
   assert.equal(frontmatter.status, 'active');
 });
 
-test('read_file and read_document refuse images and binary files, read text and SVG', async () => {
+test('read_file and read_document refuse images and binary files, read text and SVG; read_file attaches a PDF', async () => {
   const textFiles = new Map([['Notes/Beta.md', '# Beta'], ['Pics/logo.svg', '<svg/>'], ['Data/notes.txt', 'plain']]);
   const binary = ['Pics/cat.png', 'Pics/Photo.JPG', 'Pics/old.bmp', 'Docs/manual.pdf', 'Data/app.sqlite', 'Audio/memo.m4a'];
   const binaryReads = [];
@@ -95,23 +96,32 @@ test('read_file and read_document refuse images and binary files, read text and 
     vault: {
       getFileByPath: path => (textFiles.has(path) || binary.includes(path) ? { path, extension: path.slice(path.lastIndexOf('.') + 1) } : null),
       cachedRead: async file => { if (!textFiles.has(file.path)) binaryReads.push(file.path); return textFiles.get(file.path); },
+      readBinary: async () => new TextEncoder().encode('%PDF').buffer,
     },
   };
   for (const tool of ['read_file', 'read_document']) {
     for (const path of ['Pics/cat.png', 'Pics/Photo.JPG', 'Pics/old.bmp']) {
       const result = await run(app, tool, { path });
       assert.equal(result.isError, true, path);
-      assert.match(result.result, new RegExp(`is an image; ${tool} reads text only\\. To show it, the user can attach it to a chat message\\.$`));
+      assert.match(result.result, new RegExp(`is an image; ${tool} reads text only\\. Use view_image to look at it\\.$`));
     }
-    for (const path of ['Docs/manual.pdf', 'Data/app.sqlite', 'Audio/memo.m4a']) {
+    for (const path of ['Data/app.sqlite', 'Audio/memo.m4a']) {
       const result = await run(app, tool, { path });
       assert.equal(result.isError, true, path);
       assert.match(result.result, new RegExp(`is a binary file; ${tool} reads text only\\.`));
     }
   }
+  // read_document points to read_file, which attaches a PDF or Office file.
+  const refused = await run(app, 'read_document', { path: 'Docs/manual.pdf' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.result, /PDF or Office file; read_document reads text only\. Use read_file/);
   for (const [path, content] of textFiles) {
     assert.deepEqual(await run(app, 'read_file', { path }), { result: content, isError: false });
     assert.deepEqual(await run(app, 'read_document', { path }), { result: `# ${path}\n\n${content}`, isError: false });
   }
   assert.deepEqual(binaryReads, []);
+  // A PDF goes to the model as a file (files.test.mjs has the details).
+  const pdf = await run(app, 'read_file', { path: 'Docs/manual.pdf' });
+  assert.equal(pdf.isError, false);
+  assert.equal(pdf.files[0].fileName, 'manual.pdf');
 });

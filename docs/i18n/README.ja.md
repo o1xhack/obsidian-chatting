@@ -23,7 +23,8 @@
 
 - **3 つのプロバイダから選べる** —— Anthropic API、OpenAI API、または ChatGPT アカウントでサインイン。中途半端なプロバイダのバザールはやりません。
 - **14 個の vault ネイティブツール** —— 読み・編集・検索・作成・リネーム・frontmatter・backlinks。アイデアからファイル変更まで、チャットを離れずに完結します。
-- **モバイル妥協なし、設計から** —— streaming・Node 専用モジュール・localhost コールバックに依存しません。iOS と Android はデスクトップと同じ動作。
+- **モバイル妥協なし、設計から** —— localhost コールバックに依存しません。iOS と Android はデスクトップと同じ動作。
+- **ストリーミング表示** —— 回答はモデルが書くそばから表示されます。スマホでプロバイダーがそれを許可しない場合は、完成してからまとめて表示されます。
 - **選択範囲スコープ** —— ノートのテキストを選択して送ると、アシスタントは選択範囲内だけを編集。
 - **シークレットは OS のキーチェーンへ** —— `data.json` には絶対に書き込まれず、他端末に同期もされません。
 
@@ -141,11 +142,11 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 
 | 原則 | 意味 |
 |---|---|
-| **モバイルは後付けではない** | すべての変更を iOS と Android で検証。streaming・Node 専用モジュール・localhost コールバックに依存しません。 |
+| **モバイルは後付けではない** | すべての変更を iOS と Android で検証。回答はプラットフォームが許す限りストリーミングし、それ以外は Obsidian の `requestUrl()` でまとめて届きます。localhost コールバックは使いません。 |
 | **3 つの堅実なプロバイダ** | Anthropic + OpenAI で安定性、ChatGPT アカウントで API キー不要派をカバー。 |
 | **シークレットはキーチェーンへ** | API キーと OAuth 認証情報は Obsidian SecretStorage 経由。`data.json` には入らないため、他の端末に同期もされません。 |
 | **Vault のインデックス化は行わない** | 上限つきの線形検索のみ。予測可能で、バックグラウンドジョブなし、モバイルでもメモリを圧迫しません。 |
-| **会話は永続化** | チャット履歴は Obsidian 再起動後も残ります。ローカルの `chat-state.json` に保存され、同期されません。 |
+| **会話は永続化** | チャット履歴は Obsidian 再起動後も残ります。ローカルの `chat-state.json` と `chats` フォルダに保存され、同期されません。 |
 | **モバイルでは右からスライドイン** | 右端から入るサイドバーで、下のドキュメントは見えたまま。 |
 
 ## 🗺️ ロードマップ
@@ -173,7 +174,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>本当にモバイルで動きますか?</b></summary>
 
-はい —— その制約こそが他のすべての設計の起点です。リクエストは Obsidian の `requestUrl()` を通り(モバイル WebView は CORS を強制)、streaming も Node 専用モジュールも、OAuth の localhost コールバックも使いません。iOS と Android はデスクトップと同一のコードパスで動きます。
+はい —— その制約こそが他のすべての設計の起点です。リクエストは Obsidian の `requestUrl()` を通ります(モバイル WebView は CORS を強制)。例外はチャットの回答で、ストリーミングします:デスクトップでは Node の `https`、モバイルではプロバイダーが許可すれば `fetch`、そうでなければ `requestUrl()` でまとめて。OAuth の localhost コールバックは使いません。iOS と Android はデスクトップと同じ機能を持ちます。
 
 </details>
 
@@ -194,7 +195,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>チャット履歴はどこに保存され、同期されますか?</b></summary>
 
-ローカルの `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json` に保存されます。**Obsidian Sync は既定でプラグインデータファイルを除外する**ため、同期されません。API キーは SecretStorage 経由で OS のキーチェーンに保存され、これも同期されません。
+ローカルの `<vault>/.obsidian/plugins/chatting-with-ai/` にある `chat-state.json`(チャットの一覧)と `chats` フォルダ(チャットごとに 1 ファイル)に保存されます。**Obsidian Sync は既定でプラグインデータファイルを除外する**ため、同期されません。API キーは SecretStorage 経由で OS のキーチェーンに保存され、これも同期されません。
 
 </details>
 

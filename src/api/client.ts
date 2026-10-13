@@ -1,4 +1,4 @@
-import type { ChatSettings, UnifiedMessage, UnifiedToolDef, UnifiedResponse } from "../types";
+import type { ChatSettings, UnifiedMessage, UnifiedToolDef, UnifiedResponse, StreamOptions } from "../types";
 import { sendAnthropicMessage } from "./anthropic";
 import { sendOpenAIMessage } from "./openai";
 import { sendChatGPTOAuthMessage } from "./chatgpt-oauth";
@@ -27,7 +27,8 @@ const MAX_RETRY_DELAY_MS = 30_000;
  * Retries once on a rate limit or overload, decided by the HTTP status or
  * error code (not by the message text), after the wait the provider asks
  * for (`Retry-After`, else "try again in 11.054s" in the message). A usage
- * limit is not retried, nor a wait longer than 30 s.
+ * limit is not retried, nor a wait longer than 30 s, nor a request whose
+ * answer text is already on screen (a retry would show it twice).
  */
 export async function sendMessage(
   settings: ChatSettings,
@@ -35,22 +36,31 @@ export async function sendMessage(
   tools: UnifiedToolDef[],
   systemPrompt: string,
   shouldStop: () => boolean = () => false,
+  stream: StreamOptions = {},
 ): Promise<UnifiedResponse> {
+  let shown = false;
+  const options: StreamOptions = {
+    signal: stream.signal,
+    onTextDelta: (text) => {
+      shown = true;
+      stream.onTextDelta?.(text);
+    },
+  };
   const doSend = () => {
     if (shouldStop()) throw new Error("Request cancelled.");
     if (settings.provider === "anthropic") {
-      return sendAnthropicMessage(settings, messages, tools, systemPrompt);
+      return sendAnthropicMessage(settings, messages, tools, systemPrompt, options);
     }
     if (settings.provider === "chatgpt-oauth") {
-      return sendChatGPTOAuthMessage(settings, messages, tools, systemPrompt, shouldStop);
+      return sendChatGPTOAuthMessage(settings, messages, tools, systemPrompt, shouldStop, options);
     }
-    return sendOpenAIMessage(settings, messages, tools, systemPrompt);
+    return sendOpenAIMessage(settings, messages, tools, systemPrompt, options);
   };
 
   try {
     return await doSend();
   } catch (e) {
-    if (!isRateLimit(e)) throw e;
+    if (!isRateLimit(e) || shown) throw e;
     const wait = e.retryAfterMs ?? retryAfterInMessage(e.message) ?? RETRY_DELAY_MS;
     // The user sees the error rather than a long silent wait.
     if (wait > MAX_RETRY_DELAY_MS) throw e;

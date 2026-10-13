@@ -1,9 +1,10 @@
 // The chat view and the plugin's chat commands with a fake Svelte component:
-// the API history cap, what the chat history saves, Stop and Clear, Copy
-// transcript, and commands waiting for the view.
+// the API history without a cap by count, what the chat history saves, Stop
+// and Clear, a streamed answer, Copy transcript, and commands waiting for
+// the view.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, settings, text, call, image, response, transport, vaultApp, callbacks } from './harness.mjs';
+import { api, settings, text, call, image, response, transport, vaultApp, callbacks, streamEvents, sseText, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -17,14 +18,16 @@ function fakeChat() {
     shown: [],
     askUser: null,
     addUserMessage(value, images = []) { chat.shown.push({ id: nextId++, type: 'user', text: value, images }); },
-    addAssistantMessage(value) { chat.shown.push({ id: nextId++, type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
+    updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
+    removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
     showThinking() {}, hideThinking() {},
     showAskUser(question) { chat.addAssistantMessage(question); return new Promise(resolve => { chat.askUser = resolve; }); },
     cancelAskUser() { const resolve = chat.askUser; chat.askUser = null; resolve?.(''); },
-    setInputEnabled() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {},
+    setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
     setSelection() {}, getSelection: () => null,
   };
   return chat;
@@ -34,15 +37,9 @@ function fakeChat() {
 // records its writes, and has a chat view with a fake component.
 async function chatSetup(provider, saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async () => { if (!saved) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    // exists() and the path check are for the chat saving fix (PR #10),
-    // which checks for the file before reading and writes a copy next to it.
-    exists: async () => !!saved,
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  // The saved chats in memory: the index and a file per chat (`writes`: each state whole).
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.agent = new api.AgentLoop(app, settings(provider));
@@ -62,7 +59,7 @@ async function until(condition) {
 
 const answering = provider => transport((body, index) => response(provider, [text(`A${index + 1}`)]));
 
-test('The API history keeps up to 80 messages when saved and loaded, with its images; past 80 a turn cuts it to 60', async () => {
+test('The API history has no cap by count: saved and loaded whole, with its images', async () => {
   const { plugin, view, writes } = await chatSetup('anthropic');
   const requests = answering('anthropic');
   const messages = [];
@@ -83,31 +80,28 @@ test('The API history keeps up to 80 messages when saved and loaded, with its im
   assert.equal(history.length, 72);
   assert.equal(history[0].content[0].image.data, image.data);
 
-  // Up to 80 messages, nothing is cut.
-  for (let i = 0; i < 4; i++) await restored.view.handleUserMessage(`More ${i}`, null);
-  assert.equal(requests.at(-1).messages.length, 79);
-  assert.equal(restored.plugin.agent.exportMessages().length, 80);
-  // Past 80, whole turns are cut from the start, down to 60 messages.
-  await restored.view.handleUserMessage('More 4', null);
-  assert.equal(requests.at(-1).messages.length, 61);
-  const cut = restored.plugin.agent.exportMessages();
-  assert.equal(cut.length, 62);
-  assert.equal(cut[0].content, 'Q10');
+  // Past 80 messages nothing is cut: the compaction point keeps the context within the window.
+  for (let i = 0; i < 5; i++) await restored.view.handleUserMessage(`More ${i}`, null);
+  assert.equal(requests.at(-1).messages.length, 81);
+  assert.equal(restored.plugin.agent.exportMessages().length, 82);
+  assert.equal(restored.plugin.agent.exportMessages()[0].content[1].text, 'Q0');
 });
 
-test('OpenAI keeps chaining once the history is past 80 messages: it is cut every few turns, not on each', async () => {
+test('OpenAI keeps chaining past 80 messages: the history is never cut by count', async () => {
   const agent = new api.AgentLoop(vaultApp().app, settings('openai'));
   const messages = [];
   for (let i = 0; i < 40; i++) messages.push({ role: 'user', content: `Q${i}` }, { role: 'assistant', content: [text(`A${i}`)] });
   agent.importMessages(messages);
   const requests = transport((body, index) => response('openai', [text(`A${index}`)], 'end_turn', index));
   for (let i = 0; i < 3; i++) await agent.run(`More ${i}`, callbacks());
-  // The first turn cuts the history to 60 (a new array: sent in full); the
-  // next turns add to the same array and chain to the previous response.
+  // The imported history is sent in full once; the next turns add to the
+  // same array and chain to the previous response.
   assert.equal(requests[0].previous_response_id, undefined);
+  assert.equal(requests[0].input.length, 81);
   assert.equal(requests[1].previous_response_id, 'resp_0');
   assert.equal(requests[2].previous_response_id, 'resp_1');
   assert.equal(requests[2].input.length, 1);
+  assert.equal(agent.exportMessages().length, 86);
 });
 
 test('Tool cards keep their (capped) input across a reload', async () => {
@@ -182,6 +176,27 @@ for (const action of ['Stop', 'Clear']) {
     ]);
   });
 }
+
+test('A streamed answer grows in one message; Stop keeps what arrived, in the chat and its history', async () => {
+  api.resetStreamTransport();
+  const { plugin, view, chat } = await chatSetup('anthropic');
+  const events = streamEvents('anthropic', [text('Partial answer')]);
+  const open = events.slice(0, events.findIndex(event => event.type === 'content_block_stop'));
+  // The answer's first text arrives, then the stream stays open.
+  globalThis.__fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(sseText(open))); } }), { status: 200 });
+  try {
+    const turn = view.handleUserMessage('Q', null);
+    await until(() => chat.shown.some(m => m.type === 'assistant' && m.text === 'Partial answer'));
+    view.handleStop();
+    await turn;
+    const shown = [['user', 'Q'], ['assistant', 'Partial answer']];
+    assert.deepEqual(chat.shown.map(m => [m.type, m.text]), shown);
+    // Text on screen: no "Stopped." row.
+    assert.deepEqual(plugin.chatHistory.map(e => [e.type, e.text]), shown);
+  } finally {
+    delete globalThis.__fetch;
+  }
+});
 
 test('Copy transcript: refused while the conversation is empty, else its Markdown, also with the chat panel closed', async () => {
   const { plugin, view } = await chatSetup('anthropic');
@@ -268,7 +283,8 @@ for (const action of ['Stop', 'Clear']) {
   test(`${action}: an old request completing does not unlock a newer running turn`, async () => {
     const { view, chat } = await chatSetup('anthropic');
     const pending = [];
-    chat.setInputEnabled = enabled => { chat.enabled = enabled; };
+    // The input stays usable while a turn runs (typing adds to it); busy is the lock.
+    chat.setBusy = busy => { chat.busy = busy; };
     transport(() => new Promise(resolve => pending.push(resolve)));
     const old = view.handleUserMessage('Old', null);
     await until(() => pending.length === 1);
@@ -278,11 +294,11 @@ for (const action of ['Stop', 'Clear']) {
     pending[0](response('anthropic', [text('late old answer')]));
     await old;
     assert.equal(view.running, true);
-    assert.equal(chat.enabled, false);
+    assert.equal(chat.busy, true);
     pending[1](response('anthropic', [text('new answer')]));
     await next;
     assert.equal(view.running, false);
-    assert.equal(chat.enabled, true);
+    assert.equal(chat.busy, false);
   });
 }
 

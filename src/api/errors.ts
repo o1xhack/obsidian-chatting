@@ -36,3 +36,15 @@ export function retryAfterInMessage(message: string): number | undefined {
   const value = Number(match[1]);
   return Math.round(match[2].toLowerCase() === "ms" ? value : value * 1000);
 }
+
+/**
+ * A streamed answer that ended before the provider said it was complete
+ * (the connection dropped or timed out, no error from the provider). The
+ * agent loop sends the same request again; no tool ran for it yet.
+ */
+export class StreamCutError extends Error {
+  constructor(provider: string) {
+    super(`${provider} stream ended before the answer was complete.`);
+    this.name = "StreamCutError";
+  }
+}

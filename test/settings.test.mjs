@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, beforeEach, afterEach } from 'node:test';
-import { api, response, settings, text, transport } from './harness.mjs';
+import { api, response, settings, text, transport, settingsApp } from './harness.mjs';
 
 // A settings row as Obsidian hands it to a definition's render(); records its controls.
 function row() {
@@ -30,7 +30,7 @@ afterEach(() => { globalThis.window = previousWindow; });
 
 function settingsTab(provider) {
   const plugin = { settings: { ...settings(provider), apiKey: '' }, saves: 0, async saveSettings() { plugin.saves++; }, reloadApiKeyForProvider() {} };
-  const tab = new api.ChatSettingTab({}, plugin);
+  const tab = new api.ChatSettingTab(settingsApp, plugin);
   refreshes = 0;
   tab.display = () => { refreshes++; };
   const definitions = tab.getSettingDefinitions();
@@ -110,7 +110,7 @@ test('Settings before Obsidian 1.13: display() shows the custom model ID row onl
   const shown = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderMaxIterations: ignore, loadCatalog: async () => {}, renderCustomModel: setting => shown.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderVoice: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderCustomModel: setting => shown.push(setting) });
   delete tab.display;
   tab.display();
   assert.equal(shown.length, 0);
@@ -150,4 +150,14 @@ test('Custom model ID commits on Enter without requiring blur', async () => {
   await new Promise(setImmediate);
   assert.equal(plugin.settings.model, 'custom-on-enter');
   assert.equal(plugin.saves, 1);
+});
+
+test('Settings load: no model saved gives the provider default, so adapters need none of their own', async () => {
+  for (const [provider, model] of [[undefined, 'claude-sonnet-4-6'], ['anthropic', 'claude-sonnet-4-6'], ['openai', 'gpt-6.1-sol'], ['chatgpt-oauth', 'gpt-5.5']]) {
+    const plugin = new api.ChatPlugin();
+    plugin.app = { secretStorage: { getSecret: () => '' } };
+    plugin.loadData = async () => (provider ? { provider, model: '' } : null);
+    await plugin.loadSettings();
+    assert.equal(plugin.settings.model, model, String(provider));
+  }
 });

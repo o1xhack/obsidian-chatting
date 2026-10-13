@@ -1,12 +1,30 @@
-import { ItemView, WorkspaceLeaf, Notice, type App } from "obsidian";
+import { ItemView, WorkspaceLeaf, Notice, Platform, Scope, type App } from "obsidian";
 import { mount, unmount } from "svelte";
 import type { Component } from "svelte";
 import type ChatPlugin from "../main";
 import ChatContainer from "./ChatContainer.svelte";
-import type { ToolResult, SelectionScope, ImageAttachment } from "../types";
-import { getModelDisplayName } from "../settings";
+import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry, ChatErrorKind, VoiceTurn } from "../types";
+import type { ConversationRecord } from "../chat-state";
+import type { AgentLoop } from "../agent/loop";
+import { showInView } from "./show-in-view";
+import { confirmUndo } from "./undo-confirm";
+import { ChangeLog } from "../tools/undo";
+import { screenAwake } from "../platform/screen-awake";
+import { newTurnId } from "../agent/history";
+import { mentionContext, mentionedFiles } from "./mentions";
+import { findSkills, invokedSkillsText, type Skill } from "../agent/skills";
+import { addRequest } from "../agent/usage";
+import { compactThreshold } from "../agent/compaction";
+import { catalogModel } from "../api/model-catalog";
+import { voiceTranscriptText } from "../agent/system-prompt";
+import { debugLog } from "../debug";
+import { appLifecycle } from "../platform/lifecycle";
+import { VoiceController, VOICE_TIMING, requestContext, type VoiceTurnHooks, type VoiceViewState } from "../voice/controller";
 
 export const VIEW_TYPE_CHAT = "ochatting-view";
+
+/** Voice bar controls and the voice button. */
+export type VoiceAction = "start" | "end" | "mute" | "talk-start" | "talk-end" | "play";
 
 const SAVED_INPUT_TEXT = 300;
 const SAVED_INPUT_ITEMS = 10;
@@ -45,40 +63,182 @@ interface ChatContainerProps {
   component: ObsidianChatView;
   provider: string;
   model: string;
-  onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[]) => void;
+  onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[], files: FileAttachment[]) => void;
   onClear: () => void;
   onStop: () => void;
+  onEdit: (turnId: string, text: string) => void;
+  onRegenerate: () => void;
+  onCopy: (text: string) => void;
+  title: string;
+  onNewChat: () => void;
+  listConversations: () => ConversationSummary[];
+  onOpenConversation: (id: string) => void;
+  onRenameConversation: (id: string, title: string) => void;
+  onDeleteConversation: (id: string) => void;
+  onToggleFollow: () => void;
+  onUndo: (turnId: string) => void;
+  listSkills: () => Skill[];
+  onContinue: () => void;
+  onCompact: () => void;
+  onLoadEarlier: () => void;
+  onVoice: (action: VoiceAction) => void;
 }
 
 interface ChatContainerApi extends Record<string, unknown> {
-  addUserMessage(text: string, images?: ImageAttachment[]): void;
-  addAssistantMessage(text: string): void;
+  addUserMessage(text: string, images?: ImageAttachment[], turnId?: string, selection?: SelectionScope, files?: FileAttachment[]): void;
+  addAssistantMessage(text: string, streaming?: boolean): number;
+  /** Replace an assistant message's text; `final` renders it at once and ends its streaming. */
+  updateAssistantMessage(id: number, text: string, final?: boolean): void;
+  removeMessage(id: number): void;
+  cutMessages(turnId: string): void;
   addToolCall(name: string, input: Record<string, unknown>): number;
   updateToolResult(msgId: number, name: string, result: ToolResult): void;
-  addError(text: string): void;
-  showThinking(): void;
+  addError(text: string, errorKind?: ChatErrorKind): void;
+  /** The thinking dots, with a short label such as "Resuming…". */
+  showThinking(label?: string): void;
   hideThinking(): void;
-  showAskUser(question: string): Promise<string>;
+  /** The next input answers a question; `question` is shown first unless the chat shows it already. */
+  showAskUser(question?: string): Promise<string>;
   cancelAskUser(): void;
   setInputEnabled(enabled: boolean): void;
+  setBusy(busy: boolean): void;
+  /** Messages added to the running turn that the agent hasn't taken in yet. */
+  setQueued(texts: string[]): void;
+  /** The open chats list again (a chat started or finished answering). */
+  updateConversations(): void;
   clearMessages(): void;
   focus(): void;
   setModel(name: string): void;
+  setTitle(title: string): void;
   setSelection(selection: SelectionScope): void;
   getSelection(): SelectionScope | null;
+  setEnterSends(on: boolean): void;
+  /** Offer Continue for a turn that was cut off when Obsidian was ended. */
+  setContinue(show: boolean): void;
+  /** Ctrl/Cmd+Enter in the chat: sends from the chat input, saves from a message's edit box. */
+  sendFromKeyboard(target: EventTarget | null): boolean;
+  /** Which turns can be edited or answered again. */
+  setEditable?(check: (turnId: string) => boolean): void;
+  setFollowEdits(on: boolean): void;
+  /** The row of files a turn changed; "kept": its undo was lost when Obsidian closed. */
+  addChanges(turnId: string, files: string[], state: ChangesState): void;
+  setChangesUndone(turnId: string): void;
+  /** A finished turn: its steps fold into one row above the answer. */
+  foldTurn(turnId: string): void;
+  /** The context ring in the header (null hides it). */
+  setUsage?(usage: UsageView | null): void;
+  /** Whether turns before the shown ones can be loaded (scrolled near the top). */
+  setHasEarlier?(value: boolean): void;
+  /** Rows added by `fill` go above the shown ones; the view keeps its place. */
+  prependMessages?(fill: () => void): void;
+  /** Show the voice bar (null hides it). */
+  setVoice(state: VoiceViewState | null): void;
+  /** Show the voice button (signed in to ChatGPT). */
+  setVoiceAvailable(available: boolean): void;
+}
+
+export type ChangesState = "undoable" | "undone" | "kept";
+
+/** A chat shows its last 20 turns, and 20 more each time it is scrolled near the top. */
+export const PAGE_TURNS = 20;
+
+/**
+ * Where the `turns` turns before entry `end` start: the index of the
+ * earliest of their user entries, or 0 when no turn comes before them
+ * (entries before the first turn come along).
+ */
+export function pageStart(history: ChatHistoryEntry[], end: number, turns = PAGE_TURNS): number {
+  let count = 0;
+  for (let index = end - 1; index > 0; index--) {
+    if (history[index].type === "user" && ++count === turns) {
+      return history.slice(0, index).some((entry) => entry.type === "user") ? index : 0;
+    }
+  }
+  return 0;
+}
+
+/** The turn IDs of `entries`' user entries, in order. */
+function turnIdsOf(entries: ChatHistoryEntry[]): string[] {
+  return entries.flatMap((entry) => entry.type === "user" && entry.turnId ? [entry.turnId] : []);
+}
+
+/** The quiet note in the chat where the earlier part was summarized. */
+const COMPACTED_NOTE = "The earlier part of this chat was summarized to keep it within the model's context.";
+
+/** The context ring and its details (the open conversation, the selected model). */
+export interface UsageView {
+  /** Tokens of the last request (input and answer). */
+  contextTokens: number;
+  /** All tokens the chat's requests used, in and out. */
+  inputTokens: number;
+  outputTokens: number;
+  /** The selected model's window; unknown: no ring, only the count. */
+  contextWindow?: number;
+  /** Where the context is compacted. */
+  compactAt?: number;
+  /** Estimated cost of the conversation and of its last turn; none without prices. */
+  costUsd?: number;
+  lastTurnCostUsd?: number;
+  /** Some requests had no price (the cost leaves them out). */
+  partialCost: boolean;
+  /** The ChatGPT plan: no per-token cost. */
+  plan: boolean;
+}
+
+/**
+ * A turn in progress, in the shown conversation or another: a turn keeps
+ * running when the user switches chats. What appears while it arrives
+ * (the streamed answer, running tool steps, the thinking dots, a question)
+ * is kept here, so the chat shows it again when the user comes back.
+ */
+interface RunningTurn {
+  conversation: ConversationRecord;
+  /** The conversation's visible history when the turn started (edit and Clear replace the array). */
+  history: ChatHistoryEntry[];
+  agent: AgentLoop;
+  /** Some of the answer is on screen (streamed or whole, a step or a question). */
+  answerShown: boolean;
+  /** The answer being streamed, until the loop delivers it whole; `id` is its message while shown. */
+  streaming: { id: number; text: string } | null;
+  /** Tool steps still running, by tool name, with their row while shown. */
+  tools: Map<string, { id: number; input: Record<string, unknown> }>;
+  /** The thinking dots' label ("": just the dots); null: no dots. */
+  thinking: string | null;
+  /** An `ask_user` question waiting for its answer. */
+  ask: ((answer: string) => void) | null;
+  /** Typed while it runs, until the agent takes them in or they run next (shown as queued). */
+  queued: string[];
+  /** Typed when no loop step could take them (the turn was ending): they run next. */
+  unsteered: string[];
+  /** Lets the screen sleep again (the turn holds it on). */
+  releaseScreen: () => void;
 }
 
 /**
  * Chat view for Chatting with AI.
  * Desktop: right sidebar. Mobile: right sidebar (slides in from edge).
- * Uses the plugin's shared AgentLoop and chatHistory so conversations
- * survive the view being closed and reopened (e.g. sidebar toggle).
+ * Uses the plugin's conversations and agent loops, so chats and running
+ * turns survive switching and the view being closed and reopened (e.g.
+ * sidebar toggle).
  */
 export class ObsidianChatView extends ItemView {
   private plugin: ChatPlugin;
   private chatContainer: ChatContainerApi | undefined;
-  private running = false;
-  private runVersion = 0;
+  /**
+   * The running turn of each conversation, by its ID. A turn is current
+   * while it is its conversation's entry here: Stop, Clear and edit remove
+   * or replace it, and a stopped turn that ends late changes nothing.
+   */
+  private turns = new Map<string, RunningTurn>();
+  /**
+   * Typed after a background turn's last step: they run as the next turn
+   * when its conversation is shown (or the voice conversation takes them).
+   */
+  private leftovers = new Map<string, string[]>();
+  /** The live voice conversation, while one runs. */
+  private voice: VoiceController | null = null;
+  /** Stops following the background for voice; set once voice was first started. */
+  private unwatchBackground?: () => void;
   /** Resolves once onOpen() has mounted the chat UI, or failed to. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
@@ -87,10 +247,29 @@ export class ObsidianChatView extends ItemView {
     super(leaf);
     this.plugin = plugin;
     this.ready = new Promise((resolve) => { this.markReady = resolve; });
+    // Obsidian takes Ctrl/Cmd+Enter as a hotkey before the input sees it.
+    // The view's own scope is asked first, so the chat still sends with it.
+    this.scope = new Scope(this.app?.scope);
+    this.scope.register(["Mod"], "Enter", (evt) => this.chatContainer?.sendFromKeyboard(evt.target) ? false : true);
   }
 
   getViewType(): string {
     return VIEW_TYPE_CHAT;
+  }
+
+  /** The shown conversation's running turn. */
+  private get turn(): RunningTurn | undefined {
+    return this.turns.get(this.plugin.activeConversationId);
+  }
+
+  /** The shown conversation runs a turn. */
+  get running(): boolean {
+    return !!this.turn;
+  }
+
+  /** The chat UI while it shows `turn`'s conversation (and `turn` still runs there). */
+  private shownChat(turn: RunningTurn): ChatContainerApi | undefined {
+    return this.turn === turn ? this.chatContainer : undefined;
   }
 
   getDisplayText(): string {
@@ -106,11 +285,42 @@ export class ObsidianChatView extends ItemView {
   async onOpen(): Promise<void> {
     try {
       this.mountChat();
+      this.followKeyboardOnPhone();
     } finally {
       // Also when mounting failed: commands waiting for the view go on
       // (its methods do nothing without the UI) instead of waiting forever.
       this.markReady();
     }
+  }
+
+  /**
+   * Phones: Obsidian doesn't shrink the sidebar for the keyboard, it only
+   * sets --keyboard-height (and drops the sidebar's bottom padding). With
+   * the keyboard open, measure how much of the view it covers and lift the
+   * chat by that (`--ochatting-lift`, styles.css). Measured, not predicted:
+   * whatever lies below the view, the input ends at the keyboard. Runs when
+   * Obsidian changes the keyboard state (its style and class on <html> and
+   * <body>) and when the view's size changes.
+   */
+  private followKeyboardOnPhone(): void {
+    if (!Platform.isPhone) return;
+    const view = this.contentEl;
+    const update = () => {
+      const keyboard = Number.parseFloat(getComputedStyle(document.body).getPropertyValue("--keyboard-height")) || 0;
+      const rect = view.getBoundingClientRect();
+      const lift = keyboard > 0 && rect.height > 0 ? Math.max(0, Math.round(rect.bottom - (window.innerHeight - keyboard))) : 0;
+      view.style.setProperty("--ochatting-lift", `${lift}px`);
+    };
+    const resize = new ResizeObserver(update);
+    resize.observe(view);
+    const keyboardState = new MutationObserver(update);
+    for (const el of [document.documentElement, document.body]) {
+      keyboardState.observe(el, { attributes: true, attributeFilter: ["style", "class"] });
+    }
+    this.register(() => {
+      resize.disconnect();
+      keyboardState.disconnect();
+    });
   }
 
   private mountChat(): void {
@@ -126,41 +336,199 @@ export class ObsidianChatView extends ItemView {
         app: this.app,
         component: this,
         provider: this.plugin.settings.provider,
-        model: getModelDisplayName(this.plugin.settings.provider, this.plugin.settings.model),
-        onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[]) => {
-          void this.handleUserMessage(text, selection, images);
+        model: this.plugin.modelHeaderLabel(),
+        onSend: (text: string, selection: SelectionScope | null, images: ImageAttachment[], files: FileAttachment[]) => {
+          void this.handleUserMessage(text, selection, images, files);
         },
         onClear: () => this.handleClear(),
         onStop: () => this.handleStop(),
+        onEdit: (turnId: string, text: string) => void this.editMessage(turnId, text),
+        onRegenerate: () => void this.regenerate(),
+        onCopy: (text: string) => this.copyAnswer(text),
+        title: this.plugin.activeConversation.title,
+        onNewChat: () => this.newChat(),
+        listConversations: () => this.plugin.listConversations().map((item) => ({ ...item, running: this.turns.has(item.id) })),
+        onOpenConversation: (id: string) => void this.openConversation(id),
+        onRenameConversation: (id: string, title: string) => void this.renameConversation(id, title),
+        onDeleteConversation: (id: string) => void this.deleteConversation(id),
+        onToggleFollow: () => void this.toggleFollow(),
+        onUndo: (turnId: string) => void this.undoChanges(turnId),
+        listSkills: () => findSkills(this.plugin.app, this.plugin.settings.skillsFolder),
+        onContinue: () => void this.continueTurn(),
+        onCompact: () => void this.compactNow(),
+        onLoadEarlier: () => this.loadEarlier(),
+        onVoice: (action: VoiceAction) => this.handleVoice(action),
       },
     });
 
-    // Replay chat history into the UI
-    for (const msg of this.plugin.chatHistory) {
-      switch (msg.type) {
-        case "user":
-          this.chatContainer.addUserMessage(msg.text!, msg.images);
-          break;
-        case "assistant":
-          this.chatContainer.addAssistantMessage(msg.text!);
-          break;
-        case "tool-result":
-          if (msg.toolName && msg.toolResult) {
-            const id = this.chatContainer.addToolCall(msg.toolName, msg.toolInput || {});
-            this.chatContainer.updateToolResult(id, msg.toolName, msg.toolResult);
-          }
-          break;
-        case "error":
-          this.chatContainer.addError(msg.text!);
-          break;
-      }
-    }
-
+    this.renderHistory();
+    this.updateEnterSends();
+    this.updateFollowEdits();
+    this.updateVoiceAvailable();
     this.chatContainer.focus();
   }
 
+  /** The first entry of the shown conversation's history the chat shows. */
+  private shownFrom = 0;
+
+  /**
+   * Show the active conversation's last turns in the UI, replacing what it
+   * shows, and what its running turn shows so far. Earlier turns come in
+   * when the chat is scrolled near the top (`loadEarlier`).
+   */
+  renderHistory(): void {
+    const chat = this.chatContainer;
+    if (!chat) return;
+    chat.clearMessages();
+    const history = this.plugin.chatHistory;
+    this.shownFrom = pageStart(history, history.length);
+    const shown = history.slice(this.shownFrom);
+    for (const entry of shown) this.render(entry);
+    // Finished turns show folded; a running one is the last and stays open.
+    const turnIds = turnIdsOf(shown);
+    for (const turnId of this.running ? turnIds.slice(0, -1) : turnIds) chat.foldTurn(turnId);
+    // The running turn's steps, answer and dots as far as they got.
+    const turn = this.turn;
+    if (turn) {
+      for (const [name, call] of turn.tools) call.id = chat.addToolCall(name, call.input);
+      if (turn.streaming) turn.streaming.id = chat.addAssistantMessage(turn.streaming.text, true);
+      if (turn.thinking !== null) chat.showThinking(turn.thinking);
+    }
+    // Turns before the last compaction, or no longer in the API history, lose their pencil.
+    this.updateEditable();
+    chat.setHasEarlier?.(this.shownFrom > 0);
+    chat.setContinue(this.canContinue());
+    this.updateUsage();
+  }
+
+  /** The turns before the shown ones, above them (scrolled near the top). */
+  loadEarlier(): void {
+    const chat = this.chatContainer;
+    if (!chat?.prependMessages || this.shownFrom <= 0) return;
+    const history = this.plugin.chatHistory;
+    const end = this.shownFrom;
+    const from = pageStart(history, end);
+    const earlier = history.slice(from, end);
+    this.shownFrom = from;
+    chat.prependMessages(() => {
+      for (const entry of earlier) this.render(entry);
+    });
+    for (const turnId of turnIdsOf(earlier)) chat.foldTurn(turnId);
+    chat.setHasEarlier?.(from > 0);
+  }
+
+  /** Show one history entry at the end of the chat. */
+  private render(msg: ChatHistoryEntry): void {
+    const chat = this.chatContainer;
+    if (!chat) return;
+    switch (msg.type) {
+      case "user":
+        chat.addUserMessage(msg.text ?? "", msg.images, msg.turnId, msg.selection, msg.attachedFiles);
+        break;
+      case "assistant":
+        chat.addAssistantMessage(msg.text!);
+        break;
+      case "tool-result":
+        if (msg.toolName && msg.toolResult) {
+          const id = chat.addToolCall(msg.toolName, msg.toolInput || {});
+          chat.updateToolResult(id, msg.toolName, msg.toolResult);
+        }
+        break;
+      case "error":
+        chat.addError(msg.text!, msg.errorKind);
+        break;
+      case "changes":
+        if (msg.turnId) {
+          const state = msg.undone ? "undone" : this.plugin.changeLogs.has(msg) ? "undoable" : "kept";
+          chat.addChanges(msg.turnId, msg.files ?? [], state);
+        }
+        break;
+    }
+  }
+
+  /** The context ring for the open conversation and the selected model. */
+  updateUsage(): void {
+    const usage = this.plugin.activeConversation.usage;
+    if (!usage) {
+      this.chatContainer?.setUsage?.(null);
+      return;
+    }
+    const { provider, model } = this.plugin.settings;
+    const option = catalogModel(provider, model);
+    const plan = provider === "chatgpt-oauth";
+    const priced = usage.costUsd > 0 || usage.unpricedRequests === 0;
+    this.chatContainer?.setUsage?.({
+      contextTokens: usage.contextTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      contextWindow: option?.contextWindow,
+      compactAt: compactThreshold(provider, option, this.plugin.settings),
+      ...(priced && !plan ? { costUsd: usage.costUsd, lastTurnCostUsd: usage.lastTurnCostUsd } : {}),
+      partialCost: usage.unpricedRequests > 0,
+      plan,
+    });
+  }
+
+  /**
+   * *Compact now* (the ring's details): the open conversation's history
+   * becomes a summary written by its model. Not while a turn runs.
+   */
+  async compactNow(): Promise<void> {
+    const chat = this.chatContainer;
+    if (!chat || this.running) return;
+    const conversation = this.plugin.activeConversation;
+    const agent = this.plugin.agentFor(conversation);
+    // Kept by the plugin if the user switches away meanwhile.
+    const release = agent.hold();
+    chat.setBusy(true);
+    chat.setInputEnabled(false);
+    chat.showThinking("Summarizing…");
+    try {
+      if (await agent.compact()) {
+        conversation.chatHistory.push({ type: "error", text: COMPACTED_NOTE, errorKind: "compacted" });
+        // Small now; the next answer counts it.
+        if (conversation.usage) conversation.usage = { ...conversation.usage, contextTokens: 0 };
+        void this.plugin.saveChatHistory();
+      }
+    } catch (e) {
+      new Notice(`Couldn't summarize the chat: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      release();
+      if (this.plugin.activeConversation === conversation) {
+        chat.hideThinking();
+        this.renderHistory();
+        chat.setBusy(false);
+        chat.setInputEnabled(true);
+      }
+    }
+  }
+
+  /**
+   * The shown conversation's turn was cut off (Obsidian was ended in the
+   * middle of it) and the model still owes an answer.
+   */
+  private canContinue(): boolean {
+    return !this.running && !!this.plugin.activeConversation.pendingTurn && this.plugin.agent.owesAnswer();
+  }
+
+  /** Forget a cut-off turn: no Continue (a new message, Stop, Clear, leaving the chat). */
+  private dismissContinue(): void {
+    delete this.plugin.activeConversation.pendingTurn;
+    this.chatContainer?.setContinue(false);
+  }
+
+  /** Turns the API history no longer holds lose their pencil and Regenerate. */
+  private updateEditable(): void {
+    const agent = this.plugin.agent;
+    this.chatContainer?.setEditable?.((turnId) => agent.canEditTurn(turnId));
+  }
+
   async onClose(): Promise<void> {
+    this.endVoice();
+    this.unwatchBackground?.();
     this.handleStop();
+    // The turns in the background stop too: they show and save through this view.
+    for (const turn of [...this.turns.values()]) this.stopTurn(turn);
     if (this.chatContainer) {
       await unmount(this.chatContainer);
       this.chatContainer = undefined;
@@ -185,6 +553,24 @@ export class ObsidianChatView extends ItemView {
   /** Update the model display name in the header */
   updateModel(name: string): void {
     this.chatContainer?.setModel(name);
+    // The ring measures against the selected model's window.
+    this.updateUsage();
+  }
+
+  /** Enter sends, or starts a new line (the "Enter sends message" setting). */
+  updateEnterSends(): void {
+    this.chatContainer?.setEnterSends(this.plugin.settings.enterSends);
+  }
+
+  /** The eye button in the header shows the "Follow the AI's edits" setting. */
+  updateFollowEdits(): void {
+    this.chatContainer?.setFollowEdits(this.plugin.settings.followEdits);
+  }
+
+  /** The eye button: the "Follow the AI's edits" setting, on or off. */
+  private async toggleFollow(): Promise<void> {
+    this.plugin.settings.followEdits = !this.plugin.settings.followEdits;
+    await this.plugin.saveSettings();
   }
 
   /** Clear conversation */
@@ -192,13 +578,239 @@ export class ObsidianChatView extends ItemView {
     this.handleClear();
   }
 
+  // ─── Voice ──────────────────────────────────────────────────────────
+  // A voice conversation belongs to the shown conversation: switching,
+  // a new chat, clearing or closing the view ends it.
+
+  /** Show or hide the voice button (signed in to ChatGPT or not). */
+  updateVoiceAvailable(): void {
+    this.chatContainer?.setVoiceAvailable(this.plugin.voiceRoute() !== null);
+  }
+
+  /** Start a voice conversation in the current conversation. */
+  startVoice(options: { reconnecting?: boolean; micOn?: boolean } = {}): void {
+    if (this.voice) return;
+    const route = this.plugin.voiceRoute();
+    if (!route) {
+      new Notice("Connect your ChatGPT account in Chatting with AI settings to use voice.");
+      return;
+    }
+    // The screen stays on during the call (released when it ends).
+    const releaseScreen = screenAwake.hold();
+    const controller: VoiceController = new VoiceController({
+      runTurn: (text, hooks, context) => this.handleUserMessage(text, null, [], [], hooks, context),
+      // A spoken request while the voice turn runs is added to it.
+      steerTurn: (text, context) => this.running && this.steerByVoice(text, context),
+      takeSteered: () => this.takeStashed(),
+      stopTurn: () => this.handleStop(),
+      turnRunning: () => this.running,
+      history: () => this.plugin.chatHistory,
+      openFile: () => this.plugin.app.workspace.getActiveFile(),
+      showError: (message) => {
+        this.chatContainer?.addError(message);
+        this.plugin.chatHistory.push({ type: "error", text: message });
+        void this.plugin.saveChatHistory();
+      },
+      render: (state) => {
+        if (this.voice !== controller) return;
+        if (!state) {
+          this.voice = null;
+          releaseScreen();
+        }
+        this.chatContainer?.setVoice(state);
+      },
+      log: (label, data) => debugLog(this.app, label, data),
+    }, route, this.plugin.settings.voiceMicMode === "hold", options);
+    this.voice = controller;
+    this.unwatchBackground ??= this.watchVoiceBackground();
+    void controller.start();
+  }
+
+  /**
+   * Mobile: in the background the microphone records only silence and
+   * the call may drop. Leaving turns the microphone off and ends the call
+   * after `endAfter` (nobody hears it, and it is billed by the minute).
+   * Back sooner, a working call gets its microphone back; one that
+   * dropped, or after more than `reconnectAfter`, is replaced. Desktop: a
+   * minimised window keeps the call. Returns the unsubscribe.
+   */
+  private watchVoiceBackground(): () => void {
+    let endTimer = 0;
+    const offHidden = appLifecycle.onHidden(() => {
+      if (!Platform.isMobileApp || !this.voice) return;
+      this.voice.enterBackground();
+      endTimer = window.setTimeout(() => this.endVoice(), VOICE_TIMING.endAfter);
+    });
+    const offVisible = appLifecycle.onVisible((hiddenMs) => {
+      window.clearTimeout(endTimer);
+      const voice = this.voice;
+      if (!Platform.isMobileApp || !voice) return;
+      if (hiddenMs >= VOICE_TIMING.endAfter) this.endVoice();
+      else if (!voice.leaveBackground(hiddenMs)) this.reconnectVoice();
+    });
+    return () => {
+      offHidden();
+      offVisible();
+      window.clearTimeout(endTimer);
+    };
+  }
+
+  /**
+   * Replace the voice conversation: the old call ends quietly, a new one
+   * starts ("Reconnecting…"), seeded with the chat as it is now, so an
+   * answer finished meanwhile is included. If it fails, the error shows.
+   */
+  private reconnectVoice(): void {
+    const old = this.voice;
+    if (!old) return;
+    this.voice = null;
+    void old.end();
+    this.startVoice({ reconnecting: true, micOn: old.isMicOn() });
+  }
+
+  /** End the voice conversation, if one runs. */
+  endVoice(): void {
+    const voice = this.voice;
+    if (!voice) return;
+    this.voice = null;
+    this.chatContainer?.setVoice(null);
+    void voice.end();
+  }
+
+  /** The voice button and the voice bar's controls. */
+  handleVoice(action: VoiceAction): void {
+    if (action === "start") this.startVoice();
+    else if (action === "end") this.endVoice();
+    else if (action === "mute") this.voice?.toggleMute();
+    else if (action === "talk-start") this.voice?.setTalking(true);
+    else if (action === "talk-end") this.voice?.setTalking(false);
+    else this.voice?.resumeAudio();
+  }
+
+  // ─── Conversations ──────────────────────────────────────────────────
+  // A running turn keeps running when the user switches: it goes on in its
+  // conversation, which shows it again on the return. The voice
+  // conversation belongs to the shown chat and ends.
+
+  /** Start a new conversation (an empty current one is kept instead). */
+  newChat(): void {
+    this.endVoice();
+    if (!this.running) this.dismissContinue();
+    this.plugin.startNewConversation();
+    this.showConversation();
+  }
+
+  /** Switch to conversation `id` (its file is read first). */
+  async openConversation(id: string): Promise<void> {
+    if (id === this.plugin.activeConversationId) return;
+    this.endVoice();
+    if (!this.running) this.dismissContinue();
+    if (await this.plugin.openConversation(id)) this.showConversation();
+  }
+
+  /** Rename conversation `id` (empty: back to the automatic title). */
+  async renameConversation(id: string, title: string): Promise<void> {
+    await this.plugin.renameConversation(id, title);
+    this.chatContainer?.setTitle(this.plugin.activeConversation.title);
+    // An emptied name of a chat not read yet waits for its file.
+    this.chatContainer?.updateConversations();
+  }
+
+  /** Delete conversation `id`; for the current one, show the next. */
+  async deleteConversation(id: string): Promise<void> {
+    const active = id === this.plugin.activeConversationId;
+    if (active) this.endVoice();
+    // Its turn stops, shown or not.
+    const turn = this.turns.get(id);
+    if (turn) this.stopTurn(turn);
+    this.leftovers.delete(id);
+    await this.plugin.deleteConversation(id);
+    if (active) this.showConversation();
+  }
+
+  /**
+   * Show the active conversation: its history, and its running turn as far
+   * as it got (the input adds to it, a waiting question can be answered).
+   */
+  private showConversation(): void {
+    const chat = this.chatContainer;
+    if (!chat) return;
+    // The input stops waiting for another conversation's answer (its question waits).
+    chat.cancelAskUser();
+    this.renderHistory();
+    chat.setTitle(this.plugin.activeConversation.title);
+    const turn = this.turn;
+    chat.setInputEnabled(true);
+    chat.setBusy(!!turn);
+    chat.setQueued([...turn?.queued ?? []]);
+    if (turn?.ask) this.askNow(turn);
+    chat.focus();
+    // Typed after its turn's last step while it ran in the background: they run now.
+    const later = this.leftovers.get(this.plugin.activeConversationId);
+    if (later && !turn && !this.voice) {
+      this.leftovers.delete(this.plugin.activeConversationId);
+      void this.handleUserMessage(later.join("\n\n"), null);
+    }
+  }
+
+  /**
+   * Edit and continue: stop a running turn, cut both histories to
+   * just before the turn `turnId`, save, and run `text` as a new turn with
+   * that turn's images, files and selection scope. Vault changes stay. Resolves
+   * when the new turn has ended.
+   */
+  async editMessage(turnId: string, text: string): Promise<void> {
+    const history = this.plugin.chatHistory;
+    const index = history.findIndex((entry) => entry.type === "user" && entry.turnId === turnId);
+    // A turn the API history no longer holds can't be edited: cutting there
+    // would leave the model without the chat.
+    if (index < 0 || !this.plugin.agent.canEditTurn(turnId)) return;
+    const { selection = null } = history[index];
+    // Images and files the saved API history no longer holds can't be sent again.
+    const images = (history[index].images ?? []).filter((image) => image.data);
+    const files = (history[index].attachedFiles ?? []).filter((file) => file.data || file.text);
+    if (!text.trim() && images.length === 0 && files.length === 0) return;
+    const running = this.turn;
+    if (running) this.stopTurn(running);
+    this.plugin.agent.cutBeforeTurn(turnId);
+    this.plugin.chatHistory = history.slice(0, index);
+    this.chatContainer?.cutMessages(turnId);
+    // Saved at once: the cut holds even if the new turn never ends.
+    void this.plugin.saveChatHistory();
+    await this.handleUserMessage(text, selection, images, files);
+  }
+
+  /** Regenerate the last answer: run the last user turn again, unchanged. */
+  async regenerate(): Promise<void> {
+    const last = this.plugin.chatHistory.filter((entry) => entry.type === "user" && entry.turnId).pop();
+    if (last?.turnId) await this.editMessage(last.turnId, last.text ?? "");
+  }
+
+  /** Copy an answer's Markdown source. */
+  copyAnswer(text: string): void {
+    void navigator.clipboard.writeText(text).then(
+      () => new Notice("Copied"),
+      () => new Notice("Couldn't copy the answer."),
+    );
+  }
+
+  /**
+   * Run one turn; `voice`: it comes from the voice conversation, which gets
+   * its progress and answer. `voiceContext`: what was said there since the
+   * last request; the agent gets it all, the chat shows the user's words
+   * before the request.
+   */
   private async handleUserMessage(
     text: string,
     selection: SelectionScope | null,
-    images: ImageAttachment[] = []
+    images: ImageAttachment[] = [],
+    files: FileAttachment[] = [],
+    voice?: VoiceTurnHooks,
+    voiceContext: VoiceTurn[] = []
   ): Promise<void> {
+    // While a turn runs, a typed message is added to it (steering).
     if (this.running) {
-      new Notice("Please wait for the current response to complete.");
+      this.addToRunningTurn(text);
       return;
     }
 
@@ -208,96 +820,430 @@ export class ObsidianChatView extends ItemView {
       new Notice("The chat panel couldn't be shown, so the message wasn't sent.");
       return;
     }
-    const version = ++this.runVersion;
-    const isCurrent = () => version === this.runVersion;
-    const history = this.plugin.chatHistory;
+    const conversation = this.plugin.activeConversation;
+    const turnId = newTurnId();
+    // A user turn at the end is the request itself, as the voice put it.
+    // Of what was said before, the chat shows only what belongs to the request.
+    const shownContext = requestContext(voiceContext);
+    const said = shownContext.at(-1)?.role === "user" ? shownContext.slice(0, -1) : shownContext;
+    for (const turn of said) {
+      if (turn.role !== "user") continue;
+      chat.addUserMessage(turn.text);
+      conversation.chatHistory.push({ type: "user", text: turn.text });
+    }
+    chat.addUserMessage(text, images, turnId, selection ?? undefined, files);
+    conversation.chatHistory.push({ type: "user", text, images, turnId, ...(selection ? { selection } : {}), ...(files.length ? { attachedFiles: files } : {}) });
+    this.plugin.touchConversation();
+    chat.setTitle(conversation.title);
+    // What the model should know of (an undo), told once, with this turn.
+    const notes = conversation.notes ?? [];
+    delete conversation.notes;
+    await this.runTurn(turnId, async (agent, callbacks) => {
+      // The files the message links to go along as they are now; the chat
+      // shows only the typed text.
+      const app = this.plugin.app;
+      const source = app.workspace.getActiveFile()?.path ?? "";
+      const linked = await mentionContext(app, mentionedFiles(app, text, source));
+      // Skills named as /name go along loaded, before the linked files.
+      const skills = await invokedSkillsText(app, this.plugin.settings.skillsFolder, text);
+      const mentioned = skills
+        ? { text: linked ? `${skills}\n\n${linked.text}` : skills, images: linked?.images ?? [], files: linked?.files ?? [] }
+        : linked;
+      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens, voice ? voiceContext : null);
+    }, voice);
+  }
 
-    this.running = true;
-    chat.addUserMessage(text, images);
-    history.push({ type: "user", text, images });
-    chat.setInputEnabled(false);
+  /**
+   * Continue the turn that was cut off when Obsidian was ended in the
+   * middle of it: the agent runs on its history as saved, with no new user
+   * message; tool results already there aren't run again.
+   */
+  async continueTurn(): Promise<void> {
+    const pending = this.plugin.activeConversation.pendingTurn;
+    if (!pending || !this.canContinue()) return;
+    await this.runTurn(pending.turnId, (agent, callbacks) => agent.continueTurn(callbacks));
+  }
 
-    const toolCalls = new Map<string, { id: number; input: Record<string, unknown> }>();
+  /**
+   * Run turn `turnId` of the shown conversation through `start`, with its
+   * agent loop and the view's callbacks. Progress, tool steps and the
+   * answer go to the conversation's history, and to the chat while it shows
+   * that conversation: the turn goes on when the user switches. Saved at
+   * the end. While it runs, the conversation carries it as its pending turn.
+   */
+  private async runTurn(
+    turnId: string,
+    start: (agent: AgentLoop, callbacks: AgentCallbacks) => Promise<void>,
+    voice?: VoiceTurnHooks,
+  ): Promise<void> {
+    const chat = this.chatContainer;
+    if (!chat) return;
+    const conversation = this.plugin.activeConversation;
+    const agent = this.plugin.agentFor(conversation);
+    // Kept by the plugin while it runs, also when the user switches away.
+    const release = agent.hold();
+    const turn: RunningTurn = {
+      conversation, history: conversation.chatHistory, agent, answerShown: false,
+      streaming: null, tools: new Map(), thinking: null, ask: null, queued: [], unsteered: [],
+      // The screen stays on while the answer is generated.
+      releaseScreen: screenAwake.hold(),
+    };
+    this.turns.set(conversation.id, turn);
+    chat.updateConversations();
+    // Stop, Clear, edit and deleting the chat end a turn early; it may still
+    // end later (a request in flight), and then changes nothing.
+    const isCurrent = () => this.turns.get(conversation.id) === turn;
+    const ui = () => this.shownChat(turn);
+    const history = turn.history;
+    // Saved with the chat when the app goes to the background; still there
+    // at the next start, the turn was cut off.
+    conversation.pendingTurn = { turnId, startedAt: Date.now() };
+    chat.setContinue(false);
+    // The input stays usable: what is sent now is added to this turn.
+    chat.setBusy(true);
+
+    const changes = new ChangeLog();
 
     try {
-      await this.plugin.agent.run(text, {
+      await start(agent, {
+        changes,
         onThinking: () => {
-          chat.showThinking();
+          // Streamed text the loop didn't deliver (a cut-off stream) goes before the next request.
+          this.endStream(turn, false);
+          this.setThinking(turn, "");
+        },
+        // A request that failed or stalled in the background is sent again:
+        // the failed attempt's streamed text goes, the answer streams anew.
+        onResuming: () => {
+          this.endStream(turn, false);
+          this.setThinking(turn, "Resuming…");
+        },
+        // The earlier part was summarized: a quiet note where it happened.
+        onCompacted: () => {
+          ui()?.addError(COMPACTED_NOTE, "compacted");
+          history.push({ type: "error", text: COMPACTED_NOTE, errorKind: "compacted" });
+        },
+        onUsage: (usage, request) => {
+          const pricing = catalogModel(request.provider, request.model)?.pricing;
+          conversation.usage = addRequest(conversation.usage, usage, { ...request, pricing });
+          if (ui()) this.updateUsage();
+        },
+        onTextDelta: (delta) => {
+          turn.answerShown = true;
+          this.setThinking(turn, null);
+          const shown = ui();
+          if (turn.streaming) {
+            turn.streaming.text += delta;
+            shown?.updateAssistantMessage(turn.streaming.id, turn.streaming.text);
+          } else {
+            turn.streaming = { id: shown ? shown.addAssistantMessage(delta, true) : -1, text: delta };
+          }
         },
         onToolCall: (name, input) => {
-          chat.hideThinking();
+          this.setThinking(turn, null);
+          // Streamed text the loop didn't deliver (it precedes ask_user,
+          // which shows the question itself) is dropped, as before streaming.
+          this.endStream(turn, false);
           if (name === "ask_user") return;
-          toolCalls.set(name, { id: chat.addToolCall(name, input), input });
+          // A tool step on screen shows that the turn did something.
+          turn.answerShown = true;
+          voice?.onToolCall(name);
+          turn.tools.set(name, { id: ui()?.addToolCall(name, input) ?? -1, input });
         },
-        onToolResult: (name, result: ToolResult) => {
+        onToolResult: (name, { focus, ...result }: ToolResult) => {
           if (name === "ask_user") return;
-          const call = toolCalls.get(name);
-          if (call) chat.updateToolResult(call.id, name, result);
+          const call = turn.tools.get(name);
+          turn.tools.delete(name);
+          if (call) ui()?.updateToolResult(call.id, name, result);
           history.push({ type: "tool-result", toolName: name, toolInput: savedToolInput(call?.input ?? {}), toolResult: result });
+          if (focus && !result.isError && this.plugin.settings.followEdits) this.follow(focus);
         },
         onResponse: (text) => {
-          chat.hideThinking();
-          chat.addAssistantMessage(text);
+          turn.answerShown = true;
+          this.setThinking(turn, null);
+          // The whole text replaces the streamed one: the same message as unstreamed.
+          const shown = ui();
+          if (turn.streaming) shown?.updateAssistantMessage(turn.streaming.id, text, true);
+          else shown?.addAssistantMessage(text);
+          turn.streaming = null;
           history.push({ type: "assistant", text });
+          voice?.onText(text);
         },
         onAskUser: async (question) => {
-          chat.hideThinking();
-          chat.setInputEnabled(true);
+          // The question is the answer so far.
+          turn.answerShown = true;
+          this.setThinking(turn, null);
+          this.endStream(turn, false);
           // The chat shows the question and the typed answer; keep both in
           // the history so they are still there after a reload.
           history.push({ type: "assistant", text: question });
-          const answer = await chat.showAskUser(question);
-          // Empty: Stop or Clear dropped the question.
+          // Answered in its conversation: now, or when the user comes back to it.
+          const answer = await new Promise<string>((resolve) => {
+            turn.ask = resolve;
+            if (ui()) this.askNow(turn, question);
+            else new Notice(`"${conversation.title}" has a question for you.`);
+          });
+          // Empty: Stop, Clear or deleting the chat dropped the question.
           if (!answer || !isCurrent()) return "";
           history.push({ type: "user", text: answer });
-          chat.setInputEnabled(false);
           return answer;
         },
         onError: (error) => {
-          chat.hideThinking();
-          chat.addError(error);
+          this.setThinking(turn, null);
+          this.endStream(turn, true);
+          ui()?.addError(error);
           history.push({ type: "error", text: error });
+          voice?.onError(error);
         },
-      }, selection, images);
+        // Added to the running turn (typed or spoken): shown where the agent took it in.
+        onSteered: (text) => {
+          this.endStream(turn, false);
+          ui()?.addUserMessage(text);
+          history.push({ type: "user", text });
+          const index = turn.queued.indexOf(text);
+          if (index >= 0) this.showQueued(turn, turn.queued.filter((_, i) => i !== index));
+        },
+      });
     } catch (e) {
       if (!isCurrent()) return;
       const msg = e instanceof Error ? e.message : String(e);
-      chat.addError(`Unexpected error: ${msg}`);
+      ui()?.addError(`Unexpected error: ${msg}`);
       history.push({ type: "error", text: `Unexpected error: ${msg}` });
     } finally {
+      turn.releaseScreen();
+      release();
+      if (conversation.pendingTurn?.turnId === turnId) delete conversation.pendingTurn;
+      if (!changes.isEmpty()) this.addChanges(history, turnId, changes);
+      // The turn is over: its steps fold into one row above the answer
+      // (when the chat shows its conversation; a stopped turn too).
+      if (this.plugin.activeConversationId === conversation.id) this.chatContainer?.foldTurn(turnId);
       if (isCurrent()) {
-        this.running = false;
-        chat.setInputEnabled(true);
-        chat.focus();
+        const shown = ui();
+        // Typed after the turn's last step: they run as the next turn, here
+        // or when its conversation is shown again. (A voice turn's
+        // controller takes its leftovers itself, unless the call has ended.)
+        const later = this.takeLeftovers(turn);
+        this.turns.delete(conversation.id);
+        this.chatContainer?.updateConversations();
+        if (shown) {
+          // A compaction in the turn locks the turns before it.
+          this.updateEditable();
+          shown.setInputEnabled(true);
+          shown.setBusy(false);
+          shown.focus();
+        } else {
+          new Notice(`Answer ready in "${conversation.title}".`);
+        }
         // Persist after each turn
         void this.plugin.saveChatHistory();
+        if (later.length) {
+          if (shown && !voice?.active()) void this.handleUserMessage(later.join("\n\n"), null);
+          else this.leftovers.set(conversation.id, [...this.leftovers.get(conversation.id) ?? [], ...later]);
+        }
       }
     }
   }
 
+  /** The thinking dots with `label`, or none (null); shown while the chat shows the turn. */
+  private setThinking(turn: RunningTurn, label: string | null): void {
+    turn.thinking = label;
+    const chat = this.shownChat(turn);
+    if (label === null) chat?.hideThinking();
+    else chat?.showThinking(label);
+  }
+
+  /**
+   * Let the user answer `turn`'s question in the input (its conversation is
+   * shown). `question`: shown now; without it the chat shows it already.
+   */
+  private askNow(turn: RunningTurn, question?: string): void {
+    const chat = this.chatContainer;
+    if (!chat || !turn.ask) return;
+    chat.setInputEnabled(true);
+    void chat.showAskUser(question).then((answer) => {
+      // Switching away cancels the input, not the question: it waits for the return.
+      if (!answer && this.turns.get(turn.conversation.id) === turn && !this.shownChat(turn)) return;
+      const resolve = turn.ask;
+      turn.ask = null;
+      resolve?.(answer);
+    });
+  }
+
+  // ─── Undo per answer ────────────────────────────────────────────────
+  // A turn that changed the vault ends in a row listing its files, with an
+  // undo button while Obsidian runs (the snapshots are kept in memory only).
+
+  /**
+   * Add turn `turnId`'s changes row right after its last tool step, so it
+   * comes before the answer that reports the change. The turn ends at the
+   * end of `history`, or before a later turn that started meanwhile (Stop,
+   * then send again). Shown only if `history` is the conversation on screen.
+   */
+  private addChanges(history: ChatHistoryEntry[], turnId: string, changes: ChangeLog): void {
+    const entry: ChatHistoryEntry = { type: "changes", turnId, files: changes.files() };
+    this.plugin.changeLogs.set(entry, changes);
+    const start = history.findIndex((item) => item.type === "user" && item.turnId === turnId);
+    const later = history.findIndex((item, i) => i > start && item.type === "user" && !!item.turnId && item.turnId !== turnId);
+    const end = later === -1 ? history.length : later;
+    let at = end;
+    for (let i = end - 1; i > start; i--) {
+      if (history[i].type === "tool-result") {
+        at = i + 1;
+        break;
+      }
+    }
+    history.splice(at, 0, entry);
+    // The chat puts the row at the same place (ChatContainer.addChanges).
+    if (history === this.plugin.chatHistory) this.chatContainer?.addChanges(turnId, entry.files ?? [], "undoable");
+  }
+
+  /**
+   * Undo the vault changes of turn `turnId` of the conversation on screen
+   * (another conversation's rows aren't found). Files changed since (by
+   * the user or a later answer) are named first and change back only if
+   * the user agrees. The model is told with the conversation's next turn.
+   */
+  async undoChanges(turnId: string): Promise<void> {
+    if (this.running) return;
+    const conversation = this.plugin.activeConversation;
+    const entry = conversation.chatHistory.find((item) => item.type === "changes" && item.turnId === turnId);
+    const log = entry && this.plugin.changeLogs.get(entry);
+    if (!entry || !log || entry.undone) return;
+    const app = this.plugin.app;
+    const changed = await log.conflicts(app);
+    if (changed.length && !await confirmUndo(app, changed)) return;
+    // Once only, also when clicked again while the dialog was open.
+    if (this.running || this.plugin.changeLogs.get(entry) !== log) return;
+    this.plugin.changeLogs.delete(entry);
+    const failed = await log.undo(app);
+    entry.undone = true;
+    const files = (entry.files ?? []).join(", ");
+    conversation.notes = [...conversation.notes ?? [], `The user undid the changes one of your earlier answers in this chat made to ${files}: they are back as they were before that answer.`];
+    this.chatContainer?.setChangesUndone(turnId);
+    if (failed.length) new Notice(`Couldn't undo all changes:\n${failed.join("\n")}`);
+    void this.plugin.saveChatHistory();
+  }
+
+  /** Edits shown one after another, in the order the AI made them. */
+  private following: Promise<unknown> = Promise.resolve();
+
+  /** Show an edit the AI just made (setting "Follow the AI's edits"). */
+  private follow(target: ViewTarget): void {
+    this.following = this.following.then(() => showInView(this.plugin.app, target)).catch(() => undefined);
+  }
+
+  /**
+   * Ends the streamed message the loop hasn't delivered whole: kept (and
+   * saved for display) when the turn was stopped or failed, else removed.
+   */
+  private endStream(turn: RunningTurn, keep: boolean): void {
+    const stream = turn.streaming;
+    if (!stream) return;
+    turn.streaming = null;
+    const chat = this.shownChat(turn);
+    if (keep) {
+      chat?.updateAssistantMessage(stream.id, stream.text, true);
+      turn.history.push({ type: "assistant", text: stream.text });
+    } else {
+      chat?.removeMessage(stream.id);
+    }
+  }
+
+  /** A message typed while the shown turn runs: the agent takes it in after its current step. */
+  private addToRunningTurn(text: string): void {
+    const turn = this.turn;
+    if (!turn) return;
+    this.showQueued(turn, [...turn.queued, text]);
+    if (!turn.agent.steer(text)) turn.unsteered.push(text);
+  }
+
+  /** A spoken request while the voice's turn runs: added to it with what was said before it. */
+  private steerByVoice(text: string, context: VoiceTurn[] = []): boolean {
+    const turn = this.turn;
+    if (!turn?.agent.steer(text, context.length ? voiceTranscriptText(context) : undefined)) return false;
+    this.showQueued(turn, [...turn.queued, text]);
+    return true;
+  }
+
+  /** What the shown conversation's last turn left over (for the voice conversation). */
+  private takeStashed(): string[] {
+    const id = this.plugin.activeConversationId;
+    const later = this.leftovers.get(id) ?? [];
+    this.leftovers.delete(id);
+    return later;
+  }
+
+  /** Added messages the turn didn't take in; they leave the queue (they run next). */
+  private takeLeftovers(turn: RunningTurn): string[] {
+    const later = [...turn.unsteered.splice(0), ...turn.agent.takeSteered()];
+    if (later.length) this.showQueued(turn, turn.queued.filter((text) => !later.includes(text)));
+    return later;
+  }
+
+  /** `turn`'s queue, shown while the chat shows its conversation. */
+  private showQueued(turn: RunningTurn, texts: string[]): void {
+    turn.queued = texts;
+    this.shownChat(turn)?.setQueued([...texts]);
+  }
+
+  /**
+   * Stops `turn` (shown or in the background): what it showed so far
+   * stays; what was added to it and a waiting question are dropped.
+   */
+  private stopTurn(turn: RunningTurn): void {
+    const shown = this.shownChat(turn);
+    turn.unsteered = [];
+    if (turn.queued.length) this.showQueued(turn, []);
+    turn.agent.abort();
+    this.endStream(turn, true);
+    this.setThinking(turn, null);
+    // A stopped request may still be waiting for its response.
+    turn.releaseScreen();
+    this.turns.delete(turn.conversation.id);
+    this.chatContainer?.updateConversations();
+    delete turn.conversation.pendingTurn;
+    shown?.setContinue(false);
+    const ask = turn.ask;
+    turn.ask = null;
+    ask?.("");
+    // Otherwise the next message would answer the stopped turn's question.
+    shown?.cancelAskUser();
+  }
+
   private handleStop(): void {
-    this.runVersion++;
-    this.plugin.agent.abort();
-    this.running = false;
+    const turn = this.turn;
+    // Nothing of the answer is on screen yet: say that the turn was stopped.
+    const silent = !!turn && !turn.answerShown;
+    if (turn) this.stopTurn(turn);
+    this.dismissContinue();
     const chat = this.chatContainer;
     if (chat) {
-      // Otherwise the next message would answer the stopped turn's question.
-      chat.cancelAskUser();
-      chat.hideThinking();
+      if (silent) chat.addError("Stopped.", "stopped");
       chat.setInputEnabled(true);
+      chat.setBusy(false);
       chat.focus();
     }
+    if (silent) this.plugin.chatHistory.push({ type: "error", text: "Stopped.", errorKind: "stopped" });
     void this.plugin.saveChatHistory();
   }
 
   private handleClear(): void {
-    this.runVersion++;
+    this.endVoice();
+    const turn = this.turn;
+    if (turn) this.stopTurn(turn);
+    this.dismissContinue();
+    this.leftovers.delete(this.plugin.activeConversationId);
     this.plugin.agent.clear();
     this.plugin.chatHistory = [];
+    delete this.plugin.activeConversation.notes;
+    delete this.plugin.activeConversation.usage;
+    this.chatContainer?.setUsage?.(null);
+    this.plugin.touchConversation();
+    this.chatContainer?.setTitle(this.plugin.activeConversation.title);
     this.chatContainer?.clearMessages();
     this.chatContainer?.cancelAskUser();
-    this.running = false;
     this.chatContainer?.setInputEnabled(true);
+    this.chatContainer?.setBusy(false);
     // Clear persisted state
     void this.plugin.saveChatHistory();
   }

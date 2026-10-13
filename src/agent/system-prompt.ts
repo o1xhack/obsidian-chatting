@@ -1,4 +1,4 @@
-import type { ConversationContext } from "../types";
+import type { ConversationContext, VoiceTurn } from "../types";
 
 /**
  * The static system prompt that never changes across turns.
@@ -17,6 +17,7 @@ const STATIC_PROMPT = `You are Chatting with AI, an AI assistant embedded in Obs
 - Keep responses concise. The user is often on mobile.
 - For multi-step edits, explain your plan briefly before starting.
 - If a search returns no results, try alternative queries or ask the user.
+- A folder can have its own AGENTS.md with instructions for its files; it comes with the first tool result that touches a file there. Follow it for that folder.
 
 ## Being Decisive
 - Be action-oriented. When you can do something, just do it.
@@ -33,11 +34,40 @@ const STATIC_PROMPT = `You are Chatting with AI, an AI assistant embedded in Obs
 - Keep summaries to 2-3 sentences unless more detail is requested.`;
 
 /**
- * Returns the static system prompt.
- * Identical across all API calls, enabling KV cache reuse.
+ * The system prompt: the built-in one, the vault's skills and its
+ * AGENTS.md, if any. Identical from call to call while those don't
+ * change, so the providers' prompt caches keep working.
  */
-export function buildSystemPrompt(): string {
-  return STATIC_PROMPT;
+export function buildSystemPrompt(vaultInstructions: string | null = null, skills: string | null = null): string {
+  let prompt = STATIC_PROMPT;
+  if (skills) prompt += `
+
+## Skills
+${skills}`;
+  if (vaultInstructions) prompt += `
+
+## This vault's instructions (AGENTS.md)
+The user wrote these for AI assistants working in this vault. Follow them; what the user says in the chat wins over them.
+
+${vaultInstructions}`;
+  return prompt;
+}
+
+/** Last turns kept as context, and characters per turn. */
+const VOICE_CONTEXT_TURNS = 12;
+const VOICE_CONTEXT_CHARS = 400;
+
+/**
+ * The voice conversation since the last request, for context: the voice
+ * hands over only the sentence that asked for work, while the request may
+ * build on what was said before (e.g. it asked a question first).
+ */
+export function voiceTranscriptText(turns: VoiceTurn[]): string {
+  const lines = turns.slice(-VOICE_CONTEXT_TURNS).map((turn) => {
+    const text = turn.text.replace(/\s+/g, " ").trim().slice(0, VOICE_CONTEXT_CHARS);
+    return `${turn.role === "user" ? "User" : "Voice"}: "${text}"`;
+  });
+  return `Said in the voice conversation before this request (context): ${lines.join(" ")}.`;
 }
 
 /**
@@ -57,6 +87,16 @@ export function buildContextMessage(context: ConversationContext): string {
     const truncated = context.selection.substring(0, 200);
     parts.push(`Selected text: "${truncated}${context.selection.length > 200 ? "..." : ""}".`);
   }
+
+  if (context.voice) {
+    parts.push("This turn comes from a voice conversation: answer briefly in plain spoken sentences; no tables or code unless asked.");
+  }
+
+  if (context.voiceTranscript?.length) {
+    parts.push(voiceTranscriptText(context.voiceTranscript));
+  }
+
+  for (const note of context.notes ?? []) parts.push(note);
 
   parts.push("]");
 

@@ -23,7 +23,8 @@
 
 - **三個 provider,自己選** —— Anthropic API、OpenAI API,或者直接用你的 ChatGPT 帳號登入。不做半成品 provider 的市場。
 - **14 個 vault 原生工具** —— 讀、改、搜尋、建立、重新命名、frontmatter、backlinks 一應俱全。從想法到改動檔案,不用離開聊天框。
-- **手機端不打折** —— 不靠 streaming、不依賴 Node-only 模組、不用 localhost callback。iOS 與 Android 與桌面表現一致。
+- **手機端不打折** —— 不用 localhost callback。iOS 與 Android 與桌面表現一致。
+- **串流回答** —— 模型邊寫，回答邊顯示；手機上若服務商不允許，則在寫完後一次顯示。
 - **選取作用域** —— 在筆記中選一段文字送進聊天,助理只在選取裡動手。
 - **密鑰進作業系統鑰匙圈** —— 絕不寫進 `data.json`,不會被同步到其他裝置。
 
@@ -141,11 +142,11 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 
 | 原則 | 意思 |
 |---|---|
-| **行動端不是補丁** | 每一次改動都在 iOS 與 Android 上驗證。不靠 streaming、不靠 Node-only 模組、不靠 localhost callback。 |
+| **行動端不是補丁** | 每一次改動都在 iOS 與 Android 上驗證。平台允許時回答以串流顯示，否則透過 Obsidian 的 `requestUrl()` 一次送達。不靠 localhost callback。 |
 | **三個靠譜 provider** | Anthropic + OpenAI 求穩定,ChatGPT 帳號給不想設 API key 的人。 |
 | **密鑰進鑰匙圈** | API key 與 OAuth 憑證都走 Obsidian SecretStorage。絕不進 `data.json`,因此也不會被 Obsidian Sync 同步到其他裝置。 |
 | **不做向量索引** | 線性搜尋加上限保護。可預期、無背景工作、手機記憶體壓力小。 |
-| **會話自動保留** | 聊天紀錄在 Obsidian 重啟後仍在。本機 `chat-state.json`,不同步。 |
+| **會話自動保留** | 聊天紀錄在 Obsidian 重啟後仍在。本機 `chat-state.json` 與 `chats` 資料夾,不同步。 |
 | **手機由右側滑入** | 從右邊滑入側欄,底下的文件不被遮擋。 |
 
 ## 🗺️ 路線圖
@@ -173,7 +174,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>行動端真的能用嗎?</b></summary>
 
-可以 —— 整個專案就是圍繞這個約束設計的。請求走 Obsidian 的 `requestUrl()`(手機 WebView 強制 CORS),不用 streaming、不用 Node-only 模組、OAuth 也不用 localhost callback。iOS 與 Android 跑的是和桌面完全相同的程式碼路徑。
+可以 —— 整個專案就是圍繞這個約束設計的。請求走 Obsidian 的 `requestUrl()`(手機 WebView 強制 CORS),只有聊天回答例外，它以串流傳輸：桌面透過 Node 的 `https`，手機在服務商允許時透過 `fetch`，否則透過 `requestUrl()` 一次送達。OAuth 不用 localhost callback。iOS 與 Android 擁有與桌面相同的功能。
 
 </details>
 
@@ -194,7 +195,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>聊天紀錄存在哪?會同步嗎?</b></summary>
 
-存在本機 `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json`。**Obsidian Sync 預設排除外掛資料檔**,不會被同步。API key 透過 SecretStorage 進作業系統鑰匙圈,同樣不同步。
+存在本機 `<vault>/.obsidian/plugins/chatting-with-ai/` 的 `chat-state.json`(聊天列表)與 `chats` 資料夾(每個聊天一個檔案)。**Obsidian Sync 預設排除外掛資料檔**,不會被同步。API key 透過 SecretStorage 進作業系統鑰匙圈,同樣不同步。
 
 </details>
 
