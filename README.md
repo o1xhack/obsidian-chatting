@@ -27,6 +27,8 @@
 - **Streamed answers** — the answer appears as the model writes it; where a provider doesn't allow that on a phone, it appears at once when it's done.
 - **Add to a running answer** — type and send while the AI is still working: your message joins the running task (shown as *Queued* until the AI takes it in) instead of waiting. The button is Stop while the input is empty.
 - **Back from the background** — switch apps or lock the phone while an answer runs: when you come back, a request the phone cut off is sent again ("Resuming…"), and if the phone closed Obsidian meanwhile, the chat offers **Continue** to finish the interrupted answer.
+- **Context and cost** — a small ring in the chat header shows how full the model's context is; click it for the tokens the chat used, the estimated cost of the chat and of the last answer (from the provider's list prices; with the ChatGPT account, a link to your plan's usage instead), and **Compact now**.
+- **Long chats** — before the context is full, the earlier part of the chat is summarized so it can go on: by the provider where it offers that (Anthropic, OpenAI, and the ChatGPT account where its backend accepts it), otherwise by the plugin with the same model. A quiet note in the chat shows where.
 - **Selection scope** — highlight text in any note, send it to chat, the assistant edits only inside the selection.
 - **Secrets in the OS keychain** — never in `data.json`, never synced across devices.
 - **MCP servers** — with an Anthropic or OpenAI API key, add remote MCP servers (public https, optional token) in the settings; the provider connects to them and the AI uses their tools, shown as steps in the chat. They run without asking, so add only servers you trust. Not available with the ChatGPT account.
@@ -130,7 +132,9 @@ Attach up to four PDF, Word, Excel, PowerPoint or text files to a message as wel
 
 ### Model list updates
 
-All three providers load their authenticated model catalogs in settings. Lists are cached for 24 hours and survive restarts. Settings show the last list immediately, then refresh it in the background when expired. No daily timer or request on every settings visit is scheduled. The refresh button checks immediately. Failed requests retain the last list and selected model; account/API-key changes use a separate cache.
+All three providers load their authenticated model catalogs in settings. Lists are cached for 24 hours and survive restarts. Settings show the last list immediately, then refresh it in the background when expired. No daily timer or request on every settings visit is scheduled. The refresh button checks immediately. Failed requests retain the last list and selected model; account/API-key changes use a separate cache. An expired list is also loaded once when Obsidian starts, since the context ring needs each model's window.
+
+The lists give each model's context window (for a ChatGPT account, the Codex catalog's window and compaction point). Anthropic's model prices come from Anthropic's public pricing page, read with the list. OpenAI's model list has neither, so with an OpenAI API key the selected model's window and prices come from its public documentation page on `developers.openai.com`, read at most once a day. Nothing about you is sent to either page.
 
 ChatGPT OAuth discovers the latest stable client version from OpenAI's official GitHub release metadata and keeps the last known version or bundled fallback if discovery fails. Reasoning effort, reasoning summaries and parallel-tool options follow catalog metadata where provided. New model IDs normally require no plugin update, but upstream protocol changes can still require one. Custom model IDs survive reload. Catalog data contains no credentials.
 

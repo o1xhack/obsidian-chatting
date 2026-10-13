@@ -6,6 +6,7 @@
  */
 import type { ChatHistoryEntry, FileAttachment, ImageAttachment, UnifiedMessage } from "./types";
 import { assignLegacyTurnIds, trimHistory, MAX_CONVERSATION_LENGTH } from "./agent/history";
+import type { ConversationUsage } from "./agent/usage";
 
 /** Current format version of `chat-state.json`. */
 export const CHAT_STATE_VERSION = 3;
@@ -38,6 +39,8 @@ export interface ConversationRecord {
    * background); still there at the next start, the turn was cut off.
    */
   pendingTurn?: PendingTurn;
+  /** Context of the last request, tokens used and estimated cost (the ring in the chat header). */
+  usage?: ConversationUsage;
 }
 
 /** The turn a conversation was running. */
@@ -115,6 +118,8 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
         agentMessages: arrayOf<UnifiedMessage>(item.agentMessages),
         ...(notes.length ? { notes } : {}),
         ...(pendingTurn ? { pendingTurn } : {}),
+        // Optional too: an older plugin drops it.
+        ...savedUsage(item.usage),
       };
     });
   if (conversations.length === 0) conversations.push(newConversation());
@@ -207,6 +212,25 @@ export function restoreImages(entries: ChatHistoryEntry[], messages: UnifiedMess
     if (entry.attachedFiles?.length) restored.attachedFiles = entry.attachedFiles.map((file) => files.get(file.id) ?? file);
     return restored;
   });
+}
+
+/** A saved usage record, checked field by field (`{ usage }`), or nothing. */
+function savedUsage(value: unknown): { usage?: ConversationUsage } {
+  if (!isRecord(value)) return {};
+  const number = (field: unknown) => (typeof field === "number" && Number.isFinite(field) && field >= 0 ? field : undefined);
+  const contextTokens = number(value.contextTokens);
+  const costUsd = number(value.costUsd);
+  if (contextTokens === undefined || costUsd === undefined || typeof value.model !== "string" || typeof value.provider !== "string") return {};
+  const lastTurnCostUsd = number(value.lastTurnCostUsd);
+  return {
+    usage: {
+      contextTokens, costUsd, model: value.model, provider: value.provider,
+      inputTokens: number(value.inputTokens) ?? 0,
+      outputTokens: number(value.outputTokens) ?? 0,
+      unpricedRequests: number(value.unpricedRequests) ?? 0,
+      ...(lastTurnCostUsd !== undefined ? { lastTurnCostUsd } : {}),
+    },
+  };
 }
 
 function arrayOf<T>(value: unknown): T[] {

@@ -133,6 +133,19 @@ export interface UnifiedMessage {
    * entry in the chat view's history, so both can be cut there.
    */
   turnId?: string;
+  /**
+   * On an assistant message whose request compacted the context: what came
+   * before it is in its native compaction item (in `replay`), and in
+   * `summary` when readable (Anthropic writes one; the plugin writes one
+   * when another provider or model takes over).
+   */
+  compaction?: Compaction;
+}
+
+/** A compaction of the context in a request. */
+export interface Compaction {
+  /** The summary as text, for a provider that can't replay the native item. */
+  summary?: string;
 }
 
 export interface ProviderReplay {
@@ -156,12 +169,25 @@ export interface UnifiedResponse {
   content: ContentBlock[];
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop" | "pause_turn";
   replay?: ProviderReplay;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-  };
+  usage?: TokenUsage;
   /** Tools the provider called on MCP servers in this request; shown, not run here. */
   serverCalls?: ServerToolCall[];
+  /** The provider compacted the context in this request. */
+  compaction?: Compaction;
+}
+
+/** One request's tokens, as the provider counted them. */
+export interface TokenUsage {
+  /** All input tokens, those from and into the prompt cache included: the context the request used. */
+  inputTokens: number;
+  outputTokens: number;
+  /** Of the input: read from the prompt cache. */
+  cachedInputTokens?: number;
+  /** Of the input: written to the prompt cache (Anthropic). */
+  cacheWriteTokens?: number;
+  /** A compaction pass inside the request (Anthropic `usage.iterations`), billed on top. */
+  compactionInputTokens?: number;
+  compactionOutputTokens?: number;
 }
 
 /** Per request: where streamed answer text goes, and how Stop cancels it. */
@@ -222,13 +248,19 @@ export interface ChatHistoryEntry {
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolResult?: { result: string; isError: boolean };
-  /** Error entries: "stopped" is the quiet note left by Stop before any answer was shown. */
-  errorKind?: "stopped";
+  /**
+   * Error entries shown as a quiet note: "stopped", left by Stop before any
+   * answer was shown; "compacted", where the earlier part was summarized.
+   */
+  errorKind?: ChatErrorKind;
   /** Changes entries (at the end of a turn): the files the turn changed. */
   files?: string[];
   /** Changes entries: the user undid them. */
   undone?: boolean;
 }
+
+/** Errors the chat shows as a quiet note, not as an error. */
+export type ChatErrorKind = "stopped" | "compacted";
 
 /** A row of the chat view's history list. */
 export interface ConversationSummary {
@@ -289,4 +321,8 @@ export interface AgentCallbacks {
   onResuming?: () => void;
   /** Where the turn's tools record their vault changes (undo per answer). */
   changes?: ChangeLog;
+  /** The earlier part of the conversation was summarized (by the provider or the plugin). */
+  onCompacted?: () => void;
+  /** A request's token usage; `turnStart`: the turn's first request. */
+  onUsage?: (usage: TokenUsage, request: { provider: Provider; model: string; turnStart: boolean }) => void;
 }
