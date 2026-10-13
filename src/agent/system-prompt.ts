@@ -17,6 +17,7 @@ const STATIC_PROMPT = `You are Chatting with AI, an AI assistant embedded in Obs
 - Keep responses concise. The user is often on mobile.
 - For multi-step edits, explain your plan briefly before starting.
 - If a search returns no results, try alternative queries or ask the user.
+- A folder can have its own AGENTS.md with instructions for its files; it comes with the first tool result that touches a file there. Follow it for that folder.
 
 ## Being Decisive
 - Be action-oriented. When you can do something, just do it.
@@ -33,11 +34,23 @@ const STATIC_PROMPT = `You are Chatting with AI, an AI assistant embedded in Obs
 - Keep summaries to 2-3 sentences unless more detail is requested.`;
 
 /**
- * Returns the static system prompt.
- * Identical across all API calls, enabling KV cache reuse.
+ * The system prompt: the built-in one, the vault's skills and its
+ * AGENTS.md, if any. Identical from call to call while those don't
+ * change, so the providers' prompt caches keep working.
  */
-export function buildSystemPrompt(): string {
-  return STATIC_PROMPT;
+export function buildSystemPrompt(vaultInstructions: string | null = null, skills: string | null = null): string {
+  let prompt = STATIC_PROMPT;
+  if (skills) prompt += `
+
+## Skills
+${skills}`;
+  if (vaultInstructions) prompt += `
+
+## This vault's instructions (AGENTS.md)
+The user wrote these for AI assistants working in this vault. Follow them; what the user says in the chat wins over them.
+
+${vaultInstructions}`;
+  return prompt;
 }
 
 /**
@@ -57,6 +70,8 @@ export function buildContextMessage(context: ConversationContext): string {
     const truncated = context.selection.substring(0, 200);
     parts.push(`Selected text: "${truncated}${context.selection.length > 200 ? "..." : ""}".`);
   }
+
+  for (const note of context.notes ?? []) parts.push(note);
 
   parts.push("]");
 
