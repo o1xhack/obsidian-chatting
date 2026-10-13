@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { api, assistant, call, result, settings, text, transport } from './harness.mjs';
+import { api, assistant, call, response, result, settings, text, transport } from './harness.mjs';
 
 test('Anthropic web search as documented: results stay encrypted for replay, cited pages follow the answer', async () => {
   // Response shape from the web search tool docs (docs.claude.com, "Web search tool").
@@ -16,9 +16,7 @@ test('Anthropic web search as documented: results stay encrypted for replay, cit
     { type: 'text', text: 'Claude Shannon was born on April 30, 1916.', citations: [citation] },
     { type: 'text', text: ' He worked at Bell Labs.', citations: [citation] },
   ];
-  const requests = transport((body, index) => ({ status: 200, json: index
-    ? { content: [text('Done')], stop_reason: 'end_turn' }
-    : { content, stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } } }));
+  const requests = transport((body, index) => response('anthropic', index ? [text('Done')] : content));
   const messages = [{ role: 'user', content: 'When was Claude Shannon born?' }];
   const first = await api.sendAnthropicMessage(settings('anthropic'), messages, [], 'System');
   // Each cited page once; search results and errors are not shown as text.
@@ -35,17 +33,17 @@ test('Anthropic web search as documented: results stay encrypted for replay, cit
 test('Anthropic sources: link text and address stay valid Markdown; no citations, no list', async () => {
   const bs = String.fromCharCode(92);
   const citation = { type: 'web_search_result_location', url: 'https://example.com/a (b)', title: `Notes [draft] a${bs}b`, cited_text: 'x' };
-  transport(() => ({ status: 200, json: { content: [{ type: 'text', text: 'Answer', citations: [citation] }], stop_reason: 'end_turn' } }));
+  transport(() => response('anthropic', [{ type: 'text', text: 'Answer', citations: [citation] }]));
   const cited = await api.sendAnthropicMessage(settings('anthropic'), [{ role: 'user', content: 'Q' }], [], 'System');
   assert.equal(cited.content[1].text, `\n\nSources:\n- [Notes ${bs}[draft${bs}] a${bs}${bs}b](https://example.com/a%20%28b%29)`);
-  transport(() => ({ status: 200, json: { content: [text('Plain answer')], stop_reason: 'end_turn' } }));
+  transport(() => response('anthropic', [text('Plain answer')]));
   const plain = await api.sendAnthropicMessage(settings('anthropic'), [{ role: 'user', content: 'Q' }], [], 'System');
   assert.deepEqual(plain.content, [text('Plain answer')]);
 });
 
 test('Anthropic sources come before a tool call, so another provider gets the call next to its result', async () => {
   const citation = { type: 'web_search_result_location', url: 'https://example.com', title: 'Example', cited_text: 'x' };
-  transport(() => ({ status: 200, json: { content: [{ type: 'text', text: 'Saving it.', citations: [citation] }, call('save', 'create_file', { path: 'A.md', content: 'x' })], stop_reason: 'tool_use' } }));
+  transport(() => response('anthropic', [{ type: 'text', text: 'Saving it.', citations: [citation] }, call('save', 'create_file', { path: 'A.md', content: 'x' })], 'tool_use'));
   const first = await api.sendAnthropicMessage(settings('anthropic'), [{ role: 'user', content: 'Q' }], [], 'System');
   assert.deepEqual(first.content.map(block => block.type), ['text', 'text', 'tool_use']);
   // The same history after a switch to OpenAI (Responses API items).

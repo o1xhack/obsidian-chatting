@@ -1,18 +1,40 @@
-import { catalogIdentity } from "./model-catalog";
-import { requestUrl } from "obsidian";
-import { ProviderError, retryAfterMs } from "./errors";
+import { type ModelOption, cachedCatalog, catalogIdentity, catalogModel, resolveThinkingLevel } from "./model-catalog";
+import { ProviderError, StreamCutError } from "./errors";
+import { streamSSE } from "./stream";
+import { asRecord, getNestedString, isRecord } from "../json";
+import { withoutOldToolImages } from "../agent/history";
+import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 import type {
   ChatSettings,
+  McpServer,
   UnifiedMessage,
   UnifiedToolDef,
   UnifiedResponse,
   ContentBlock,
+  ImageAttachment,
+  FileAttachment,
+  StreamOptions,
 } from "../types";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 
 /**
- * Sends a message to the Anthropic Messages API via requestUrl().
+ * Thinking mode by model name, for models without catalog data (a custom ID,
+ * or a list saved before the catalog's capabilities were read).
+ * Opus 4.7+ rejects manual thinking. Keep older models on their budget mode.
+ */
+function thinkingTypeByName(model: string): ModelOption["thinkingType"] {
+  const generation = model.match(/^claude-(?:sonnet|opus)-(\d+)[-.](\d{1,2})(?:-|$)/);
+  const supportsAdaptive = !!generation && (Number(generation[1]) > 4 ||
+    (Number(generation[1]) === 4 && Number(generation[2]) >= 6));
+  const supportsThinking = model.includes("claude-sonnet-4") || model.includes("claude-opus") || model.includes("claude-sonnet-3-7");
+  return supportsAdaptive ? "adaptive" : supportsThinking ? "enabled" : undefined;
+}
+
+/**
+ * Sends a message to the Anthropic Messages API. The answer is streamed
+ * (`api/stream.ts`) and rebuilt into the same message the non-streamed API
+ * returns.
  *
  * Anthropic format:
  * - System prompt is a top-level field, not a message
@@ -23,13 +45,18 @@ export async function sendAnthropicMessage(
   settings: ChatSettings,
   messages: UnifiedMessage[],
   tools: UnifiedToolDef[],
-  systemPrompt: string
+  systemPrompt: string,
+  stream: StreamOptions = {},
 ): Promise<UnifiedResponse> {
-  const model = settings.model || "claude-sonnet-4-6";
+  const model = settings.model;
   const identity = await catalogIdentity("anthropic", settings.apiKey);
+  if (settings.modelCatalog) {
+    cachedCatalog(settings.modelCatalog, "anthropic", identity);
+  }
   const body: Record<string, unknown> = {
     model,
     max_tokens: 16384,
+    stream: true,
     // System prompt as a content block with cache_control breakpoint.
     // Anthropic caches everything up to the breakpoint across requests.
     system: [
@@ -39,22 +66,24 @@ export async function sendAnthropicMessage(
         cache_control: { type: "ephemeral" },
       },
     ],
-    messages: messages.map(msg => toAnthropicMessage(msg, model, identity)),
+    messages: withoutOldToolImages(messages).map(msg => toAnthropicMessage(msg, model, identity, activeServers(settings))),
   };
 
-  // Opus 4.7+ rejects manual thinking. Keep older models on their budget mode.
-  const generation = model.match(/^claude-(?:sonnet|opus)-(\d+)[-.](\d{1,2})(?:-|$)/);
-  const supportsAdaptive = !!generation && (Number(generation[1]) > 4 ||
-    (Number(generation[1]) === 4 && Number(generation[2]) >= 6));
-  const supportsThinking = model.includes("claude-sonnet-4") || model.includes("claude-opus") || model.includes("claude-sonnet-3-7");
+  // The thinking mode the model catalog reports (`/v1/models` capabilities);
+  // models it has no data for keep the rule by model name.
+  const option = catalogModel("anthropic", model);
+  const thinkingType = option?.thinkingType ?? thinkingTypeByName(model);
 
-  if (supportsAdaptive) {
+  if (thinkingType === "adaptive") {
     // Adaptive: Claude decides when/how much to think per request
     body.thinking = { type: "adaptive" };
-  } else if (supportsThinking) {
+  } else if (thinkingType === "enabled") {
     // Manual: fixed budget for older models
     body.thinking = { type: "enabled", budget_tokens: 8192 };
   }
+  // The thinking level picked in settings, if the catalog lists it for the model.
+  const effort = resolveThinkingLevel(option, settings.thinkingLevel);
+  if (effort) body.output_config = { effort };
 
   if (tools.length > 0 || settings.enableWebSearch) {
     const apiTools: Record<string, unknown>[] = tools.map((t, i, arr) => {
@@ -84,38 +113,35 @@ export async function sendAnthropicMessage(
     body.tools = apiTools;
   }
 
-  let response;
-  try {
-    response = await requestUrl({
-      url: ANTHROPIC_API_URL,
-      method: "POST",
-      headers: {
-        "x-api-key": settings.apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-      throw: false,
-    });
-  } catch (e: unknown) {
-    // requestUrl throws on network errors; extract API details if available
-    const err = asRecord(e);
-    const status = typeof err.status === "number" ? err.status : "unknown";
-    const apiMsg = getNestedString(err, ["json", "error", "message"]);
-    if (apiMsg) {
-      throw new Error(`Anthropic API error (${status}): ${apiMsg}`);
-    }
-    throw e;
+  // Remote MCP servers, connected by Anthropic (`api/mcp.ts`).
+  const servers = activeServers(settings);
+  if (servers.length) {
+    const mcp = anthropicMcp(servers);
+    body.mcp_servers = mcp.mcp_servers;
+    body.tools = [...Array.isArray(body.tools) ? body.tools as Record<string, unknown>[] : [], ...mcp.toolsets];
   }
+
+  const collected = collectAnthropicStream(stream.onTextDelta);
+  const response = await streamSSE(ANTHROPIC_API_URL, {
+    headers: {
+      "x-api-key": settings.apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      // Required for the CORS answer to `fetch` from Obsidian's origins (mobile).
+      "anthropic-dangerous-direct-browser-access": "true",
+      ...(servers.length ? { "anthropic-beta": ANTHROPIC_MCP_BETA } : {}),
+    },
+    body: JSON.stringify(body),
+  }, collected.onEvent, stream.signal);
 
   if (response.status !== 200) {
-    const responseJson = response.json as unknown;
-    const errorText = getNestedString(responseJson, ["error", "message"]) ?? `HTTP ${response.status}`;
+    const errorText = getNestedString(response.json, ["error", "message"]) ?? `HTTP ${response.status}`;
     throw new ProviderError(`Anthropic API error (${response.status}): ${errorText}`, response.status,
-      getNestedString(responseJson, ["error", "type"]), retryAfterMs(response.headers));
+      getNestedString(response.json, ["error", "type"]), response.retryAfterMs);
   }
 
-  const data = parseAnthropicResponse(response.json as unknown);
+  const data = parseAnthropicResponse(collected.finish());
   const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
   const sources = citedSources(data.content);
   if (sources) {
@@ -134,6 +160,95 @@ export async function sendAnthropicMessage(
     usage: data.usage
       ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
       : undefined,
+    ...withServerCalls(anthropicServerCalls(data.content)),
+  };
+}
+
+// ─── Streaming ──────────────────────────────────────────────────────────────
+
+/**
+ * Rebuilds the message from Messages API stream events, block by block:
+ * text, thinking and signatures are concatenated from their deltas, tool
+ * inputs (also of MCP calls) parsed from their JSON deltas, citations
+ * collected; other blocks (redacted thinking, web search and MCP tool
+ * results) arrive whole in `content_block_start`. Text deltas also go to
+ * `onTextDelta`.
+ */
+function collectAnthropicStream(onTextDelta?: (text: string) => void): {
+  onEvent: (event: Record<string, unknown>) => void;
+  finish: () => Record<string, unknown>;
+} {
+  let message: Record<string, unknown> | undefined;
+  const blocks: Record<string, unknown>[] = [];
+  const inputJson = new Map<number, string>();
+  let stopped = false;
+  let failure: ProviderError | undefined;
+  return {
+    onEvent: (event) => {
+      const index = typeof event.index === "number" ? event.index : -1;
+      const delta = asRecord(event.delta);
+      switch (event.type) {
+        case "message_start":
+          message = { ...asRecord(event.message) };
+          break;
+        case "content_block_start":
+          if (index >= 0 && isRecord(event.content_block)) blocks[index] = { ...event.content_block };
+          break;
+        case "content_block_delta": {
+          const block = blocks[index];
+          if (!block) break;
+          if (delta.type === "text_delta" && typeof delta.text === "string") {
+            block.text = (typeof block.text === "string" ? block.text : "") + delta.text;
+            if (delta.text) onTextDelta?.(delta.text);
+          } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+            block.thinking = (typeof block.thinking === "string" ? block.thinking : "") + delta.thinking;
+          } else if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+            block.signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
+          } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            inputJson.set(index, (inputJson.get(index) ?? "") + delta.partial_json);
+          } else if (delta.type === "citations_delta" && delta.citation !== undefined) {
+            block.citations = [...(Array.isArray(block.citations) ? block.citations as unknown[] : []), delta.citation];
+          }
+          break;
+        }
+        case "content_block_stop": {
+          const json = inputJson.get(index);
+          const block = blocks[index];
+          if (block && json) {
+            try {
+              const input: unknown = JSON.parse(json);
+              if (isRecord(input)) block.input = input;
+            } catch {
+              // Truncated input (max_tokens): the loop won't run this call.
+            }
+          }
+          // A server_tool_use may start without `input`; replay needs one.
+          if (block && (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") && !isRecord(block.input)) block.input = {};
+          break;
+        }
+        case "message_delta":
+          if (message) {
+            Object.assign(message, delta);
+            if (isRecord(event.usage)) message.usage = { ...asRecord(message.usage), ...event.usage };
+          }
+          break;
+        case "message_stop":
+          stopped = true;
+          break;
+        case "error": {
+          // Status 0: the error came inside the stream; its type decides on a retry.
+          const error = asRecord(event.error);
+          const type = typeof error.type === "string" ? error.type : "error";
+          failure = new ProviderError(`Anthropic API error (${type}): ${typeof error.message === "string" ? error.message : "stream failed"}`, 0, type);
+          break;
+        }
+      }
+    },
+    finish: () => {
+      if (failure) throw failure;
+      if (!message || !stopped) throw new StreamCutError("Anthropic");
+      return { ...message, content: blocks.filter(Boolean) };
+    },
   };
 }
 
@@ -185,26 +300,11 @@ function normalizeStopReason(value: string | undefined): UnifiedResponse["stopRe
   return "end_turn";
 }
 
-function getNestedString(value: unknown, path: string[]): string | undefined {
-  let current: unknown = value;
-  for (const key of path) {
-    if (!isRecord(current)) return undefined;
-    current = current[key];
-  }
-  return typeof current === "string" ? current : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string): Record<string, unknown> {
+function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[]): Record<string, unknown> {
   if (msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity)) {
-    return { role: msg.role, content: msg.replay.items };
+    const content = withoutGoneServerCalls(msg.replay.items, servers);
+    // Nothing but calls of servers that are gone: sent as text below.
+    if (content.length) return { role: msg.role, content };
   }
   if (typeof msg.content === "string") {
     return { role: msg.role, content: msg.content };
@@ -213,10 +313,17 @@ function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string
   // Content blocks (tool_use responses from assistant, tool_result from user)
   const blocks = msg.content.map((block) => {
     if (block.type === "tool_result") {
+      // Images from view_image/view_canvas and files from read_file go inside the tool_result.
       return {
         type: "tool_result",
         tool_use_id: block.tool_use_id,
-        content: block.content,
+        content: block.images?.length || block.files?.length
+          ? [
+              { type: "text", text: block.content || "(attached)" },
+              ...(block.images ?? []).map(anthropicImage),
+              ...(block.files ?? []).map(anthropicFile),
+            ]
+          : block.content,
         is_error: block.is_error || false,
       };
     }
@@ -229,19 +336,37 @@ function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string
       };
     }
     if (block.type === "image" && block.image) {
-      return {
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: block.image.mediaType,
-          data: block.image.data,
-        },
-      };
+      return anthropicImage(block.image);
+    }
+    if (block.type === "file" && block.file) {
+      return anthropicFile(block.file);
     }
     return { type: "text", text: block.text };
   }).filter((b) => !(b.type === "text" && !b.text));
 
   return { role: msg.role, content: blocks };
+}
+
+/**
+ * A file: a PDF as a document Claude reads with its page images; Office and
+ * text files as a text document (Claude doesn't read Office files, so their
+ * text was read when attached); others named only.
+ */
+function anthropicFile(file: FileAttachment): Record<string, unknown> {
+  if (file.mediaType === "application/pdf" && file.data) {
+    return { type: "document", source: { type: "base64", media_type: "application/pdf", data: file.data }, title: file.fileName };
+  }
+  if (file.text?.trim()) {
+    return { type: "document", source: { type: "text", media_type: "text/plain", data: file.text }, title: file.fileName };
+  }
+  return { type: "text", text: `[${file.fileName}: Claude can't read this file type, or it has no text. Ask the user for it as a PDF, or as a .docx, .xlsx or .pptx file.]` };
+}
+
+function anthropicImage(image: ImageAttachment): Record<string, unknown> {
+  return {
+    type: "image",
+    source: { type: "base64", media_type: image.mediaType, data: image.data },
+  };
 }
 
 /**
@@ -275,8 +400,10 @@ function fromAnthropicBlock(block: AnthropicContentBlock): ContentBlock | null {
   }
   // Thinking and web search (`server_tool_use`, `web_search_tool_result`,
   // whose `content` holds encrypted results) are internal: they go back
-  // unchanged in the replay; the pages cited show as sources.
-  if (block.type === "thinking" || block.type === "server_tool_use" || block.type === "web_search_tool_result") {
+  // unchanged in the replay; the pages cited show as sources. MCP calls
+  // likewise; they show as tool steps (`serverCalls`).
+  if (block.type === "thinking" || block.type === "server_tool_use" || block.type === "web_search_tool_result" ||
+    block.type === "mcp_tool_use" || block.type === "mcp_tool_result") {
     return null;
   }
   // Skip blocks with no text content (safety net)

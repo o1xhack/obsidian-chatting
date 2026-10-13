@@ -1,7 +1,7 @@
 // The settings tab: redraws still pending when it is closed are skipped.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { api, settings } from './harness.mjs';
+import { api, settings, settingsApp } from './harness.mjs';
 
 // A settings row whose text or dropdown control records its onChange handler.
 function row() {
@@ -26,7 +26,7 @@ test('A closed settings tab is not redrawn by a pending refresh; shown again, it
     for (const newObsidian of [false, true]) {
       globalThis.__supportsNewObsidian = newObsidian;
       const plugin = { settings: { ...settings('anthropic'), apiKey: '' }, async saveSettings() {}, reloadApiKeyForProvider() {} };
-      const tab = new api.ChatSettingTab({}, plugin);
+      const tab = new api.ChatSettingTab(settingsApp, plugin);
       let redraws = 0;
       tab.display = tab.update = () => { redraws++; };
       const apiKey = row();
