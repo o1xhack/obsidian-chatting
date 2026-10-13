@@ -5,14 +5,14 @@ Agentic AI chat plugin for Obsidian. Simple, mobile-first, three providers (Anth
 ## Architecture
 
 ```
-User Input -> Agent Loop -> API Client (requestUrl) -> Anthropic/OpenAI/Codex
+User Input -> Agent Loop -> API Client (stream.ts)  -> Anthropic/OpenAI/Codex
                  |                                         |
             Tool Executor  <---  tool_use response  <------+
                  |
          Obsidian Vault APIs (read/edit/search/create)
 ```
 
-- **API clients** use `requestUrl()` (not `fetch`) because mobile WebViews enforce CORS
+- **Transport**: HTTP through `requestUrl()`, except chat streaming via the transport module `src/api/stream.ts`: the only place for `fetch` and for Node's `https` (desktop only, loaded at runtime; mobile uses `fetch`; both fall back to `requestUrl()`). The desktop ChatGPT sign-in's callback server is the other Node module (`http`, `auth/chatgptBrowserLogin.ts`). Mobile WebViews enforce CORS, so `fetch` that a provider doesn't allow falls back.
 - **Anthropic** uses Messages API with adaptive thinking and prompt caching
 - **OpenAI** uses Responses API with `previous_response_id` for multi-turn
 - **ChatGPT account** uses the ChatGPT/Codex backend with Device Authorization Flow credentials in `SecretStorage`
@@ -25,6 +25,7 @@ User Input -> Agent Loop -> API Client (requestUrl) -> Anthropic/OpenAI/Codex
 src/
   main.ts                # Plugin entry: commands, views, settings, context menus
   types.ts               # All interfaces and defaults
+  json.ts                # Reading untrusted JSON (API answers) without casts
   settings.ts            # PluginSettingTab with model fetching
   debug.ts               # Debug log (the "Debug log" setting)
   images.ts              # Image limits and re-encoding for view_image and view_canvas
@@ -33,6 +34,7 @@ src/
     client.ts            # Dispatcher: routes to anthropic, openai, or ChatGPT OAuth adapter
     anthropic.ts         # Messages API, adaptive thinking, cache_control
     openai.ts            # Responses API, previous_response_id chaining
+    stream.ts            # Streamed requests: fetch (mobile), Node https (desktop), requestUrl() fallback; SSE parser
     mcp.ts               # Remote MCP servers through the provider: which a request names, the calls it reports
   tools/
     registry.ts          # 22 tool definitions (JSON Schema)
@@ -91,6 +93,7 @@ src/
 - **Text tool history**: Tool results keep at most 100,000 characters each and a shared 200,000-character text allowance plus omission markers. Oversized prefixes are copied so they release the original backing string. This applies to new results, API restore and visible/saved tool rows; Trusted instruction suffixes are recorded separately by offset and retained complete outside the payload allowance, so clipping file text cannot remove first-touch rules or block nested-rule write retries. Legacy clipped results without a recorded suffix lose provenance so a later write discovers real rules again. Filename listings and metadata-cache enumeration report their returned/read paths through internal instructionPaths; get_links includes displayed outgoing targets and linked sources even without cached lines.
 - **Request budgets and preflight**: Mixed picked/linked images and files share a 20 MiB encoded budget. Mention resolution checks metadata before loading a document that cannot fit, then counts actual encoded bytes incrementally. Stopping linked-context preflight restores the unsent draft and undo notes synchronously; late completion cannot overwrite a new draft or resurrect cleared/consumed notes. Each provider checks the final serialized UTF-8 JSON against 30 MB. Preflight failure restores the draft and selection without adding a visible-only user turn. `search_vault` returns internal `instructionPaths` for names matched or files read (including non-matches); the loop adds folder rules then strips this metadata from UI/persistence. Folder rename/delete discovers the whole affected subtree and destination scope. Excel extraction validates cell references and bounds expanded cells/text across the workbook.
 - **Skills**: The user's vault, the Claude Code / Codex format: a folder per skill in the skills folder (setting `skillsFolder`, default `Skills`) with a `SKILL.md` whose properties give `name` (else the folder name) and `description` (`src/agent/skills.ts`). Each turn `AgentLoop.run` lists names and descriptions in the system prompt, after the built-in prompt and before `AGENTS.md`. `use_skill` returns a `SKILL.md` without its properties (32,768 characters) and lists the skill's other files, which the model reads with the vault tools. Both use_skill and slash invocation discover folder instructions for the skill file and all listed resources, including nested folders. `/name` in a message (at its start or after a space) makes `chat-view.ts` send the skill loaded along with it, before the linked files; typing `/` offers the skills in the mention list. The *Skills* setting lists them (a `list` definition on Obsidian 1.13+, rows in `display()` before) and *New skill* creates one from `SKILL_TEMPLATE`.
+- **Streamed answers**: Chat requests ask for `stream: true` (the Codex route always did) and go through `streamSSE` (`src/api/stream.ts`), their body serialized by `serializeRequest` (the 30 MB check) before anything is sent; a URL where `fetch` looked CORS-blocked uses `requestUrl()` for 10 minutes, whose buffered events arrive at once. The adapters rebuild the same `UnifiedResponse` from the events (`collectAnthropicStream`; `collectResponsesStream` for OpenAI and the Codex route, which keeps its endpoint, headers and body), so replay items, MCP calls and the saved history are unchanged. Text deltas go through `AgentCallbacks.onTextDelta` to the chat view, which grows one message (Markdown re-rendered at most every 100 ms) and replaces it with the whole text from `onResponse`; text before `ask_user` is dropped as before. Stop aborts the request and keeps the text shown. A rate limit is retried only while no text is on screen and no MCP call started (`client.ts`, `onServerTool`). A stream that ends before the provider says the answer is complete (`StreamCutError`; also a connection lost after the answer began, `StreamDropped`) is sent again, at most twice per turn; no tool of the plugin ran for it. Once the provider started a tool on an MCP server it isn't sent again (`StreamCutError.sideEffects`): that tool may have changed something. On desktop, a request Node's `https` gets no answer for (a system proxy, a certificate only the OS trusts) goes through `requestUrl()`. The SSE parser scans each chunk once (`scanFrom`).
 - **MCP servers through the provider**: Remote servers only, no MCP client in the plugin (`src/api/mcp.ts`). The settings keep a list (`mcpServers`: name, public https address, on/off; a `list` definition on Obsidian 1.13+, rows in `display()` before); each token only in `SecretStorage` (`chatting-with-ai-mcp-<id>`, `mcpSecretKey`; `removeMcpServer` clears it; a save writes only tokens this device has, so one that didn't load isn't overwritten), never in `data.json`. Requests with an API key name the servers that are on: Anthropic `mcp_servers` with one `mcp_toolset` each and the `mcp-client-2025-11-20` beta header, OpenAI one `mcp` tool each with `require_approval: "never"`. The provider lists and calls the tools; the adapters read the calls from the answer (`mcp_tool_use` / `mcp_tool_result` blocks, `mcp_call` items) into `UnifiedResponse.serverCalls`, and `AgentLoop` shows each as a tool step (`mcp:<server>:<tool>`, "Used create_issue on linear"), never runs it. The blocks and items stay in the replay as sent, their results clipped like tool text (`withBoundedServerResults` in `withoutLargeToolText`; the step shows the clipped result too). Not for the ChatGPT account (its route doesn't offer it) or the Test buttons. Tools run without asking, so the settings say to add only trusted servers; tokens go to the provider with each request.
 
 ## Build

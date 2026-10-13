@@ -9,8 +9,10 @@ import type {
   ToolResult,
   MentionContext,
   FileAttachment,
+  UnifiedResponse,
 } from "../types";
 import { sendMessage } from "../api/client";
+import { StreamCutError } from "../api/errors";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
 import { serverToolName } from "../api/mcp";
@@ -33,6 +35,9 @@ import { RequestBudgetError } from "../api/request-budget";
  * round up: a long turn can keep a few more messages.
  */
 const KEEP_RECENT = 60;
+
+/** Requests sent again per turn at most after their stream was cut off; after that the error shows. */
+const MAX_RESENDS = 2;
 
 /**
  * What the chat view shows and saves for a tool result: the text and a
@@ -66,6 +71,8 @@ export class AgentLoop {
   private settings: ChatSettings;
   /** Counts runs and stops; a run whose number is no longer current is stopped. */
   private runVersion = 0;
+  /** Cancels the running turn's HTTP request (streamed answers). */
+  private request: AbortController | null = null;
   /** The vault root's AGENTS.md as the last turn read it (in the system prompt). */
   private vaultInstructions: string | null = null;
   /** The skills part of the system prompt, read with the instructions. */
@@ -79,6 +86,7 @@ export class AgentLoop {
   /** Abort a running loop (e.g. user navigates away) */
   abort(): void {
     this.runVersion++;
+    this.request?.abort();
   }
 
   /** Stop a running turn and clear the history. */
@@ -228,6 +236,11 @@ export class AgentLoop {
   ): Promise<void> {
     const version = ++this.runVersion;
     const isStopped = () => version !== this.runVersion;
+    const request = new AbortController();
+    this.request = request;
+    const onTextDelta = (text: string) => {
+      if (!isStopped()) callbacks.onTextDelta?.(text);
+    };
     // This turn's selection: the tools change only that text of its note (a
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
@@ -310,6 +323,7 @@ export class AgentLoop {
 
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
+    let resends = 0;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
@@ -317,32 +331,42 @@ export class AgentLoop {
       callbacks.onThinking();
       if (isStopped()) return;
 
-      let response;
-      try {
-        response = await sendMessage(
-          turnSettings,
-          this.messages,
-          TOOL_DEFINITIONS,
-          systemPrompt,
-          isStopped
-        );
-      } catch (caughtError) {
-        let e = caughtError;
-        if (isStopped()) return;
-        if (i > 0 && e instanceof RequestBudgetError) {
-          const reduced = withoutLargeToolText(withoutToolAttachments(this.messages));
-          if (reduced !== this.messages) {
-            this.messages = reduced;
-            clearOpenAIState();
-            clearChatGPTOAuthState();
-            try {
-              response = await sendMessage(turnSettings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped);
-            } catch (retryError) { e = retryError; }
-            if (isStopped()) return;
-          }
-        }
-        if (!response) {
+      let response: UnifiedResponse | undefined;
+      while (!response) {
+        try {
+          response = await sendMessage(
+            turnSettings,
+            this.messages,
+            TOOL_DEFINITIONS,
+            systemPrompt,
+            isStopped,
+            { onTextDelta, signal: request.signal }
+          );
+        } catch (e) {
+          if (isStopped()) return;
           const msg = e instanceof Error ? e.message : String(e);
+          // The stream was cut off (a dropped connection, no provider error):
+          // send the same request again. No tool ran for it, so nothing runs twice.
+          // Not after a tool on an MCP server started: it may have changed something.
+          if (e instanceof StreamCutError && !e.sideEffects && resends < MAX_RESENDS) {
+            resends++;
+            debugLog(this.app, "API_RESEND", { error: msg, resend: resends });
+            // The cut attempt's streamed text goes; the answer streams anew.
+            callbacks.onThinking();
+            if (isStopped()) return;
+            continue;
+          }
+          // A later request grown over the size limit by tool attachments:
+          // drop them (and oversized tool text) once and send again.
+          if (i > 0 && e instanceof RequestBudgetError) {
+            const reduced = withoutLargeToolText(withoutToolAttachments(this.messages));
+            if (reduced !== this.messages) {
+              this.messages = reduced;
+              clearOpenAIState();
+              clearChatGPTOAuthState();
+              continue;
+            }
+          }
           debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
           if (i === 0 && e instanceof RequestBudgetError) {
             // Nothing reached the provider or tools. Undo local pruning and

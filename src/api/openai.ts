@@ -1,17 +1,17 @@
 import { supportsReasoning, catalogIdentity } from "./model-catalog";
-import { requestUrl } from "obsidian";
-import { serializeRequest } from "./request-budget";
-import { ProviderError, retryAfterMs } from "./errors";
+import { ProviderError } from "./errors";
+import { getNestedString } from "../json";
 import type {
   ChatSettings,
   UnifiedMessage,
   UnifiedToolDef,
   UnifiedResponse,
   ProviderReplay,
+  StreamOptions,
 } from "../types";
 
 import { withoutOldToolImages } from "../agent/history";
-import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
+import { buildResponsesInput, fromResponsesOutput, sendResponsesRequest } from "./responses-format";
 import { activeServers, openaiMcpTools } from "./mcp";
 
 const DEFAULT_OPENAI_URL = "https://api.openai.com";
@@ -35,13 +35,14 @@ export function clearOpenAIState(): void {
  * Sends a message to OpenAI via the Responses API (/v1/responses).
  * Uses the `previous_response_id` field for multi-turn, which lets
  * OpenAI manage conversation state server-side and avoids us having to
- * reconstruct function_call items.
+ * reconstruct function_call items. The answer is streamed (`api/stream.ts`).
  */
 export async function sendOpenAIMessage(
   settings: ChatSettings,
   messages: UnifiedMessage[],
   tools: UnifiedToolDef[],
-  systemPrompt: string
+  systemPrompt: string,
+  stream: StreamOptions = {},
 ): Promise<UnifiedResponse> {
   const baseUrl = DEFAULT_OPENAI_URL;
   const model = settings.model;
@@ -63,6 +64,7 @@ export async function sendOpenAIMessage(
   const body: Record<string, unknown> = {
     model,
     input,
+    stream: true,
   };
 
   // Chain to previous response for multi-turn context
@@ -99,38 +101,18 @@ export async function sendOpenAIMessage(
   // doesn't carry forward the system prompt
   body.instructions = systemPrompt;
 
-  const requestBody = serializeRequest(body);
-  let response;
-  try {
-    response = await requestUrl({
-      url: `${baseUrl}/v1/responses`,
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${settings.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: requestBody,
-      throw: false,
-    });
-  } catch (e: unknown) {
-    const err = asRecord(e);
-    const status = typeof err.status === "number" || typeof err.status === "string" ? String(err.status) : "";
-    const message = typeof err.message === "string" ? err.message : String(e);
-    const apiMsg = getNestedString(err, ["json", "error", "message"]);
-    if (apiMsg) {
-      throw new Error(`OpenAI API error (${status || "unknown"}): ${apiMsg}`);
-    }
-    throw new Error(`OpenAI request failed (${status}): ${message}`);
-  }
-
-  if (response.status !== 200) {
-    const json = response.json as unknown;
-    const errorBody = getNestedString(json, ["error", "message"]) ?? `HTTP ${response.status}`;
-    throw new ProviderError(`OpenAI API error (${response.status}): ${errorBody}`, response.status,
-      getNestedString(json, ["error", "code"]) ?? getNestedString(json, ["error", "type"]), retryAfterMs(response.headers));
-  }
-
-  const data = asRecord(response.json as unknown);
+  const data = await sendResponsesRequest(`${baseUrl}/v1/responses`, {
+    Authorization: `Bearer ${settings.apiKey}`,
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  }, body, stream, "OpenAI", {
+    http: (response) => new ProviderError(
+      `OpenAI API error (${response.status}): ${getNestedString(response.json, ["error", "message"]) ?? `HTTP ${response.status}`}`,
+      response.status, getNestedString(response.json, ["error", "code"]) ?? getNestedString(response.json, ["error", "type"]),
+      response.retryAfterMs),
+    // Status 0: the error came inside a response that had started; its code decides on a retry.
+    stream: ({ message, code }) => new ProviderError(message, 0, code),
+  });
 
   const result = fromResponsesOutput(data, "openai", model, identity);
   if (typeof data.id === "string") {
@@ -139,21 +121,4 @@ export async function sendOpenAIMessage(
     conversations.delete(messages);
   }
   return result;
-}
-
-function getNestedString(value: unknown, path: string[]): string | undefined {
-  let current: unknown = value;
-  for (const key of path) {
-    if (!isRecord(current)) return undefined;
-    current = current[key];
-  }
-  return typeof current === "string" ? current : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }

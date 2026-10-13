@@ -36,3 +36,18 @@ export function retryAfterInMessage(message: string): number | undefined {
   const value = Number(match[1]);
   return Math.round(match[2].toLowerCase() === "ms" ? value : value * 1000);
 }
+
+/**
+ * A streamed answer that ended before the provider said it was complete
+ * (the connection dropped or timed out, no error from the provider). The
+ * agent loop sends the same request again: no tool of the plugin ran for
+ * it yet. `sideEffects`: the provider had started a tool on an MCP server
+ * (which may have changed something), so it isn't sent again.
+ */
+export class StreamCutError extends Error {
+  constructor(provider: string, readonly sideEffects = false) {
+    super(`${provider} stream ended before the answer was complete.` +
+      (sideEffects ? " It isn't sent again: a tool on an MCP server had already started." : ""));
+    this.name = "StreamCutError";
+  }
+}

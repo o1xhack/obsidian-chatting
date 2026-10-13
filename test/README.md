@@ -8,8 +8,11 @@ npm test
 
 Runs every `test/*.test.mjs` file (`scripts/test.mjs`). `test/harness.mjs`
 bundles the production modules (provider adapters, agent loop, plugin) with
-a fake Obsidian API, an in-memory vault and mocked `requestUrl`; test files
-import what they need from it. No credentials or live API calls are needed.
+a fake Obsidian API, an in-memory vault and mocked `requestUrl`, which
+answers chat requests as Server-Sent Events (`fetch` fails like a CORS
+block unless a test sets `globalThis.__fetch`, so requests fall back to
+it); test files import what they need from it. No credentials or live API
+calls are needed.
 Tests cover assistant output encoding, native thinking/reasoning/search
 replay, read → create/edit flows, parallel tools, cancellation, history
 restoration, Anthropic `pause_turn` and thinking configuration, OpenAI
@@ -21,6 +24,7 @@ and insert positions, `set_properties` input checks, `read_file` and
 fake Svelte component: the API history cap (80 messages saved, cut to 60
 past 80) and OpenAI chaining past it, tool card inputs and `ask_user`
 questions and answers after a reload, Stop and Clear while `ask_user` waits,
+a streamed answer growing in one message and kept on Stop,
 Copy transcript with the chat panel closed, commands waiting for the view,
 and Clear during a turn. `settings-tab.test.mjs` checks that a closed
 settings tab is not redrawn. Providers: rate-limit retries by HTTP status,
@@ -105,6 +109,13 @@ both settings paths). `mcp.test.mjs`: MCP servers (Anthropic's
 on and valid; the provider's calls shown as steps, failed ones too, and
 replayed as sent; none for the ChatGPT account; tokens only in
 SecretStorage; the *MCP servers* settings in both settings paths).
+`streaming.test.mjs`: streamed answers (the SSE parser at any chunk
+boundary; each provider's answer rebuilt from its stream equal to the
+unstreamed one, the Codex route with its endpoint and headers; the
+`requestUrl()` fallback and when `fetch` is skipped; Stop; the rate-limit
+retry only before text is shown; a cut-off stream sent again, at most
+twice). `stream-desktop.test.mjs`: desktop streams through Node's `https`
+(errors, Stop); on mobile a blocked `fetch` switches only that URL.
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without

@@ -66,7 +66,7 @@ Skills use the Claude Code / Codex folder format. Their instructions and support
 
 Create, switch, rename and delete separate chats. Each has its own provider conversation, and chats resume after restarting Obsidian. You can edit a previous message, copy an answer or regenerate the last answer. Editing or regenerating does not undo changes already made to vault files.
 
-Answers render Markdown, tables, wiki links and math. Read earlier messages without being pulled back to the bottom, then jump to the latest reply when you are ready.
+Answers appear as the model writes them and render Markdown, tables, wiki links and math. Read earlier messages without being pulled back to the bottom, then jump to the latest reply when you are ready.
 
 ## ⚙️ Three ways to connect
 

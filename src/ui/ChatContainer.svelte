@@ -38,6 +38,8 @@
     /** User messages of a turn (not `ask_user` answers): editable. Changes rows: their turn. */
     turnId?: string;
     selection?: SelectionScope;
+    /** Assistant messages: text still arriving (no actions yet). */
+    streaming?: boolean;
     errorKind?: "stopped";
     /** Changes rows: the files a turn changed, and whether it can be undone. */
     files?: string[];
@@ -235,13 +237,13 @@
   });
 
   // ─── Scrolling: stick to the bottom, like a chat ──────────────────────
-  // While the user is at the bottom, new messages keep the view there.
-  // Scrolling up stops that, so earlier messages can be read while a turn
-  // runs; back at the bottom it follows again. Sending a question always
-  // brings the view down. While scrolled up, a button jumps back to the
-  // bottom. Only scrolling up stops following: the browser also scrolls by
-  // itself (content above changing height, a shorter list), which mustn't
-  // leave the answer half hidden.
+  // While the user is at the bottom, new messages and a streaming answer
+  // keep the view there. Scrolling up stops that, so earlier messages can
+  // be read while a turn runs; back at the bottom it follows again. Sending
+  // a question always brings the view down. While scrolled up, a button
+  // jumps back to the bottom. Only scrolling up stops following: the
+  // browser also scrolls by itself (content above changing height, a
+  // shorter list), which mustn't leave the answer half hidden.
   /** Pixels from the bottom that still count as "at the bottom". */
   const BOTTOM_SLACK = 32;
   let messageListEl: HTMLElement | undefined = $state();
@@ -327,14 +329,53 @@
     void tick().then(autoGrow);
   }
 
-  export function addAssistantMessage(text: string): void {
-    messages.push({ id: nextId++, type: "assistant", text });
+  export function addAssistantMessage(text: string, streaming = false): number {
+    const id = nextId++;
+    messages.push({ id, type: "assistant", text, streaming });
+    return id;
+  }
+
+  // ─── Streamed answers: Markdown is re-rendered at most every 100 ms ────
+  const STREAM_RENDER_MS = 100;
+  const pendingText = new Map<number, string>();
+  let renderTimer: number | null = null;
+  onDestroy(() => {
+    if (renderTimer !== null) window.clearTimeout(renderTimer);
+  });
+
+  /** Replace an assistant message's text; `final` renders it at once and ends its streaming. */
+  export function updateAssistantMessage(id: number, text: string, final = false): void {
+    pendingText.set(id, text);
+    if (final) {
+      flushPendingText();
+      const msg = messages.find((m) => m.id === id);
+      if (msg) msg.streaming = false;
+    } else {
+      renderTimer ??= window.setTimeout(flushPendingText, STREAM_RENDER_MS);
+    }
+  }
+
+  function flushPendingText(): void {
+    if (renderTimer !== null) window.clearTimeout(renderTimer);
+    renderTimer = null;
+    for (const [id, text] of pendingText) {
+      const msg = messages.find((m) => m.id === id);
+      if (msg) msg.text = text;
+    }
+    pendingText.clear();
+  }
+
+  export function removeMessage(id: number): void {
+    pendingText.delete(id);
+    const idx = messages.findIndex((m) => m.id === id);
+    if (idx !== -1) messages.splice(idx, 1);
   }
 
   /** Remove the turn `turnId` and everything after it (edit, regenerate). */
   export function cutMessages(turnId: string): void {
     const idx = messages.findIndex((m) => m.type === "user" && m.turnId === turnId);
     if (idx === -1) return;
+    for (const msg of messages.slice(idx)) pendingText.delete(msg.id);
     messages.splice(idx);
     editingId = null;
   }
@@ -474,6 +515,7 @@
 
   export function clearMessages(): void {
     attachmentPreparation.cancel();
+    pendingText.clear();
     messages = [];
     editingId = null;
     attachments = [];
@@ -1170,28 +1212,30 @@
           <div class="ochatting-msg ochatting-assistant-msg">
             <div class="ochatting-msg-content" use:markdown={msg.text ?? ""}></div>
           </div>
-          <div class="ochatting-msg-actions" class:ochatting-hover-actions={msg.id !== lastAnswerId}>
-            <button
-              class="ochatting-action-btn"
-              type="button"
-              onclick={() => onCopy(msg.text ?? "")}
-              aria-label="Copy answer"
-              title="Copy"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-            </button>
-            {#if msg.id === lastAnswerId && !busy && (!lastTurnId || editable(lastTurnId))}
+          {#if !msg.streaming}
+            <div class="ochatting-msg-actions" class:ochatting-hover-actions={msg.id !== lastAnswerId}>
               <button
                 class="ochatting-action-btn"
                 type="button"
-                onclick={onRegenerate}
-                aria-label="Regenerate answer"
-                title="Regenerate"
+                onclick={() => onCopy(msg.text ?? "")}
+                aria-label="Copy answer"
+                title="Copy"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"></path><polyline points="21 3 21 8 16 8"></polyline></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
               </button>
-            {/if}
-          </div>
+              {#if msg.id === lastAnswerId && !busy && (!lastTurnId || editable(lastTurnId))}
+                <button
+                  class="ochatting-action-btn"
+                  type="button"
+                  onclick={onRegenerate}
+                  aria-label="Regenerate answer"
+                  title="Regenerate"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"></path><polyline points="21 3 21 8 16 8"></polyline></svg>
+                </button>
+              {/if}
+            </div>
+          {/if}
         </div>
 
       {:else if msg.type === "tool-call" || msg.type === "tool-result"}
