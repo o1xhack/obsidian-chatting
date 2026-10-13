@@ -8,16 +8,33 @@ import {
   type TAbstractFile,
   type App,
 } from "obsidian";
-import type { ChatSettings, SelectionScope, ImageAttachment } from "./types";
+import type { ChatSettings, SelectionScope, ChatHistoryEntry, ConversationSummary } from "./types";
 import { DEFAULT_SETTINGS, DEFAULT_PROVIDER_MODELS } from "./types";
 import { copiesBefore } from "./tools/executor";
-import { ChatSettingTab, getModelDisplayName } from "./settings";
+import { ChatSettingTab, getModelHeaderLabel } from "./settings";
 import { ObsidianChatView, VIEW_TYPE_CHAT } from "./ui/chat-view";
+import { closeFollowTab, closeLeftoverFollowTab } from "./ui/show-in-view";
 import { AgentLoop } from "./agent/loop";
+import type { ChangeLog } from "./tools/undo";
+import {
+  CHAT_STATE_VERSION,
+  conversationTitle,
+  isEmptyConversation,
+  migrateChatState,
+  newConversation,
+  newestFirst,
+  restoreImages,
+  savedConversation,
+  type ChatState,
+  type ConversationRecord,
+} from "./chat-state";
 import { ChatGPTOAuthStore } from "./auth/chatgptOAuthStore";
 import { ChatGPTOAuthService } from "./auth/chatgptOAuth";
-import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, normalizeCatalogState } from "./api/model-catalog";
+import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, cachedCatalog, catalogIdentity, normalizeCatalogState } from "./api/model-catalog";
 import { setChatGPTOAuthService } from "./api/chatgpt-oauth";
+import { debugLog, readDebugLog, setDebugLogging } from "./debug";
+import { screenAwake } from "./platform/screen-awake";
+import { appLifecycle } from "./platform/lifecycle";
 
 const PLUGIN_ID = "chatting-with-ai";
 const LEGACY_PLUGIN_ID = "obsidian-chatting";
@@ -39,19 +56,27 @@ export function selectionScope(editor: Editor, text: string, filePath: string): 
 
 export default class ChatPlugin extends Plugin {
   settings: ChatSettings = DEFAULT_SETTINGS;
-  /** Shared agent loop that persists across view open/close cycles */
-  agent!: AgentLoop;
+  /**
+   * An agent loop per conversation that is open or running a turn (a turn
+   * keeps running when the user switches to another chat); it holds that
+   * conversation's API history. Survives the view being closed.
+   */
+  private agents = new Map<string, AgentLoop>();
   /** ChatGPT OAuth service (used by the chatgpt-oauth provider). */
   chatgptOAuth!: ChatGPTOAuthService;
-  /** Chat messages for replaying into the UI when the view reopens */
-  chatHistory: Array<{
-    type: string;
-    text?: string;
-    images?: ImageAttachment[];
-    toolName?: string;
-    toolInput?: Record<string, unknown>;
-    toolResult?: { result: string; isError: boolean };
-  }> = [];
+  /**
+   * All conversations. The API history of the active one, and of one
+   * running a turn, lives in its agent loop (`agentFor`) and is copied into
+   * its record when saving or switching.
+   */
+  conversations: ConversationRecord[] = [newConversation()];
+  activeConversationId = this.conversations[0].id;
+  /**
+   * The vault changes of each answer, for undo, by the answer's changes
+   * entry in its conversation's history. In memory only (until Obsidian
+   * closes); dropped with the entry (clear, edit, delete).
+   */
+  readonly changeLogs = new WeakMap<ChatHistoryEntry, ChangeLog>();
   /** Set once the saved chat has been read; saves before that would overwrite it. */
   private chatHistoryLoaded = false;
   /** The chat-state write in progress, and the one queued after it. */
@@ -61,6 +86,43 @@ export default class ChatPlugin extends Plugin {
   private lastChatStateSavedAt = 0;
   /** Once unloaded, only the already queued final save may finish. */
   private unloaded = false;
+
+  /** The open conversation's agent loop. */
+  get agent(): AgentLoop {
+    return this.agentFor(this.activeConversation);
+  }
+
+  /** Replaces the open conversation's agent loop (tests). */
+  set agent(agent: AgentLoop) {
+    this.agents.set(this.activeConversation.id, agent);
+  }
+
+  /** The agent loop of `conversation`, made from its saved API history when it has none. */
+  agentFor(conversation: ConversationRecord): AgentLoop {
+    let agent = this.agents.get(conversation.id);
+    if (!agent) {
+      agent = new AgentLoop(this.app, this.settings);
+      // Also forgets OpenAI's response to chain to: it belongs to another conversation.
+      agent.importMessages(conversation.agentMessages);
+      this.agents.set(conversation.id, agent);
+    }
+    return agent;
+  }
+
+  /** The conversation the chat view shows. */
+  get activeConversation(): ConversationRecord {
+    return this.conversations.find((conversation) => conversation.id === this.activeConversationId)
+      ?? this.conversations[0];
+  }
+
+  /** The active conversation's messages, for replaying into the UI when the view reopens. */
+  get chatHistory(): ChatHistoryEntry[] {
+    return this.activeConversation.chatHistory;
+  }
+
+  set chatHistory(entries: ChatHistoryEntry[]) {
+    this.activeConversation.chatHistory = entries;
+  }
 
   async onload(): Promise<void> {
     await this.waitForChatStateWrites();
@@ -72,11 +134,14 @@ export default class ChatPlugin extends Plugin {
     const oauthStore = new ChatGPTOAuthStore(this.app);
     this.chatgptOAuth = new ChatGPTOAuthService(oauthStore);
     setChatGPTOAuthService(this.chatgptOAuth);
-
-    this.agent = new AgentLoop(this.app, this.settings);
+    // The chat header shows the thinking level from the saved model list.
+    await this.activateModelCatalog();
 
     // Restore persisted chat history
     await this.loadChatHistory();
+    this.watchLifecycle();
+    // A follow tab saved with the layout when Obsidian last closed goes.
+    this.app.workspace.onLayoutReady(() => closeLeftoverFollowTab(this.app));
 
     this.addSettingTab(new ChatSettingTab(this.app, this));
 
@@ -90,6 +155,9 @@ export default class ChatPlugin extends Plugin {
         const menu = new Menu();
         menu.addItem((item) =>
           item.setTitle("Open chat").setIcon("message-circle").onClick(() => void this.openChat())
+        );
+        menu.addItem((item) =>
+          item.setTitle("New chat").setIcon("square-pen").onClick(() => void this.newChat())
         );
         menu.addItem((item) =>
           item.setTitle("Chat about active note").setIcon("file-text").onClick(() => void this.chatAboutActiveNote())
@@ -112,6 +180,12 @@ export default class ChatPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "new-chat",
+      name: "New chat",
+      callback: () => void this.newChat(),
+    });
+
+    this.addCommand({
       id: "copy-transcript",
       name: "Copy conversation transcript to clipboard",
       callback: () => this.shareTranscript(),
@@ -121,6 +195,13 @@ export default class ChatPlugin extends Plugin {
       id: "clear-chat",
       name: "Clear conversation",
       callback: () => this.clearChat(),
+    });
+
+    // Gets the debug log off a phone: paste it into a note or a message.
+    this.addCommand({
+      id: "copy-debug-log",
+      name: "Copy debug log",
+      callback: () => void this.copyDebugLog(),
     });
 
     // Editor command: chat about the current note (only when editor is active)
@@ -181,8 +262,22 @@ export default class ChatPlugin extends Plugin {
     );
   }
 
+  /**
+   * Follow whether Obsidian is in the foreground (each hint goes to the
+   * debug log). Leaving it saves the chats: a phone may end Obsidian in the
+   * background without another event, and a running turn's progress and
+   * its mark (`pendingTurn`) are then on disk.
+   */
+  private watchLifecycle(): void {
+    appLifecycle.watch(this, (hint, visibility) => debugLog(this.app, "LIFECYCLE", { hint, visibility }));
+    this.register(appLifecycle.onHidden(() => void this.saveChatHistory()));
+  }
+
   onunload(): void {
-    this.agent?.abort();
+    for (const agent of this.agents.values()) agent.abort();
+    screenAwake.reset();
+    // The tab that showed the AI's edits closes with the plugin (and Obsidian).
+    closeFollowTab(this.app);
     void this.saveChatHistory();
     this.unloaded = true;
   }
@@ -220,16 +315,26 @@ export default class ChatPlugin extends Plugin {
     return this.activateView();
   }
 
-  /** Open chat and immediately send a message */
-  private async openChatWithMessage(message: string): Promise<void> {
+  /** Opens the chat on a new conversation. */
+  private async newChat(): Promise<void> {
     const view = await this.openChat();
-    view?.sendMessage(message);
+    view?.newChat();
   }
 
-  /** Open chat with a selection scope (shows pill, user types their own question) */
+  /** Open a new chat and immediately send a message */
+  private async openChatWithMessage(message: string): Promise<void> {
+    const view = await this.openChat();
+    if (!view) return;
+    // A new topic: in a new conversation, like the chat apps.
+    view.newChat();
+    view.sendMessage(message);
+  }
+
+  /** Open a new chat with a selection scope (shows pill, user types their own question) */
   private async openChatWithSelection(selection: SelectionScope): Promise<void> {
     const view = await this.openChat();
     if (!view) return;
+    view.newChat();
     view.setSelection(selection);
     view.focus();
   }
@@ -300,10 +405,105 @@ export default class ChatPlugin extends Plugin {
     }
   }
 
+  // ─── Conversations ──────────────────────────────────────────────────
+  // A running turn goes on when the user switches; deleting a conversation
+  // stops its turn (the view stops it first).
+
+  /** Conversations with content, most recently used first (the history list). */
+  listConversations(): ConversationSummary[] {
+    this.storeActiveMessages();
+    return newestFirst(this.conversations)
+      .filter((conversation) => !isEmptyConversation(conversation))
+      .map(({ id, title, updatedAt }) => ({ id, title, updatedAt, active: id === this.activeConversationId }));
+  }
+
+  /** Makes a new empty conversation active; an empty active one is kept instead. */
+  startNewConversation(): void {
+    this.storeActiveMessages();
+    if (isEmptyConversation(this.activeConversation)) return;
+    const conversation = newConversation();
+    this.conversations.push(conversation);
+    this.activate(conversation);
+  }
+
+  /** Makes conversation `id` active. */
+  openConversation(id: string): void {
+    const next = this.conversations.find((conversation) => conversation.id === id);
+    if (!next || next.id === this.activeConversationId) return;
+    this.storeActiveMessages();
+    this.activate(next);
+  }
+
+  /** Renames conversation `id`; an empty name goes back to the automatic title. */
+  renameConversation(id: string, title: string): void {
+    const conversation = this.conversations.find((item) => item.id === id);
+    if (!conversation) return;
+    const name = title.replace(/\s+/g, " ").trim();
+    conversation.customTitle = name !== "";
+    conversation.title = name || conversationTitle(conversation.chatHistory);
+    void this.saveChatHistory();
+  }
+
+  /** Deletes conversation `id`; deleting the active one opens the most recent other, or a new one. */
+  deleteConversation(id: string): void {
+    const deleted = this.conversations.find((conversation) => conversation.id === id);
+    if (!deleted) return;
+    this.dropAgent(id);
+    this.conversations = this.conversations.filter((conversation) => conversation !== deleted);
+    if (deleted.id !== this.activeConversationId) {
+      void this.saveChatHistory();
+      return;
+    }
+    const next = newestFirst(this.conversations)[0] ?? newConversation();
+    if (!this.conversations.includes(next)) this.conversations.push(next);
+    this.activate(next);
+  }
+
+  /** Called when a turn starts or the conversation is cleared: order and title. */
+  touchConversation(): void {
+    const conversation = this.activeConversation;
+    conversation.updatedAt = Date.now();
+    if (!conversation.customTitle) conversation.title = conversationTitle(conversation.chatHistory);
+  }
+
+  /**
+   * Makes `next` the open conversation. A turn running in the one left
+   * keeps running with its agent loop; an idle one's loop goes (its history
+   * is in the record). An empty conversation left behind is dropped.
+   */
+  private activate(next: ConversationRecord): void {
+    // None when the active conversation was just deleted.
+    const previous = this.conversations.find((conversation) => conversation.id === this.activeConversationId);
+    this.activeConversationId = next.id;
+    // The records get each loop's history first (a turn may have ended in the background since the last save).
+    this.storeActiveMessages();
+    for (const [id, agent] of this.agents) {
+      if (id !== next.id && !agent.isRunning()) this.agents.delete(id);
+    }
+    if (previous && previous !== next && isEmptyConversation(previous)) {
+      this.conversations = this.conversations.filter((conversation) => conversation !== previous);
+    }
+    void this.saveChatHistory();
+  }
+
+  /** Copies each agent loop's history into its conversation's record. */
+  private storeActiveMessages(): void {
+    for (const [id, agent] of this.agents) {
+      const conversation = this.conversations.find((item) => item.id === id);
+      if (conversation) conversation.agentMessages = agent.exportMessages();
+    }
+  }
+
+  /** Stops and forgets conversation `id`'s agent loop (deleting it). */
+  private dropAgent(id: string): void {
+    this.agents.get(id)?.abort();
+    this.agents.delete(id);
+  }
+
   // ─── Chat history persistence ─────────────────────────────────────────
 
   /**
-   * Saves the chat. One write at a time: a save asked for while one is
+   * Saves the chats. One write at a time: a save asked for while one is
    * being written waits for it, and all such calls share that one next
    * write, which takes the state when it starts.
    */
@@ -357,11 +557,18 @@ export default class ChatPlugin extends Plugin {
    */
   private async writeChatState(): Promise<void> {
     try {
-      const state: PersistedChatState = {
+      this.storeActiveMessages();
+      const state: ChatState = {
+        version: CHAT_STATE_VERSION,
         // Which of the two copies is newer when both are whole.
         savedAt: this.lastChatStateSavedAt = Math.max(Date.now(), this.lastChatStateSavedAt + 1),
-        chatHistory: this.chatHistory.slice(-100), // Cap at 100 UI messages
-        agentMessages: this.agent.exportMessages(80), // Keep complete API turns
+        activeConversationId: this.activeConversationId,
+        // Per conversation: the last 100 UI entries and 80 API messages
+        // (complete turns); image data only in the API history. An empty
+        // conversation is kept only while it is the active one.
+        conversations: this.conversations
+          .filter((conversation) => conversation.id === this.activeConversationId || !isEmptyConversation(conversation))
+          .map(savedConversation),
       };
       const json = JSON.stringify(state);
       const { adapter } = this.app.vault;
@@ -377,13 +584,22 @@ export default class ChatPlugin extends Plugin {
     const state = await this.readChatState();
     // Unreadable and not set aside: saving would overwrite it.
     if (state === undefined) return;
-    if (state) {
-      this.lastChatStateSavedAt = state.savedAt ?? 0;
-      if (Array.isArray(state.chatHistory)) {
-        this.chatHistory = state.chatHistory;
+    if (state) this.lastChatStateSavedAt = state.savedAt ?? 0;
+    // Older formats are migrated here; the next save writes the current one.
+    const saved = state && migrateChatState(state);
+    if (saved) {
+      // The images' data comes from each conversation's API history (same image ID).
+      for (const conversation of saved.conversations) {
+        conversation.chatHistory = restoreImages(conversation.chatHistory, conversation.agentMessages);
       }
-      if (Array.isArray(state.agentMessages)) {
-        this.agent.importMessages(state.agentMessages);
+      // An agent loop made before loading (tests set one) goes on with the saved open conversation.
+      const made = this.agents.get(this.activeConversationId);
+      this.agents.clear();
+      this.conversations = saved.conversations;
+      this.activeConversationId = saved.activeConversationId;
+      if (made) {
+        made.importMessages(this.activeConversation.agentMessages);
+        this.agents.set(this.activeConversationId, made);
       }
     }
     this.chatHistoryLoaded = true;
@@ -393,13 +609,16 @@ export default class ChatPlugin extends Plugin {
    * The saved chat: the newer of `chat-state.json` and its copy
    * `chat-state.next.json`, else the legacy file. Null when there is none
    * yet, or when `chat-state.json` couldn't be read and was renamed to
-   * `chat-state.corrupt-<time>.json` (with a notice); undefined when it
-   * couldn't be read and couldn't be renamed either.
+   * `chat-state.corrupt-<time>.json` (with a notice), or was written by a
+   * newer version (`keepIfNewer`); undefined when it couldn't be read and
+   * couldn't be renamed or kept either.
    */
   private async readChatState(): Promise<PersistedChatState | null | undefined> {
     const { adapter } = this.app.vault;
     const read = async (file: string): Promise<PersistedChatState> => {
       const state: unknown = JSON.parse(await adapter.read(file));
+      // A newer version's format isn't checked here: keepIfNewer keeps it aside.
+      if (isRecord(state) && typeof state.version === "number" && state.version > CHAT_STATE_VERSION) return state;
       if (!isPersistedChatState(state)) throw new Error("Not a saved chat");
       return state;
     };
@@ -430,14 +649,15 @@ export default class ChatPlugin extends Plugin {
           const [mainStat, copyStat] = await Promise.all([adapter.stat(path), adapter.stat(this.nextChatStatePath)]);
           // Coarse mobile/filesystem timestamps can tie. In that ambiguous
           // case prefer the old-version main file over resurrecting its copy.
-          if (mainStat && copyStat && mainStat.mtime >= copyStat.mtime) return main;
+          if (mainStat && copyStat && mainStat.mtime >= copyStat.mtime) return this.keepIfNewer(main);
         } catch {
           // A stat failure retains normal timestamp-based recovery.
         }
       }
-      return (copy.savedAt ?? 0) > (main.savedAt ?? 0) ? copy : main;
+      return this.keepIfNewer((copy.savedAt ?? 0) > (main.savedAt ?? 0) ? copy : main);
     }
-    if (main ?? copy) return main ?? copy;
+    const saved = main ?? copy;
+    if (saved) return this.keepIfNewer(saved);
     // Both files are unreadable: keep every existing copy before any
     // fresh save. This also protects a lone truncated .next file.
     const unreadable = [exists ? path : null, copyExists ? this.nextChatStatePath : null]
@@ -462,11 +682,33 @@ export default class ChatPlugin extends Plugin {
     return null;
   }
 
+  /**
+   * A chat saved by a newer version of the plugin (after a downgrade) isn't
+   * read: this version would drop what it doesn't know, and its next save
+   * would overwrite the file. It is kept as `chat-state.v<version>-<time>.json`
+   * and the chat starts empty (null, with a notice); undefined when it
+   * couldn't be kept. Any other chat is returned as it is.
+   */
+  private async keepIfNewer(state: PersistedChatState): Promise<PersistedChatState | null | undefined> {
+    if (typeof state.version !== "number" || state.version <= CHAT_STATE_VERSION) return state;
+    const name = `chat-state.v${state.version}-${Date.now()}.json`;
+    try {
+      await this.app.vault.adapter.write(`${this.pluginDataDir}/${name}`, JSON.stringify(state));
+    } catch {
+      new Notice("The saved chat is from a newer version of the plugin. The file is left as it is, and the chat isn't saved until Obsidian restarts.");
+      return undefined;
+    }
+    new Notice(`The saved chat is from a newer version of the plugin. It was kept as ${name} in the plugin folder; starting with an empty chat.`);
+    return null;
+  }
+
   // ─── Settings persistence ────────────────────────────────────────────
 
   async loadSettings(): Promise<void> {
     const saved = normalizeSettings(await this.loadData());
     this.settings = { ...DEFAULT_SETTINGS, ...saved };
+    // Not the default's array, which edits would change.
+    this.settings.mcpServers = [...this.settings.mcpServers];
 
     // Fall back to default model if saved model is empty
     if (!this.settings.model) {
@@ -488,20 +730,60 @@ export default class ChatPlugin extends Plugin {
 
     // Load API key for the current provider from SecretStorage
     this.settings.apiKey = this.loadApiKey(this.settings.provider);
+    // MCP servers' tokens, likewise
+    for (const server of this.settings.mcpServers) {
+      const token = this.readSecret(mcpSecretKey(server.id));
+      if (token) server.token = token;
+    }
+    setDebugLogging(this.settings.debugLog);
   }
 
   async saveSettings(): Promise<void> {
     // Store API key in SecretStorage keyed by provider
     this.saveApiKey(this.settings.provider, this.settings.apiKey || "");
+    const servers = this.settings.mcpServers ?? [];
+    for (const server of servers) this.writeSecret(mcpSecretKey(server.id), server.token ?? "");
 
-    // Save all other settings to data.json (syncs), but strip the API key
-    const toSave = { ...this.settings, apiKey: "" };
+    // Save all other settings to data.json (syncs), but strip the API key and MCP tokens
+    const toSave = { ...this.settings, apiKey: "", mcpServers: servers.map(({ token: _token, ...server }) => server) };
     await this.saveData(toSave);
+    setDebugLogging(this.settings.debugLog);
 
-    // Update the chat view header with the new model name
-    this.getChatView()?.updateModel(
-      getModelDisplayName(this.settings.provider, this.settings.model)
-    );
+    // Update the chat view header with the new model name and thinking level
+    const view = this.getChatView();
+    view?.updateModel(this.modelHeaderLabel());
+    view?.updateEnterSends();
+    view?.updateFollowEdits();
+  }
+
+  /** Copy `debug.log` to the clipboard (the "Debug log" setting writes it). */
+  async copyDebugLog(): Promise<void> {
+    const log = await readDebugLog(this.app);
+    if (!log) {
+      new Notice(this.settings.debugLog ? "The debug log is empty." : "The debug log is empty. Turn on Debug log in settings first.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(log);
+      new Notice(`Debug log copied (${Math.ceil(log.length / 1024)} KB).`);
+    } catch {
+      new Notice("Couldn't copy the debug log.");
+    }
+  }
+
+  /** Model name and thinking level, as shown in the chat view header. */
+  modelHeaderLabel(): string {
+    const { provider, model, thinkingLevel } = this.settings;
+    return getModelHeaderLabel(provider, model, thinkingLevel);
+  }
+
+  /** Activate the saved model list of the current provider and account (no network). */
+  private async activateModelCatalog(): Promise<void> {
+    const { provider, apiKey, modelCatalog } = this.settings;
+    const credential = provider === "chatgpt-oauth" ? this.chatgptOAuth.getCredential() : null;
+    const secretIdentity = provider === "chatgpt-oauth" ? credential?.accountId || credential?.accessToken : apiKey;
+    if (!secretIdentity || !modelCatalog) return;
+    cachedCatalog(modelCatalog, provider, await catalogIdentity(provider, secretIdentity));
   }
 
   /** Load the correct API key when provider changes */
@@ -518,6 +800,29 @@ export default class ChatPlugin extends Plugin {
       );
     } catch {
       return "";
+    }
+  }
+
+  /** Remove an MCP server and its token. */
+  async removeMcpServer(id: string): Promise<void> {
+    this.writeSecret(mcpSecretKey(id), "");
+    this.settings.mcpServers = this.settings.mcpServers.filter((server) => server.id !== id);
+    await this.saveSettings();
+  }
+
+  private readSecret(key: string): string {
+    try {
+      return this.app.secretStorage.getSecret(key) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  private writeSecret(key: string, value: string): void {
+    try {
+      this.app.secretStorage.setSecret(key, value);
+    } catch {
+      // SecretStorage not available
     }
   }
 
@@ -630,27 +935,45 @@ export default class ChatPlugin extends Plugin {
   }
 }
 
+/** `chat-state.json` as read: any format version (`migrateChatState`). */
 interface PersistedChatState {
+  version?: number;
   /** When it was written (ms); tells the newer of the two copies. */
   savedAt?: number;
-  chatHistory?: ChatPlugin["chatHistory"];
-  agentMessages?: Parameters<AgentLoop["importMessages"]>[0];
+  chatHistory?: unknown;
+  agentMessages?: unknown;
+  activeConversationId?: unknown;
+  conversations?: unknown;
 }
 
 function isPersistedChatState(value: unknown): value is PersistedChatState {
   if (!isRecord(value) || Array.isArray(value)) return false;
+  if ("version" in value && (typeof value.version !== "number" || !Number.isInteger(value.version) || value.version < 1)) return false;
+  if ("savedAt" in value && (typeof value.savedAt !== "number" || !Number.isFinite(value.savedAt) || value.savedAt < 0)) return false;
+  // From version 3 on, the two histories are kept per conversation.
+  if (typeof value.version === "number" && value.version >= 3) {
+    if ("activeConversationId" in value && typeof value.activeConversationId !== "string") return false;
+    return Array.isArray(value.conversations) && value.conversations.every(conversation =>
+      isRecord(conversation) && !Array.isArray(conversation) && typeof conversation.id === "string" &&
+      isSavedHistories(conversation, false));
+  }
+  // From version 2 on, image data is saved only in the API history.
+  return isSavedHistories(value, typeof value.version !== "number" || value.version < 2);
+}
+
+/** A saved chat's `chatHistory` and `agentMessages`: at least one of them, each a list of valid entries. */
+function isSavedHistories(value: Record<string, unknown>, imagesWithData: boolean): boolean {
   if (!Array.isArray(value.chatHistory) && !Array.isArray(value.agentMessages)) return false;
   if ("chatHistory" in value && !Array.isArray(value.chatHistory)) return false;
   if ("agentMessages" in value && !Array.isArray(value.agentMessages)) return false;
-  if (Array.isArray(value.chatHistory) && !value.chatHistory.every(isChatHistoryEntry)) return false;
-  if (Array.isArray(value.agentMessages) && !value.agentMessages.every(message =>
+  if (Array.isArray(value.chatHistory) && !value.chatHistory.every(entry => isChatHistoryEntry(entry, imagesWithData))) return false;
+  return !Array.isArray(value.agentMessages) || value.agentMessages.every(message =>
     isRecord(message) && (message.role === "user" || message.role === "assistant") &&
     (typeof message.content === "string" || (Array.isArray(message.content) &&
-      message.content.every(block => isRecord(block) && typeof block.type === "string"))))) return false;
-  return !("savedAt" in value) || (typeof value.savedAt === "number" && Number.isFinite(value.savedAt) && value.savedAt >= 0);
+      message.content.every(block => isRecord(block) && typeof block.type === "string"))));
 }
 
-function isChatHistoryEntry(entry: unknown): boolean {
+function isChatHistoryEntry(entry: unknown, imagesWithData = true): boolean {
   if (!isRecord(entry) || Array.isArray(entry) || typeof entry.type !== "string") return false;
   if ("text" in entry && typeof entry.text !== "string") return false;
   if (["user", "assistant", "error"].includes(entry.type) && typeof entry.text !== "string") return false;
@@ -664,7 +987,7 @@ function isChatHistoryEntry(entry: unknown): boolean {
     if (!Array.isArray(entry.images) || !entry.images.every(image =>
       isRecord(image) && !Array.isArray(image) && typeof image.id === "string" &&
       typeof image.fileName === "string" && typeof image.mediaType === "string" &&
-      typeof image.data === "string" && typeof image.sizeBytes === "number" &&
+      (typeof image.data === "string" || (!imagesWithData && !("data" in image))) && typeof image.sizeBytes === "number" &&
       Number.isFinite(image.sizeBytes) && image.sizeBytes >= 0)) return false;
     // Svelte's keyed image list cannot render duplicate attachment IDs.
     const imageIds = entry.images.map((image: unknown) =>
@@ -680,14 +1003,30 @@ function normalizeSettings(value: unknown): Partial<ChatSettings> {
   if (isProvider(value.provider)) settings.provider = value.provider;
   if (typeof value.apiKey === "string") settings.apiKey = value.apiKey;
   if (typeof value.model === "string") settings.model = value.model;
+  if (typeof value.thinkingLevel === "string") settings.thinkingLevel = value.thinkingLevel;
   // Within the settings field's range, 1 to 100, however data.json was edited;
   // below 1 (0 used to mean the default) keeps the default.
   if (typeof value.maxIterations === "number" && Number.isFinite(value.maxIterations) && value.maxIterations >= 1) {
     settings.maxIterations = Math.min(100, Math.floor(value.maxIterations));
   }
   if (typeof value.enableWebSearch === "boolean") settings.enableWebSearch = value.enableWebSearch;
+  if (typeof value.enterSends === "boolean") settings.enterSends = value.enterSends;
+  if (typeof value.followEdits === "boolean") settings.followEdits = value.followEdits;
+  if (typeof value.debugLog === "boolean") settings.debugLog = value.debugLog;
+  if (typeof value.skillsFolder === "string" && value.skillsFolder.trim()) settings.skillsFolder = value.skillsFolder.trim();
+  if (Array.isArray(value.mcpServers)) {
+    // Never a token from data.json (they live in SecretStorage).
+    settings.mcpServers = value.mcpServers.filter(isRecord)
+      .filter((server) => typeof server.id === "string" && typeof server.name === "string" && typeof server.url === "string")
+      .map((server) => ({ id: server.id as string, name: server.name as string, url: server.url as string, enabled: server.enabled === true }));
+  }
   settings.modelCatalog = normalizeCatalogState(value.modelCatalog);
   return settings;
+}
+
+/** SecretStorage key of an MCP server's token. */
+function mcpSecretKey(id: string): string {
+  return `${PLUGIN_ID}-mcp-${id}`;
 }
 
 function isProvider(value: unknown): value is ChatSettings["provider"] {

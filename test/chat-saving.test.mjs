@@ -58,6 +58,8 @@ async function loadFrom(content, { renameFails = false, next, legacy } = {}) {
 }
 
 const texts = plugin => plugin.chatHistory.map(entry => entry.text);
+// The texts of the (only) conversation in a written chat-state.json.
+const savedTexts = state => state.conversations[0].chatHistory.map(entry => entry.text);
 
 test('Nothing is saved before the saved chat has been read', async () => {
   const writes = [];
@@ -91,7 +93,7 @@ test('A save writes the state twice: chat-state.next.json, then chat-state.json;
   await plugin.saveChatHistory();
   assert.deepEqual(order, [NEXT, STATE]);
   assert.equal(files.get(NEXT), files.get(STATE));
-  assert.deepEqual(JSON.parse(files.get(STATE)).chatHistory.map(e => e.text), ['Old', 'New']);
+  assert.deepEqual(savedTexts(JSON.parse(files.get(STATE))), ['Old', 'New']);
   assert.deepEqual(renames, []);
 });
 
@@ -133,7 +135,7 @@ test('An unreadable chat-state.json is kept aside before starting fresh, with on
     // The fresh chat is saved to a new file; the old one is safe.
     await plugin.saveChatHistory();
     assert.equal(writes.length, 1);
-    assert.deepEqual(writes[0].chatHistory, []);
+    assert.deepEqual(writes[0].conversations[0].chatHistory, []);
   }
 });
 
@@ -187,7 +189,7 @@ test('Saves never overlap: calls during a write share one next write with the la
   pending.shift()();
   await first;
   while (writes.length < 2) await tick();
-  assert.deepEqual(writes[1].chatHistory.map(e => e.text), ['One', 'Two']);
+  assert.deepEqual(savedTexts(writes[1]), ['One', 'Two']);
   pending.shift()();
   await third;
   assert.equal(writes.length, 2);
@@ -252,7 +254,7 @@ test('After a downgrade, a newer or tied main mtime beats the stale timestamped 
   await plugin.loadChatHistory();
   assert.deepEqual(texts(plugin), ['Changed on 0.4.0']);
   await plugin.saveChatHistory();
-  assert.deepEqual(JSON.parse(files.get(NEXT)).chatHistory.map(e => e.text), ['Changed on 0.4.0']);
+  assert.deepEqual(savedTexts(JSON.parse(files.get(NEXT))), ['Changed on 0.4.0']);
  }
 });
 
@@ -291,7 +293,7 @@ test('A reloaded instance waits for the prior instance queued unload save before
   pending.shift()();
   await loading;
   assert.deepEqual(next.chatHistory, []);
-  assert.deepEqual(JSON.parse(files.get(STATE)).chatHistory, []);
+  assert.deepEqual(JSON.parse(files.get(STATE)).conversations[0].chatHistory, []);
 });
 
 test('A late turn finally callback from an unloaded plugin cannot overwrite the replacement instance', async () => {
@@ -307,7 +309,7 @@ test('A late turn finally callback from an unloaded plugin cannot overwrite the 
   // block asks its plugin to save again.
   old.chatHistory.push({ type: 'assistant', text: 'Stale callback' });
   await old.saveChatHistory();
-  assert.deepEqual(JSON.parse(files.get(STATE)).chatHistory, next.chatHistory);
+  assert.deepEqual(JSON.parse(files.get(STATE)).conversations[0].chatHistory, next.chatHistory);
   assert.equal(files.get(STATE), files.get(NEXT));
 });
 
@@ -334,6 +336,23 @@ test('Malformed nested UI history fields recover the readable backup before view
   }
 });
 
+test('Version 3: a malformed entry in any conversation recovers the readable copy; images may come without data', async () => {
+  const conversation = (id, chatHistory) => ({ id, title: id, customTitle: false, createdAt: 1, updatedAt: 1, chatHistory, agentMessages: [] });
+  const v3 = (savedAt, chatHistory) => JSON.stringify({
+    version: 3, savedAt, activeConversationId: 'a',
+    conversations: [conversation('a', [{ type: 'user', text: 'First' }]), conversation('b', chatHistory)],
+  });
+  const image = { id: 'image-1', fileName: 'test.png', mediaType: 'image/png', sizeBytes: 1 };
+  // Saved from version 2 on: the image's data is only in the API history.
+  const ok = await loadFrom(v3(2000, [{ type: 'user', text: 'With image', images: [image] }]));
+  assert.deepEqual(texts(ok.plugin), ['First']);
+  assert.deepEqual(ok.renames, []);
+  // A broken entry in the other conversation: the readable copy wins.
+  const { plugin } = await loadFrom(v3(2000, [{ type: 'assistant' }]), { next: v3(1000, [{ type: 'assistant', text: 'Recovered' }]) });
+  assert.deepEqual(plugin.conversations.map(c => c.id), ['a', 'b']);
+  assert.equal(plugin.conversations[1].chatHistory[0].text, 'Recovered');
+});
+
 test('Valid image attachments and tool result history remain intact on restore', async () => {
   const chatHistory = [
     { type: 'user', text: 'Image question', images: [{ id: 'image-1', fileName: 'test.png', mediaType: 'image/png', data: 'AA==', sizeBytes: 1 }] },
@@ -341,5 +360,6 @@ test('Valid image attachments and tool result history remain intact on restore',
     { type: 'assistant', text: 'Answer' },
   ];
   const { plugin } = await loadFrom(JSON.stringify({ chatHistory }));
-  assert.deepEqual(plugin.chatHistory, chatHistory);
+  // A chat saved before turn IDs gets them on load (edit and regenerate).
+  assert.deepEqual(plugin.chatHistory.map(({ turnId: _turnId, ...entry }) => entry), chatHistory);
 });

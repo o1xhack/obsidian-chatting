@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 import {
-  bundled, api, assistant, call, callbacks, image, nativeCall, response, responseMessage, result, settings, sse, text, transport, vaultApp
+  bundled, api, assistant, call, callbacks, image, nativeCall, response, responseMessage, result, settings, sse, text, transport, vaultApp, settingsApp
 } from './harness.mjs';
 beforeEach(() => {
   api.clearOpenAIState();
@@ -203,7 +203,7 @@ test('OpenAI: restored legacy history retains function call/output pairs', async
 
 test('ChatGPT: incomplete SSE is rejected instead of executing finished tool items', async () => {
   transport(() => sse([{ type: 'response.output_item.done', output_index: 0, item: nativeCall('write', 'create_file', { path: 'Never.md' }) }]));
-  await assert.rejects(api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Create' }], [], 'System'), /without a completed response/);
+  await assert.rejects(api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Create' }], [], 'System'), /ended before the answer was complete/);
 });
 
 test('History trimming retains complete user turns rather than orphan tool results', () => {
@@ -525,10 +525,10 @@ test('Agent freezes provider/model configuration for a multi-tool turn', async (
 });
 
 test('Declarative settings stay searchable and reuse the legacy renderers without fetching during indexing', () => {
-  const plugin={settings:settings('openai')}; const tab=new api.ChatSettingTab({},plugin);
+  const plugin={settings:settings('openai')}; const tab=new api.ChatSettingTab(settingsApp,plugin);
   globalThis.__providerRequest=async()=>assert.fail('Indexing must not perform network I/O');
   const definitions=tab.getSettingDefinitions();
-  assert.deepEqual(definitions.map(d=>d.name),['Provider','API key','ChatGPT account','Model','Custom model ID','Web search','Max tool iterations']);
+  assert.deepEqual(definitions.map(d=>d.name),['Provider','API key','ChatGPT account','Model','Custom model ID','Thinking level','Web search','Enter sends message',"Follow the AI's edits",'Vault instructions','Skills',undefined,'Max tool iterations','MCP servers',undefined,'Debug log']);
   assert.equal(definitions[1].visible(),true); assert.equal(definitions[2].visible(),false);
   plugin.settings.provider='chatgpt-oauth'; assert.equal(definitions[1].visible(),false); assert.equal(definitions[2].visible(),true);
   let updates=0,displays=0; tab.display=()=>displays++;
