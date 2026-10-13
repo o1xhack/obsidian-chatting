@@ -78,13 +78,27 @@
     onUndo: (turnId: string) => void;
     /** The vault's skills, offered after `/`. */
     listSkills: () => Skill[];
+    /** Continue the turn that was cut off when Obsidian was ended. */
+    onContinue: () => void;
   }
 
   let {
     app, component, provider, model, onSend, onClear, onStop, onEdit, onRegenerate, onCopy,
     title, onNewChat, listConversations, onOpenConversation, onRenameConversation, onDeleteConversation,
-    onToggleFollow, onUndo, listSkills,
+    onToggleFollow, onUndo, listSkills, onContinue,
   }: Props = $props();
+
+  /** A turn was cut off when Obsidian was ended in the background: offer Continue. */
+  let canContinue = $state(false);
+
+  export function setContinue(show: boolean): void {
+    canContinue = show;
+  }
+
+  function continueTurn(): void {
+    canContinue = false;
+    onContinue();
+  }
 
   let displayModel = $state("");
   let displayTitle = $state("");
@@ -399,11 +413,11 @@
     }
   }
 
-  export function showThinking(): void {
-    // Only add if not already showing
-    if (!messages.some((m) => m.type === "thinking")) {
-      messages.push({ id: nextId++, type: "thinking" });
-    }
+  /** The thinking dots, with a short label such as "Resuming…" (none: just the dots). */
+  export function showThinking(label = ""): void {
+    const shown = messages.find((m) => m.type === "thinking");
+    if (shown) shown.text = label;
+    else messages.push({ id: nextId++, type: "thinking", text: label });
   }
 
   export function hideThinking(): void {
@@ -1363,6 +1377,7 @@
           <span class="ochatting-dot"></span>
           <span class="ochatting-dot"></span>
           <span class="ochatting-dot"></span>
+          {#if msg.text}<span class="ochatting-thinking-label" aria-live="polite">{msg.text}</span>{/if}
         </div>
       {/if}
     {/each}
@@ -1374,6 +1389,13 @@
       </button>
     {/if}
   </div>
+
+  {#if canContinue}
+    <div class="ochatting-continue-row" role="status">
+      <span>The last answer was interrupted.</span>
+      <button class="mod-cta" type="button" onclick={continueTurn}>Continue</button>
+    </div>
+  {/if}
 
   {#if queued.length}
     <!-- Sent while the answer runs; each moves into the chat when the agent takes it in -->
@@ -2029,6 +2051,19 @@
     max-width: 90%;
   }
 
+  /* A turn cut off when Obsidian was ended: Continue */
+  .ochatting-continue-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--background-modifier-border);
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
   /* Messages sent while the answer runs, until the agent takes them in */
   .ochatting-queued {
     display: flex;
@@ -2321,6 +2356,12 @@
     display: flex;
     gap: 4px;
     padding: 8px 12px;
+  }
+
+  .ochatting-thinking-label {
+    margin-left: 4px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
   }
 
   .ochatting-dot {

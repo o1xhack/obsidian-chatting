@@ -12,7 +12,7 @@ export const bundled = await build({
     export { ChatSettingTab } from './src/settings';
     export * from './src/api/model-catalog';
     export { sendMessage } from './src/api/client';
-    export { AgentLoop } from './src/agent/loop';
+    export { AgentLoop, RESUME } from './src/agent/loop';
     export { trimHistory, withoutLargeToolText, MAX_TOOL_TEXT_CHARS } from './src/agent/history';
     export { sendAnthropicMessage } from './src/api/anthropic';
     export { sendOpenAIMessage, clearOpenAIState } from './src/api/openai';
@@ -32,6 +32,8 @@ export const bundled = await build({
     export { WEB_PAGE_CHARS } from './src/tools/web-page';
     export * as debug from './src/debug';
     export { screenAwake } from './src/platform/screen-awake';
+    export * as lifecycle from './src/platform/lifecycle';
+    export { Platform } from 'obsidian';
     export { isSendKey } from './src/ui/send-key';
     export * as imagePreview from './src/tools/image-preview';
     export * as canvasRender from './src/tools/canvas-render';
@@ -96,7 +98,8 @@ export const bundled = await build({
       }
       // A desktop unless a test sets globalThis.__isPhone. Streaming takes
       // the mobile path (fetch) unless a test sets globalThis.__isDesktopApp.
-      export const Platform = { get isDesktop() { return globalThis.__isMobile !== true; }, get isPhone() { return globalThis.__isPhone === true; }, get isDesktopApp() { return globalThis.__isDesktopApp === true; } };
+      // Tests of the mobile apps' stall watch set isMobileApp.
+      export const Platform = { get isDesktop() { return globalThis.__isMobile !== true; }, get isPhone() { return globalThis.__isPhone === true; }, get isDesktopApp() { return globalThis.__isDesktopApp === true; }, isMobileApp: false };
       // Tags dropped, paragraphs kept: enough to see which content got through.
       export const htmlToMarkdown = node => (typeof node === 'string' ? node : node.innerHTML).replace(/<\\/p>/g, '\\n\\n').replace(/<[^>]+>/g, '').trim();
       export const arrayBufferToBase64 = buffer => Buffer.from(buffer).toString('base64');
