@@ -96,7 +96,7 @@ test('ChatGPT: the wait named in an in-stream rate limit, and the Codex overload
 });
 
 test('OpenAI: a failed response (HTTP 200) is retried by its code like an HTTP error', async () => {
-  const failedResponse = code => ({ status: 200, json: { id: 'resp_failed', status: 'failed', output: [], error: { code, message: `Failed: ${code}` } } });
+  const failedResponse = code => sse([{ type: 'response.failed', response: { id: 'resp_failed', status: 'failed', output: [], error: { code, message: `Failed: ${code}` } } }]);
   let requests = transport((body, index) => index ? response('openai', [text('OK')], 'end_turn', index) : failedResponse('rate_limit_exceeded'));
   assert.equal((await api.sendMessage(settings('openai'), hi, [], 'System')).content[0].text, 'OK');
   assert.equal(requests.length, 2);
