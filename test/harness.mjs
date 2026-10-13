@@ -50,6 +50,12 @@ export const bundled = await build({
     export * as usage from './src/agent/usage';
     export * as summary from './src/agent/summary';
     export { ProviderError } from './src/api/errors';
+    export * as voiceProtocol from './src/voice/protocol';
+    export * as voiceSession from './src/voice/session';
+    export * as voiceController from './src/voice/controller';
+    export * as codexVoice from './src/voice/codex';
+    export { DEFAULT_SETTINGS } from './src/types';
+    export { checkLiveVoice } from './src/diagnostics/capability-check';
   `, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
   plugins: [{ name: 'obsidian-test-transport', setup(build) {
@@ -80,6 +86,7 @@ export const bundled = await build({
         onChange(fn) { this.change = fn; return this; }
       }
       export const requireApiVersion = () => globalThis.__supportsNewObsidian === true;
+      export const apiVersion = '1.13.1';
       export class Notice { constructor(message) { (globalThis.__notices ??= []).push(message); } }
       export class TAbstractFile {}
       export class TFile { constructor(path) { this.path = path; this.extension = 'md'; } }
@@ -262,7 +269,7 @@ export function chatFiles(saved) {
 export function vaultApp() {
   const files = new Map([['Cases/Case Template.md', '# Template\n日本語本文'], ['Untitled.md', 'Original']]);
   const app = {
-    workspace: { getActiveFile: () => ({ path: 'Untitled.md' }) },
+    workspace: { getActiveFile: () => ({ path: 'Untitled.md' }), getLeavesOfType: () => [] },
     vault: {
       configDir: '.obsidian', adapter: { append: async () => {} },
       getName: () => 'Test vault',

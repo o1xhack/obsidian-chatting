@@ -12,7 +12,8 @@
   import { isSendKey } from "./send-key";
   import { fileLabel, toolLabel } from "./tool-label";
   import { foldPlan } from "./fold-turn";
-  import type { ChangesState, UsageView } from "./chat-view";
+  import type { ChangesState, UsageView, VoiceAction } from "./chat-view";
+  import type { VoiceViewState } from "../voice/controller";
   import { formatCost, formatTokens } from "../agent/usage";
 
   /** Where a ChatGPT account sees its plan's Codex usage. */
@@ -88,12 +89,14 @@
     onCompact: () => void;
     /** Show the turns before the shown ones (scrolled near the top). */
     onLoadEarlier: () => void;
+    /** The voice button and the voice bar's controls. */
+    onVoice: (action: VoiceAction) => void;
   }
 
   let {
     app, component, provider, model, onSend, onClear, onStop, onEdit, onRegenerate, onCopy,
     title, onNewChat, listConversations, onOpenConversation, onRenameConversation, onDeleteConversation,
-    onToggleFollow, onUndo, listSkills, onContinue, onCompact, onLoadEarlier,
+    onToggleFollow, onUndo, listSkills, onContinue, onCompact, onLoadEarlier, onVoice,
   }: Props = $props();
 
   // ─── Context ring ─────────────────────────────────────────────────────
@@ -121,6 +124,54 @@
   function continueTurn(): void {
     canContinue = false;
     onContinue();
+  }
+
+  // ─── Voice ─────────────────────────────────────────────────────────────
+  /** Signed in to ChatGPT: offer the voice button. */
+  let canVoice = $state(false);
+  let voice = $state<VoiceViewState | null>(null);
+
+  const VOICE_STATUS: Record<VoiceViewState["status"], string> = {
+    connecting: "Connecting…",
+    reconnecting: "Reconnecting…",
+    listening: "Listening",
+    thinking: "Working on it…",
+    speaking: "Speaking",
+  };
+
+  /** The end of a long caption line. */
+  function captionTail(text: string, max = 80): string {
+    const trimmed = text.trim();
+    return trimmed.length > max ? `…${trimmed.slice(-max)}` : trimmed;
+  }
+
+  /** The voice bar's one line: the user's words while they speak, else the state. */
+  function voiceLine(state: VoiceViewState): string {
+    if (state.you && (state.status === "listening" || state.status === "thinking")) return captionTail(state.you);
+    if (state.status === "listening" && !state.micOn) return state.holdToTalk ? "Hold the microphone to talk" : "Microphone off";
+    return VOICE_STATUS[state.status];
+  }
+
+  /** Hold to talk: the microphone is on while the button is pressed. */
+  function talkStart(event: PointerEvent): void {
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    onVoice("talk-start");
+  }
+
+  function talkKey(event: KeyboardEvent, pressed: boolean): void {
+    if (event.key !== " " && event.key !== "Enter") return;
+    event.preventDefault();
+    if (event.repeat) return;
+    onVoice(pressed ? "talk-start" : "talk-end");
+  }
+
+  /** Show the voice bar (null hides it). */
+  export function setVoice(state: VoiceViewState | null): void {
+    voice = state;
+  }
+
+  export function setVoiceAvailable(available: boolean): void {
+    canVoice = available;
   }
 
   let displayModel = $state("");
@@ -267,6 +318,11 @@
 
   // ask_user support
   let askUserResolve: ((value: string) => void) | null = $state(null);
+
+  /** The action slot shows voice while there is nothing to send (not while a question waits for its answer). */
+  const showVoiceStart = $derived(
+    canVoice && !voice && !askUserResolve && inputText.trim() === "" && attachments.length === 0 && fileAttachments.length === 0,
+  );
 
   // Sync model prop to local state (also updateable via setModel)
   $effect(() => {
@@ -1567,6 +1623,57 @@
     </div>
   {/if}
 
+  {#if voice}
+    <!-- Voice: one row in place of the input, as in the chat apps' voice mode. The request and
+         the answer land in the chat; the bar only shows what it hears right now. -->
+    <div class="ochatting-voice-bar" role="region" aria-label="Voice conversation">
+      {#if voice.holdToTalk}
+        <button
+          class="ochatting-voice-round ochatting-voice-mic ochatting-voice-talk"
+          class:is-active={voice.micOn}
+          type="button"
+          aria-pressed={voice.micOn}
+          aria-label="Hold to talk"
+          title="Hold to talk"
+          disabled={voice.status === "connecting" || voice.status === "reconnecting"}
+          onpointerdown={talkStart}
+          onpointerup={() => onVoice("talk-end")}
+          onpointercancel={() => onVoice("talk-end")}
+          onkeydown={(event) => talkKey(event, true)}
+          onkeyup={(event) => talkKey(event, false)}
+          oncontextmenu={(event) => event.preventDefault()}
+        ><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg></button>
+      {:else}
+        <button
+          class="ochatting-voice-round ochatting-voice-mic"
+          class:is-muted={!voice.micOn}
+          type="button"
+          aria-pressed={!voice.micOn}
+          aria-label={voice.micOn ? "Mute microphone" : "Unmute microphone"}
+          title={voice.micOn ? "Mute microphone" : "Unmute microphone"}
+          disabled={voice.status === "connecting" || voice.status === "reconnecting"}
+          onclick={() => onVoice("mute")}
+        >
+          {#if voice.micOn}<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg>{:else}<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"></line><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"></path><path d="M5 10v2a7 7 0 0 0 12 5"></path><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"></path><path d="M9 9v3a3 3 0 0 0 5.12 2.12"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg>{/if}
+        </button>
+      {/if}
+      <div class="ochatting-voice-pill" aria-live="polite">
+        {#if voice.audioBlocked}
+          <button class="ochatting-voice-play" type="button" onclick={() => onVoice("play")}>Tap to play audio</button>
+        {:else}
+          <span class="ochatting-voice-wave" data-status={voice.status} aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="ochatting-voice-line" class:is-words={voice.you && (voice.status === "listening" || voice.status === "thinking")}>{voiceLine(voice)}</span>
+        {/if}
+      </div>
+      <button
+        class="ochatting-voice-round ochatting-voice-end"
+        type="button"
+        aria-label="End voice conversation"
+        title="End voice conversation"
+        onclick={() => onVoice("end")}
+      ><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button>
+    </div>
+  {:else}
   <!-- Input bar -->
   <div class="ochatting-input-bar">
     <input
@@ -1604,7 +1711,7 @@
       onclick={updateMention}
       onblur={closeMention}
     ></textarea>
-    <!-- While a turn runs: Stop until there is text to add to it, then Send -->
+    <!-- One action slot, as in the chat apps: voice while there's nothing to send, else send; while a turn runs, Stop until there is text to add to it -->
     {#if busy && !inputText.trim()}
       <button
         class="ochatting-send-btn ochatting-stop-btn"
@@ -1612,6 +1719,17 @@
         aria-label="Stop generation"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>
+      </button>
+    {:else if inputEnabled && !busy && showVoiceStart}
+      <button
+        class="ochatting-attach-btn ochatting-voice-start"
+        type="button"
+        onclick={() => onVoice("start")}
+        aria-label="Start voice conversation"
+        title="Start voice conversation"
+      >
+        <!-- Live voice, as in the chat apps: a filled circle with sound-wave bars (a microphone means dictation there) -->
+        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="currentColor"></circle><g class="ochatting-voice-bars" fill="none" stroke-width="2" stroke-linecap="round"><line x1="7.5" y1="10.5" x2="7.5" y2="13.5"></line><line x1="10.5" y1="7.5" x2="10.5" y2="16.5"></line><line x1="13.5" y1="9" x2="13.5" y2="15"></line><line x1="16.5" y1="10.5" x2="16.5" y2="13.5"></line></g></svg>
       </button>
     {:else}
       <button
@@ -1623,6 +1741,7 @@
       </button>
     {/if}
   </div>
+  {/if}
   </div>
 </div>
 
@@ -2762,6 +2881,194 @@
     opacity: 0.85;
   }
 
+  /* Live voice: a solid circle (text colour) with bars in the background colour */
+  .ochatting-attach-btn.ochatting-voice-start {
+    background: transparent;
+    color: var(--text-normal);
+  }
+
+  .ochatting-voice-start svg {
+    width: var(--ochatting-control);
+    height: var(--ochatting-control);
+  }
+
+  .ochatting-voice-bars {
+    stroke: var(--background-primary);
+  }
+
+  /* ─── Voice bar ──────────────────────────────────────────────────────── */
+  /* One row like the input bar: mic, a pill with sound bars and one line, end */
+  .ochatting-voice-bar {
+    --ochatting-control: 36px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--background-modifier-border);
+    flex-shrink: 0;
+    animation: ochatting-voice-in 200ms ease-out;
+  }
+
+  @keyframes ochatting-voice-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .ochatting-voice-round {
+    width: var(--ochatting-control);
+    height: var(--ochatting-control);
+    min-width: var(--ochatting-control);
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    box-shadow: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .ochatting-voice-round svg {
+    width: calc(var(--ochatting-control) * 0.5);
+    height: calc(var(--ochatting-control) * 0.5);
+  }
+
+  .ochatting-voice-mic {
+    background: var(--background-modifier-hover);
+    color: var(--text-normal);
+  }
+
+  .ochatting-voice-mic.is-muted {
+    background: var(--background-modifier-error);
+    color: var(--text-error);
+  }
+
+  .ochatting-voice-talk {
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .ochatting-voice-talk.is-active {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+  }
+
+  .ochatting-voice-end {
+    background: var(--color-red, var(--text-error));
+    color: #fff;
+  }
+
+  .ochatting-voice-end:hover {
+    opacity: 0.85;
+  }
+
+  /* Takes the input's place and shape */
+  .ochatting-voice-pill {
+    flex: 1;
+    min-width: 0;
+    height: var(--ochatting-control);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    border: 1.5px solid var(--background-modifier-border-hover, var(--background-modifier-border));
+    border-radius: calc(var(--ochatting-control) / 2);
+    background: var(--background-secondary);
+    font-size: var(--font-ui-small);
+  }
+
+  /* Autoplay was blocked: a plain text button starts the audio */
+  .ochatting-voice-play {
+    padding: 0;
+    border: none;
+    background: none;
+    box-shadow: none;
+    color: var(--text-accent);
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  .ochatting-voice-line {
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* What it hears right now */
+  .ochatting-voice-line.is-words {
+    color: var(--text-normal);
+  }
+
+  /* Five sound bars: calm while listening, shimmering while busy, bouncing while speaking */
+  .ochatting-voice-wave {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .ochatting-voice-wave i {
+    display: block;
+    width: 3px;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--text-muted);
+    transform: scaleY(0.3);
+  }
+
+  .ochatting-voice-wave i:nth-child(2) { animation-delay: 120ms; }
+  .ochatting-voice-wave i:nth-child(3) { animation-delay: 240ms; }
+  .ochatting-voice-wave i:nth-child(4) { animation-delay: 360ms; }
+  .ochatting-voice-wave i:nth-child(5) { animation-delay: 480ms; }
+
+  .ochatting-voice-wave[data-status="listening"] i {
+    background: var(--color-green, var(--interactive-accent));
+    animation: ochatting-voice-breathe 2.4s ease-in-out infinite;
+  }
+
+  .ochatting-voice-wave[data-status="speaking"] i {
+    background: var(--interactive-accent);
+    animation: ochatting-voice-bounce 0.9s ease-in-out infinite;
+  }
+
+  .ochatting-voice-wave[data-status="thinking"] i,
+  .ochatting-voice-wave[data-status="connecting"] i,
+  .ochatting-voice-wave[data-status="reconnecting"] i {
+    animation: ochatting-voice-shimmer 1.2s ease-in-out infinite;
+  }
+
+  @keyframes ochatting-voice-breathe {
+    0%, 100% { transform: scaleY(0.3); }
+    50% { transform: scaleY(0.55); }
+  }
+
+  @keyframes ochatting-voice-bounce {
+    0%, 100% { transform: scaleY(0.3); }
+    50% { transform: scaleY(1); }
+  }
+
+  @keyframes ochatting-voice-shimmer {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ochatting-voice-bar,
+    .ochatting-voice-wave i {
+      animation: none;
+    }
+  }
+
   /* ─── Selection Pill ─────────────────────────────────────────────────── */
   .ochatting-selection-pill {
     display: flex;
@@ -2879,7 +3186,8 @@
       font-size: 16px; /* Prevents iOS zoom on focus */
     }
 
-    .ochatting-input-bar {
+    .ochatting-input-bar,
+    .ochatting-voice-bar {
       --ochatting-control: 44px; /* touch size */
       gap: 10px;
       padding: 10px 12px;

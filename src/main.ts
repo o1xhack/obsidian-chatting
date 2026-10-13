@@ -35,11 +35,14 @@ import {
 } from "./chat-state";
 import { ChatGPTOAuthStore } from "./auth/chatgptOAuthStore";
 import { ChatGPTOAuthService } from "./auth/chatgptOAuth";
-import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, CATALOG_TTL, cachedCatalog, catalogIdentity, normalizeCatalogState, refreshCatalog } from "./api/model-catalog";
+import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, CATALOG_TTL, cachedCatalog, catalogIdentity, codexClientVersion, normalizeCatalogState, refreshCatalog } from "./api/model-catalog";
 import { setChatGPTOAuthService } from "./api/chatgpt-oauth";
 import { debugLog, readDebugLog, setDebugLogging } from "./debug";
 import { screenAwake } from "./platform/screen-awake";
 import { appLifecycle } from "./platform/lifecycle";
+import { runCapabilityCheck } from "./diagnostics/capability-check";
+import type { VoiceRoute } from "./voice/session";
+import { VOICES, codexVoiceRoute } from "./voice/codex";
 
 const PLUGIN_ID = "chatting-with-ai";
 const LEGACY_PLUGIN_ID = "obsidian-chatting";
@@ -213,6 +216,16 @@ export default class ChatPlugin extends Plugin {
       callback: () => void this.copyDebugLog(),
     });
 
+    // Whether live voice and streaming work on this device (microphone, WebRTC, fetch).
+    this.addCommand({
+      id: "check-device-capabilities",
+      name: "Check device capabilities (voice, streaming)",
+      callback: () => void runCapabilityCheck(this.app, {
+        openai: this.loadApiKey("openai"),
+        anthropic: this.loadApiKey("anthropic"),
+      }, this.voiceRoute()),
+    });
+
     // Editor command: chat about the current note (only when editor is active)
     this.addCommand({
       id: "chat-about-note",
@@ -283,12 +296,26 @@ export default class ChatPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.getChatView()?.endVoice();
     for (const agent of this.agents.values()) agent.abort();
     screenAwake.reset();
     // The tab that showed the AI's edits closes with the plugin (and Obsidian).
     closeFollowTab(this.app);
     void this.saveChatHistory();
     this.unloaded = true;
+  }
+
+  /** The voice route: the ChatGPT sign-in on Codex's voice service; null when signed out. */
+  voiceRoute(): VoiceRoute | null {
+    const s = this.settings;
+    const auth = this.chatgptOAuth;
+    if (!auth?.getCredential()) return null;
+    return codexVoiceRoute(auth, s.voice, () => codexClientVersion(s.modelCatalog));
+  }
+
+  /** Show or hide the chat's voice button (the voice route's sign-in changed). */
+  updateVoiceAvailable(): void {
+    this.getChatView()?.updateVoiceAvailable();
   }
 
   // ─── Chat operations ────────────────────────────────────────────────
@@ -945,6 +972,7 @@ export default class ChatPlugin extends Plugin {
     view?.updateModel(this.modelHeaderLabel());
     view?.updateEnterSends();
     view?.updateFollowEdits();
+    view?.updateVoiceAvailable();
   }
 
   /** Copy `debug.log` to the clipboard (the "Debug log" setting writes it). */
@@ -1269,6 +1297,9 @@ function normalizeSettings(value: unknown): Partial<ChatSettings> {
       .filter((server) => typeof server.id === "string" && typeof server.name === "string" && typeof server.url === "string")
       .map((server) => ({ id: server.id as string, name: server.name as string, url: server.url as string, enabled: server.enabled === true }));
   }
+  // Only Codex's voices: the service refuses a call with another one.
+  if (typeof value.voice === "string" && VOICES.includes(value.voice)) settings.voice = value.voice;
+  if (value.voiceMicMode === "hands-free" || value.voiceMicMode === "hold") settings.voiceMicMode = value.voiceMicMode;
   settings.modelCatalog = normalizeCatalogState(value.modelCatalog);
   return settings;
 }

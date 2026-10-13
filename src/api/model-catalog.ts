@@ -118,6 +118,10 @@ export function normalizeCatalogState(value: unknown): CatalogState {
 export function getCatalogModels(provider: Provider): ModelOption[] | undefined { return activeModels.get(provider); }
 export function clearCatalogModels(provider: Provider): void { activeModels.delete(provider); }
 export function getCodexClientVersion(): string { return clientVersion; }
+/** The latest stable Codex CLI version, looked up at most once a day (the voice route sends it). */
+export function codexClientVersion(state: CatalogState | undefined): Promise<string> {
+  return state ? updateClientVersion(state, false) : Promise.resolve(clientVersion);
+}
 export function migrateOAuthModel(slug: string): string {
   return slug ? slug.replace(/^gpt-(\d+)-(\d{1,2})(?=-|$)/, "gpt-$1.$2") : DEFAULT_PROVIDER_MODELS["chatgpt-oauth"];
 }

@@ -245,7 +245,7 @@ test('The setting: on by default, kept in data.json, in both settings paths; the
   const drawn = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderFollowEdits: setting => drawn.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderVoice: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderFollowEdits: setting => drawn.push(setting) });
   tab.display();
   assert.equal(drawn.length, 1);
 
@@ -253,7 +253,7 @@ test('The setting: on by default, kept in data.json, in both settings paths; the
   const { app } = vaultApp();
   const chatPlugin = await loaded({});
   const view = new api.ObsidianChatView({}, chatPlugin);
-  const chat = { setEnterSends() {}, setFollowEdits(value) { chat.followEdits = value; }, setModel() {} };
+  const chat = { setEnterSends() {}, setFollowEdits(value) { chat.followEdits = value; }, setModel() {}, setVoiceAvailable() {} };
   view.chatContainer = chat;
   chatPlugin.app = { ...app, workspace: { getLeavesOfType: () => [{ view }] } };
   const saved = [];

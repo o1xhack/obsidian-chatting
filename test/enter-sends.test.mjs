@@ -42,7 +42,7 @@ test('Settings: the row works in both settings paths and saves the toggle', asyn
   const drawn = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderEnterSends: setting => drawn.push(setting) });
+    renderWebSearch: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderVoice: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderEnterSends: setting => drawn.push(setting) });
   tab.display();
   assert.equal(drawn.length, 1);
 });
@@ -65,7 +65,7 @@ test("Ctrl/Cmd+Enter, which Obsidian keeps as a hotkey, reaches the chat through
 test('The chat view passes the setting to the chat, also when settings are saved', async () => {
   const plugin = await loaded({});
   const view = new api.ObsidianChatView({}, plugin);
-  const chat = { setEnterSends(value) { chat.enterSends = value; }, setFollowEdits() {}, setModel() {} };
+  const chat = { setEnterSends(value) { chat.enterSends = value; }, setFollowEdits() {}, setModel() {}, setVoiceAvailable() {} };
   view.chatContainer = chat;
   plugin.settings.enterSends = false;
   view.updateEnterSends();

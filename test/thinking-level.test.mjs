@@ -196,7 +196,7 @@ test('Settings before Obsidian 1.13: display() shows the thinking level only whe
   const shown = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderChatGPTOAuthSection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderThinkingLevel: setting => shown.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderVoice: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderThinkingLevel: setting => shown.push(setting) });
   tab.display();
   assert.equal(shown.length, 0);
   tab.catalogModels = settingModels;

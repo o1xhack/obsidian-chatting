@@ -205,7 +205,7 @@ test('Settings: the Chats group in both settings paths; Saved chats counts the c
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
     renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore,
-    renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
+    renderVoice: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
     renderCompactionPoint: setting => drawn.push(['point', setting]), renderSavedChats: setting => drawn.push(['saved', setting]) });
   tab.display();
   assert.deepEqual(drawn.map(([what]) => what), ['point', 'saved']);

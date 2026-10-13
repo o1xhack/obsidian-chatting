@@ -243,7 +243,7 @@ test('Settings before Obsidian 1.13: display() draws the folder row, a row per s
   const drawn = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderVoice: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
     renderSkillsFolder: () => drawn.push('folder'), renderSkill: (setting, skill) => drawn.push(skill.name), renderNewSkill: (setting, empty) => drawn.push(`new, empty: ${empty}`) });
   delete tab.display;
   tab.display();

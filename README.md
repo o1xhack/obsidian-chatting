@@ -29,6 +29,7 @@
 - **Back from the background** — switch apps or lock the phone while an answer runs: when you come back, a request the phone cut off is sent again ("Resuming…"), and if the phone closed Obsidian meanwhile, the chat offers **Continue** to finish the interrupted answer.
 - **Context and cost** — a small ring in the chat header shows how full the model's context is; click it for the tokens the chat used, the estimated cost of the chat and of the last answer (from the provider's list prices; with the ChatGPT account, a link to your plan's usage instead), and **Compact now**.
 - **Long chats** — before the context is full, the earlier part of the chat is summarized so it can go on: by the provider where it offers that (Anthropic, OpenAI, and the ChatGPT account where its backend accepts it), otherwise by the plugin with the same model. A quiet note in the chat shows where. **Settings → Compaction point** sets when. There is no limit on the number of messages: the chat keeps them all, shows its last 20 turns and loads earlier ones as you scroll up.
+- **Talk to it** — a voice conversation in the current chat: say what you want, hear the answer, interrupt, add to a running task. It runs on Codex's voice service with your ChatGPT account (included in the plan); the work is done by the chat model you selected. See [Voice](#-voice).
 - **Selection scope** — highlight text in any note, send it to chat, the assistant edits only inside the selection.
 - **Secrets in the OS keychain** — never in `data.json`, never synced across devices.
 - **MCP servers** — with an Anthropic or OpenAI API key, add remote MCP servers (public https, optional token) in the settings; the provider connects to them and the AI uses their tools, shown as steps in the chat. They run without asking, so add only servers you trust. Not available with the ChatGPT account.
@@ -54,6 +55,19 @@ Assistant
 ```
 
 The agent reads before it edits, prefers small surgical changes over rewrites, and doesn't re-ask once you confirm.
+
+## 🎤 Voice
+
+Talk with the assistant in the current chat and hear the answer. Voice needs the **ChatGPT account** sign-in (the same as the ChatGPT provider; connect it there or under **Settings → Chatting with AI → Voice**), whichever provider you chat with. It uses Codex's voice service, the one OpenAI's Codex app talks through, so it is included in your ChatGPT plan; the chat model's answers are billed as usual. Like the ChatGPT provider's Codex route, OpenAI doesn't document it for other apps, so it may change or stop working.
+
+- **Start:** the voice button (a circle with sound-wave bars) sits where Send is. It shows while the input is empty, nothing is attached, no answer is running and the AI isn't waiting for your answer to a question.
+- **During a call** the voice bar replaces the input row: the microphone button (tap to mute) or, with *Hold to talk*, the button you hold while speaking; a line showing your current words, or else whether the assistant is listening, working or speaking; and a red **✕** to end.
+- **In the chat:** your requests and the answers appear as chat messages, tool steps included, and the voice reads the answer out in short. Small talk the voice handles itself is only heard.
+- **Say more while it works:** what you add is passed to the running task instead of starting over. If the AI asks you a question, answer it by voice.
+- **Ending:** the **✕**, switching or starting a chat, Clear, or closing the chat panel. On a phone the microphone goes off while Obsidian is in the background; the call reconnects when you come back and ends after a minute away.
+- **Settings:** **ChatGPT account for voice** (connected or not), **Voice** (how it sounds) and **Microphone** (*Hands-free* or *Hold to talk*).
+
+Voice is tested on desktop and Android (including a Bluetooth headset); iOS isn't verified yet. The phone asks for microphone access the first time. **Check device capabilities (voice, streaming)** in the command palette shows what the device supports (microphone, live audio, streaming) in a window you can copy; with your keys it sends short test requests (which cost a little), and with the ChatGPT account it starts a voice call for a moment.
 
 ## 🎯 Selection scope
 
@@ -151,9 +165,10 @@ Below **Model**, **Thinking level** offers *Default* plus the levels the model l
 - **MCP servers** — remote MCP servers for Anthropic and OpenAI: a name (letters, digits, `-`, `_`), a public https address, an optional token and on/off each. The provider connects to the servers that are on and calls their tools without asking; each call shows as a step ("Used create_issue on linear"). Tokens are kept in the OS keychain.
 - **Compaction point** — when a long chat is summarized: a share of the selected model's context (80 % by default, 50k tokens at least), set with a slider or as a number of tokens; for a model whose context size is unknown, a number of tokens (empty: only when a request is too long). Earlier saves cost and time per answer; the model then keeps fewer details.
 - **Saved chats** — how many chats are saved and their size. A chat over 5 MB shows its size in the chats list, so you can delete it if you no longer need it.
-- **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
+- **Voice** — the ChatGPT account voice uses, the voice and the microphone mode (see [Voice](#-voice)).
+- **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors, and in voice every event and what was said on both sides (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
 
-While an answer is being generated, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.
+While an answer is being generated or a voice call runs, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.
 
 ## 🚀 Quick start
 
@@ -244,7 +259,7 @@ Have a request? Open an issue.
 <details>
 <summary><b>Will my notes be uploaded somewhere?</b></summary>
 
-Only what the agent needs for the current turn. When you ask a question, the agent decides which tools to call — `read_document`, `search_vault`, etc. — and the contents fetched by those calls (plus the active note context) are sent to your chosen provider. Images and files you attach are sent with that message and kept in the local chat history until you clear or delete the chat or the message is older than the part of the chat the plugin keeps for the provider; so are images the agent looks at (`view_image`, `view_canvas`) and files it reads (`read_file` on a PDF or Office file). So do the names and descriptions of your skills; a skill's `SKILL.md` goes when the AI uses the skill or you name it with `/`. Nothing is uploaded in the background. There is no vault index. Your vault's root `AGENTS.md`, if there is one, goes with every message; a folder's `AGENTS.md` goes with the first tool result in that folder. When the agent reads a web page (`read_web_page`), your device loads that address, as a browser would, and the page's text goes to your provider like a note's. MCP servers you add in the settings get their requests from your provider, not your device: each message names the servers that are on, with their tokens (kept in the OS keychain, never in plugin files), and the provider connects to them for you; what their tools return goes to the model. Streamed answers change only how an answer arrives, not where requests go or what they contain.
+Only what the agent needs for the current turn. When you ask a question, the agent decides which tools to call — `read_document`, `search_vault`, etc. — and the contents fetched by those calls (plus the active note context) are sent to your chosen provider. Images and files you attach are sent with that message and kept in the local chat history until you clear or delete the chat or the message is older than the part of the chat the plugin keeps for the provider; so are images the agent looks at (`view_image`, `view_canvas`) and files it reads (`read_file` on a PDF or Office file). So do the names and descriptions of your skills; a skill's `SKILL.md` goes when the AI uses the skill or you name it with `/`. Nothing is uploaded in the background. There is no vault index. Your vault's root `AGENTS.md`, if there is one, goes with every message; a folder's `AGENTS.md` goes with the first tool result in that folder. When the agent reads a web page (`read_web_page`), your device loads that address, as a browser would, and the page's text goes to your provider like a note's. MCP servers you add in the settings get their requests from your provider, not your device: each message names the servers that are on, with their tokens (kept in the OS keychain, never in plugin files), and the provider connects to them for you; what their tools return goes to the model. Streamed answers change only how an answer arrives, not where requests go or what they contain. While a voice conversation runs, your microphone audio, the last few chat messages (as text) and the path of the open note go to OpenAI (with the ChatGPT plan route, to `chatgpt.com`).
 
 </details>
 
