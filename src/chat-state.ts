@@ -38,6 +38,11 @@ export interface ConversationRecord {
   agentMessages: UnifiedMessage[];
   /** For the model with the next turn: what the user did meanwhile (e.g. undid an answer's changes). */
   notes?: string[];
+  /**
+   * Typed after its turn's last step while it ran in the background: they
+   * run when the chat is shown again (optional, so no new format version).
+   */
+  pendingMessages?: string[];
 }
 
 /** `chat-state.json` as this version writes it. */
@@ -100,6 +105,7 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
       const titleSourceTurnId = typeof item.titleSourceTurnId === "string" ? item.titleSourceTurnId
         : item.titleSourceTurnId === null || automaticTitle !== derived ? null : first?.turnId;
       const notes = arrayOf<unknown>(item.notes).filter((note): note is string => typeof note === "string");
+      const pendingMessages = arrayOf<unknown>(item.pendingMessages).filter((text): text is string => typeof text === "string");
       return {
         id: item.id as string,
         title: customTitle ? item.title as string : automaticTitle,
@@ -111,6 +117,7 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
         chatHistory,
         agentMessages: withoutLargeToolText(withoutOldToolImages(trimHistory(arrayOf<UnifiedMessage>(item.agentMessages), MAX_CONVERSATION_LENGTH))),
         ...(notes.length ? { notes } : {}),
+        ...(pendingMessages.length ? { pendingMessages } : {}),
       };
     });
   if (conversations.length === 0) conversations.push(newConversation());

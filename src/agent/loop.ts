@@ -77,6 +77,8 @@ export class AgentLoop {
   private loopVersion = 0;
   /** Messages the user added while the loop works; sent with its next request (`steer`). */
   private steered: string[] = [];
+  /** Turns holding this loop (`hold()`). */
+  private holds = 0;
   /** The vault root's AGENTS.md as the last turn read it (in the system prompt). */
   private vaultInstructions: string | null = null;
   /** The skills part of the system prompt, read with the instructions. */
@@ -162,6 +164,24 @@ export class AgentLoop {
       this.messages = retained;
       this.invalidateHistoryCursor();
     }
+  }
+
+  /**
+   * Marks a turn as running from before it starts to after it ends (the
+   * chat view holds it): the plugin keeps a running conversation's loop
+   * when the user switches away. Returns the release.
+   */
+  hold(): () => void {
+    this.holds++;
+    let released = false;
+    return () => {
+      if (!released) this.holds--;
+      released = true;
+    };
+  }
+
+  isRunning(): boolean {
+    return this.holds > 0;
   }
 
   /** Nothing in the API history yet. */
