@@ -4,6 +4,7 @@ import { ProviderError, StreamCutError } from "./errors";
 import { StreamDropped, streamSSE } from "./stream";
 import { asRecord, getNestedString, isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
+import { afterCompaction, compactThreshold } from "../agent/compaction";
 import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 import type {
   ChatSettings,
@@ -15,9 +16,13 @@ import type {
   ImageAttachment,
   FileAttachment,
   StreamOptions,
+  TokenUsage,
 } from "../types";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+
+/** The beta header of threshold compaction. */
+export const ANTHROPIC_COMPACTION_BETA = "compact-2026-01-12";
 
 /**
  * Thinking mode by model name, for models without catalog data (a custom ID,
@@ -67,12 +72,22 @@ export async function sendAnthropicMessage(
         cache_control: { type: "ephemeral" },
       },
     ],
-    messages: withoutOldToolImages(messages).map(msg => toAnthropicMessage(msg, model, identity, activeServers(settings))),
+    // After a compaction, from its message on: the API ignores what came before.
+    messages: withoutOldToolImages(afterCompaction(messages, (message) => canReplay(message, model, identity)))
+      .map(msg => toAnthropicMessage(msg, model, identity, activeServers(settings))),
   };
 
   // The thinking mode the model catalog reports (`/v1/models` capabilities);
   // models it has no data for keep the rule by model name.
   const option = catalogModel("anthropic", model);
+
+  // Threshold compaction where the model list says the model has it.
+  const betas: string[] = [];
+  const trigger = option?.compaction ? compactThreshold("anthropic", option) : undefined;
+  if (trigger) {
+    body.context_management = { edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: trigger } }] };
+    betas.push(ANTHROPIC_COMPACTION_BETA);
+  }
   const thinkingType = option?.thinkingType ?? thinkingTypeByName(model);
 
   if (thinkingType === "adaptive") {
@@ -117,6 +132,7 @@ export async function sendAnthropicMessage(
   // Remote MCP servers, connected by Anthropic (`api/mcp.ts`).
   const servers = activeServers(settings);
   if (servers.length) {
+    betas.push(ANTHROPIC_MCP_BETA);
     const mcp = anthropicMcp(servers);
     body.mcp_servers = mcp.mcp_servers;
     body.tools = [...Array.isArray(body.tools) ? body.tools as Record<string, unknown>[] : [], ...mcp.toolsets];
@@ -132,7 +148,7 @@ export async function sendAnthropicMessage(
       accept: "text/event-stream",
       // Required for the CORS answer to `fetch` from Obsidian's origins (mobile).
       "anthropic-dangerous-direct-browser-access": "true",
-      ...(servers.length ? { "anthropic-beta": ANTHROPIC_MCP_BETA } : {}),
+      ...(betas.length ? { "anthropic-beta": betas.join(",") } : {}),
     },
     body: requestBody,
   }, collected.onEvent, stream.signal).catch((error: unknown) => {
@@ -162,10 +178,40 @@ export async function sendAnthropicMessage(
     // must be returned unchanged. UI content is deliberately separate.
     replay: { provider: "anthropic", model, identity, items: data.content },
     stopReason: normalizeStopReason(data.stop_reason),
-    usage: data.usage
-      ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
-      : undefined,
+    usage: data.usage,
     ...withServerCalls(anthropicServerCalls(data.content)),
+    ...compactionOf(data.content),
+  };
+}
+
+/** A `compaction` block in the answer: the context was summarized, readably. */
+function compactionOf(blocks: AnthropicContentBlock[]): Pick<UnifiedResponse, "compaction"> {
+  const block = [...blocks].reverse().find((item) => item.type === "compaction");
+  if (!block) return {};
+  return { compaction: typeof block.content === "string" && block.content ? { summary: block.content } : {} };
+}
+
+/**
+ * Anthropic usage: `input_tokens` counts only the uncached input, so the
+ * context is it plus `cache_read_input_tokens` and
+ * `cache_creation_input_tokens`. A compaction pass (`iterations` of type
+ * `compaction`) isn't in the top-level counts.
+ */
+function anthropicUsage(usage: Record<string, unknown>): TokenUsage {
+  const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const cached = number(usage.cache_read_input_tokens);
+  const written = number(usage.cache_creation_input_tokens);
+  const compaction = Array.isArray(usage.iterations)
+    ? usage.iterations.filter(isRecord).filter((item) => item.type === "compaction")
+    : [];
+  const compactionInput = compaction.reduce((sum, item) => sum + number(item.input_tokens), 0);
+  const compactionOutput = compaction.reduce((sum, item) => sum + number(item.output_tokens), 0);
+  return {
+    inputTokens: number(usage.input_tokens) + cached + written,
+    outputTokens: number(usage.output_tokens),
+    ...(cached ? { cachedInputTokens: cached } : {}),
+    ...(written ? { cacheWriteTokens: written } : {}),
+    ...(compactionInput || compactionOutput ? { compactionInputTokens: compactionInput, compactionOutputTokens: compactionOutput } : {}),
   };
 }
 
@@ -220,6 +266,9 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
             block.signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
           } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
             inputJson.set(index, (inputJson.get(index) ?? "") + delta.partial_json);
+          } else if (delta.type === "compaction_delta" && typeof delta.content === "string") {
+            // The whole summary of a compaction, in one delta.
+            block.content = (typeof block.content === "string" ? block.content : "") + delta.content;
           } else if (delta.type === "citations_delta" && delta.citation !== undefined) {
             block.citations = [...(Array.isArray(block.citations) ? block.citations as unknown[] : []), delta.citation];
           }
@@ -282,10 +331,7 @@ interface AnthropicContentBlock extends Record<string, unknown> {
 interface AnthropicResponse {
   content: AnthropicContentBlock[];
   stop_reason?: string;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-  };
+  usage?: TokenUsage;
 }
 
 function parseAnthropicResponse(value: unknown): AnthropicResponse {
@@ -293,12 +339,7 @@ function parseAnthropicResponse(value: unknown): AnthropicResponse {
   const content = Array.isArray(value.content)
     ? value.content.filter(isAnthropicContentBlock)
     : [];
-  const usage = isRecord(value.usage)
-    ? {
-        input_tokens: typeof value.usage.input_tokens === "number" ? value.usage.input_tokens : 0,
-        output_tokens: typeof value.usage.output_tokens === "number" ? value.usage.output_tokens : 0,
-      }
-    : undefined;
+  const usage = isRecord(value.usage) ? anthropicUsage(value.usage) : undefined;
   return {
     content,
     stop_reason: typeof value.stop_reason === "string" ? value.stop_reason : undefined,
@@ -315,8 +356,13 @@ function normalizeStopReason(value: string | undefined): UnifiedResponse["stopRe
   return "end_turn";
 }
 
+/** An Anthropic answer of this model and account: its native blocks go back unchanged. */
+function canReplay(msg: UnifiedMessage, model: string, identity: string): boolean {
+  return msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity);
+}
+
 function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[]): Record<string, unknown> {
-  if (msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity)) {
+  if (canReplay(msg, model, identity) && msg.replay) {
     const content = withoutGoneServerCalls(msg.replay.items, servers);
     // Nothing but calls of servers that are gone: sent as text below.
     if (content.length) return { role: msg.role, content };

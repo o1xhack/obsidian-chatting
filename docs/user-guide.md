@@ -111,7 +111,9 @@ Desktop ChatGPT login opens your browser and returns automatically through a loc
 
 ### Model list updates
 
-All three providers load their authenticated model catalogs in settings. Lists are cached for 24 hours and survive restarts. Settings show the last list immediately, then refresh it in the background when expired. No daily timer or request on every settings visit is scheduled. The refresh button checks immediately. Failed requests retain the last list and selected model; account/API-key changes use a separate cache.
+All three providers load their authenticated model catalogs in settings. Lists are cached for 24 hours and survive restarts. Settings show the last list immediately, then refresh it in the background when expired. No daily timer or request on every settings visit is scheduled. The refresh button checks immediately. Failed requests retain the last list and selected model; account/API-key changes use a separate cache. An expired list is also loaded once when Obsidian starts, since the context ring needs each model's window.
+
+The lists give each model's context window (for a ChatGPT account, the Codex catalog's window and compaction point). Anthropic's model prices come from Anthropic's public pricing page, read with the list. OpenAI's model list has neither, so with an OpenAI API key the selected model's window and prices come from its public documentation page on `developers.openai.com`, read at most once a day. Nothing about you is sent to either page.
 
 ChatGPT OAuth discovers the latest stable client version from OpenAI's official GitHub release metadata and keeps the last known version or bundled fallback if discovery fails. Reasoning effort, reasoning summaries and parallel-tool options follow catalog metadata where provided. New model IDs normally require no plugin update, but upstream protocol changes can still require one. Custom model IDs survive reload. Catalog data contains no credentials.
 

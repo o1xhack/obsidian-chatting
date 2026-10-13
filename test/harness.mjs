@@ -52,6 +52,9 @@ export const bundled = await build({
     export { AttachmentPreparation } from './src/ui/attachment-preparation';
     export { buildSystemPrompt } from './src/agent/system-prompt';
     export { streamSSE, createSSEParser, resetStreamTransport } from './src/api/stream';
+    export * as usage from './src/agent/usage';
+    export * as summary from './src/agent/summary';
+    export { ProviderError } from './src/api/errors';
   `, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
   plugins: [{ name: 'obsidian-test-transport', setup(build) {
@@ -119,6 +122,11 @@ export const bundled = await build({
 });
 export const api = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 export const settings = provider => ({ provider, model: provider === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-5.5', apiKey: 'fake-test-key', maxIterations: 20, enableWebSearch: true });
+// `settings(provider)` with a saved model list of these models for the test account.
+export async function withCatalog(provider, models, extra = {}) {
+  const identity = await api.catalogIdentity(provider, provider === 'chatgpt-oauth' ? 'fake-account' : 'fake-test-key');
+  return { ...settings(provider), modelCatalog: { entries: [{ provider, identity, fetchedAt: Date.now(), models }] }, ...extra };
+}
 export const image = { id: 'image', fileName: 'test.png', mediaType: 'image/png', data: 'fake-base64', sizeBytes: 1 };
 export const text = value => ({ type: 'text', text: value });
 export const call = (id, name, input) => ({ type: 'tool_use', id, name, input });

@@ -32,7 +32,7 @@ import {
 } from "./chat-state";
 import { ChatGPTOAuthStore } from "./auth/chatgptOAuthStore";
 import { ChatGPTOAuthService } from "./auth/chatgptOAuth";
-import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, cachedCatalog, catalogIdentity, normalizeCatalogState } from "./api/model-catalog";
+import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, CATALOG_TTL, cachedCatalog, catalogIdentity, normalizeCatalogState, refreshCatalog } from "./api/model-catalog";
 import { setChatGPTOAuthService } from "./api/chatgpt-oauth";
 import { debugLog, readDebugLog, setDebugLogging } from "./debug";
 import { screenAwake } from "./platform/screen-awake";
@@ -798,13 +798,26 @@ export default class ChatPlugin extends Plugin {
     return getModelHeaderLabel(provider, model, thinkingLevel);
   }
 
-  /** Activate the saved model list of the current provider and account (no network). */
+  /**
+   * Activate the saved model list of the current provider and account. A
+   * list older than a day (or none) is loaded again in the background once
+   * Obsidian has started: the context ring needs the model's window.
+   */
   private async activateModelCatalog(): Promise<void> {
     const { provider, apiKey, modelCatalog } = this.settings;
     const credential = provider === "chatgpt-oauth" ? this.chatgptOAuth.getCredential() : null;
     const secretIdentity = provider === "chatgpt-oauth" ? credential?.accountId || credential?.accessToken : apiKey;
     if (!secretIdentity || !modelCatalog) return;
-    cachedCatalog(modelCatalog, provider, await catalogIdentity(provider, secretIdentity));
+    const identity = await catalogIdentity(provider, secretIdentity);
+    const entry = cachedCatalog(modelCatalog, provider, identity);
+    if (!entry || Date.now() - entry.fetchedAt >= CATALOG_TTL) {
+      this.app.workspace.onLayoutReady(() => {
+        refreshCatalog(modelCatalog, provider, identity, apiKey, this.chatgptOAuth)
+          // Saving updates the chat header and the ring.
+          .then(() => this.saveSettings())
+          .catch(() => undefined);
+      });
+    }
   }
 
   /** Load the correct API key when provider changes */

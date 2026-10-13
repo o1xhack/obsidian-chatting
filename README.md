@@ -66,6 +66,8 @@ Skills use the Claude Code / Codex folder format. Their instructions and support
 
 Create, switch, rename and delete separate chats. Each has its own provider conversation, and chats resume after restarting Obsidian. An answer keeps running when you switch to another chat; the list shows *Answering…*, and a notice says when it is ready or has a question. If you switch apps or lock the phone while an answer runs, a request the phone cut off is sent again when you come back; if the phone closed Obsidian meanwhile, **Continue** finishes the interrupted answer. While an answer runs, you can type and send more: the message joins the running task (shown as *Queued* until the assistant takes it in). You can edit a previous message, copy an answer or regenerate the last answer. Editing or regenerating does not undo changes already made to vault files.
 
+A small ring in the chat header shows how full the model's context is; click it for the tokens the chat used, its estimated cost (with the ChatGPT account, a link to your plan's usage) and **Compact now**. Before the context is full, the earlier part of the chat is summarized so it can go on: by the provider where it offers that, otherwise by the plugin with the same model.
+
 Answers appear as the model writes them and render Markdown, tables, wiki links and math. Read earlier messages without being pulled back to the bottom, then jump to the latest reply when you are ready.
 
 ## ⚙️ Three ways to connect

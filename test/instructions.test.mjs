@@ -74,6 +74,23 @@ test('A folder\'s AGENTS.md comes with the first result touching it, outer folde
   assert.match(results[0].content, /from Work\/AGENTS\.md[\s\S]*from Work\/Sub\/AGENTS\.md/);
 });
 
+test('A folder\'s AGENTS.md given before a compaction comes again with the next result there', async () => {
+  const { app, loop } = loopWith({ 'Work/AGENTS.md': 'Work notes: keep a Status line.', 'Work/Plan.md': 'Plan' });
+  const rules = await api.instructions.folderInstructions(app, ['Work/Plan.md'], new Set());
+  // The rules came with an earlier result; a compaction then summarized that part away.
+  loop.importMessages([
+    { role: 'user', content: 'Read the plan', turnId: 'old' },
+    { role: 'assistant', content: [call('r0', 'read_document', { path: 'Work/Plan.md' })] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r0', content: `Plan\n\n${rules}`, instructionSources: ['Work/AGENTS.md'], instructionOffset: 4 }] },
+    { role: 'assistant', content: [text('Read it.')], compaction: { summary: 'The user had the plan read.' } },
+  ]);
+  const requests = transport((body, index) => index === 0
+    ? response('anthropic', [call('r1', 'read_document', { path: 'Work/Plan.md' })], 'tool_use')
+    : response('anthropic', [text('done')], 'end_turn', index));
+  await loop.run('Read it again', callbacks());
+  assert.match(resultText(toolResults(requests[1]).at(-1)), /keep a Status line/);
+});
+
 test('Tools on the active note (no path) count for its folder', () => {
   const app = { workspace: { getActiveFile: () => ({ path: 'Work/Plan.md' }) } };
   assert.deepEqual(api.instructions.toolPaths(app, 'read_document', {}), ['Work/Plan.md']);
