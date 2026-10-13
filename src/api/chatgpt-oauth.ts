@@ -25,7 +25,6 @@ import type {
   UnifiedToolDef,
   UnifiedResponse,
 } from "../types";
-import { CHATGPT_OAUTH_DEFAULT_MODEL } from "../types";
 import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
 import { ProviderError, retryAfterMs } from "./errors";
 import {
@@ -114,7 +113,7 @@ export async function sendChatGPTOAuthMessage(
   if (settings.modelCatalog) {
     cachedCatalog(settings.modelCatalog, "chatgpt-oauth", identity);
   }
-  const model = settings.model || CHATGPT_OAUTH_DEFAULT_MODEL;
+  const model = settings.model;
 
   const baseBody: Record<string, unknown> = {
     model,
@@ -132,7 +131,7 @@ export async function sendChatGPTOAuthMessage(
     parallel_tool_calls: oauthParallelTools(model),
   };
 
-  const reasoning = oauthReasoning(model);
+  const reasoning = oauthReasoning(model, settings.thinkingLevel);
   if (reasoning) {
     baseBody.reasoning = reasoning;
     // Codex requires the encrypted reasoning payload to be threaded through

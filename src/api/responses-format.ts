@@ -1,5 +1,8 @@
-import type { ContentBlock, Provider, UnifiedMessage, UnifiedResponse } from "../types";
+import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, UnifiedMessage, UnifiedResponse } from "../types";
 import { ProviderError } from "./errors";
+import { withoutOldToolImages } from "../agent/history";
+import { fileAsText, isSentAsFile } from "../files/attachments";
+import { openaiServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 
 /** Encode both fresh input and restored history without losing tool pairs. */
 export function buildResponsesInput(
@@ -7,11 +10,13 @@ export function buildResponsesInput(
   provider: Extract<Provider, "openai" | "chatgpt-oauth">,
   model?: string,
   identity?: string,
+  /** The MCP servers of this request; calls of others aren't replayed. */
+  servers: McpServer[] = [],
 ): Record<string, unknown>[] {
   const items: Record<string, unknown>[] = [];
-  for (const message of messages) {
+  for (const message of withoutOldToolImages(messages)) {
     if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
-      items.push(...message.replay.items);
+      items.push(...withoutGoneServerCalls(message.replay.items, servers));
       continue;
     }
     const content: Record<string, unknown>[] = [];
@@ -29,18 +34,53 @@ export function buildResponsesInput(
           ? { type: "output_text", text: block.text, annotations: [] }
           : { type: "input_text", text: block.text });
       } else if (block.type === "image" && block.image && message.role === "user") {
-        content.push({ type: "input_image", image_url: `data:${block.image.mediaType};base64,${block.image.data}`, detail: "auto" });
+        content.push(inputImage(block.image));
+      } else if (block.type === "file" && block.file && message.role === "user") {
+        content.push(inputFile(block.file));
       } else if (block.type === "tool_use" && block.id && block.name) {
         flush();
         items.push({ type: "function_call", call_id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}) });
       } else if (block.type === "tool_result" && block.tool_use_id) {
         flush();
-        items.push({ type: "function_call_output", call_id: block.tool_use_id, output: block.content ?? "" });
+        items.push({ type: "function_call_output", call_id: block.tool_use_id, output: functionOutput(block) });
       }
     }
     flush();
   }
   return items;
+}
+
+/**
+ * A tool result's `output`. With images or files it is a content array: the
+ * Responses API allows `output` to be a string or a list of `input_text`,
+ * `input_image` and `input_file` items (function_call_output in the API
+ * reference). The ChatGPT route takes the same request format, so both
+ * providers get the image or file inside the result rather than in an
+ * extra user message.
+ */
+function functionOutput(block: ContentBlock): string | Record<string, unknown>[] {
+  const text = block.content ?? "";
+  if (!block.images?.length && !block.files?.length) return text;
+  return [
+    { type: "input_text", text: text || "(attached)" },
+    ...(block.images ?? []).map(inputImage),
+    ...(block.files ?? []).map(inputFile),
+  ];
+}
+
+function inputImage(image: ImageAttachment): Record<string, unknown> {
+  return { type: "input_image", image_url: `data:${image.mediaType};base64,${image.data}`, detail: "auto" };
+}
+
+/**
+ * A file: PDF and Office files as `input_file` with inline base64 data (the
+ * model reads them itself, PDFs with their page images), text files as text.
+ */
+function inputFile(file: FileAttachment): Record<string, unknown> {
+  if (isSentAsFile(file)) {
+    return { type: "input_file", filename: file.fileName, file_data: `data:${file.mediaType};base64,${file.data}` };
+  }
+  return { type: "input_text", text: fileAsText(file) };
 }
 
 /** Preserve native reasoning/search/refusal items even when they have no UI block. */
@@ -88,6 +128,8 @@ export function fromResponsesOutput(
     replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
     usage: usage ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) } : undefined,
+    // Tools OpenAI called on MCP servers; their items stay in the replay as sent.
+    ...withServerCalls(openaiServerCalls(output)),
   };
 }
 

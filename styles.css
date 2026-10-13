@@ -11,6 +11,56 @@
   flex-direction: column;
 }
 
+/* Obsidian pads every side panel (12px at the sides and top, 32px at the
+   bottom) and scrolls it; full-height views such as Backlinks, Sync, PDF
+   and Canvas turn that off. The chat scrolls its own message list and pads
+   its own parts (header, messages, input), so the padding only left an
+   empty band around them. On desktop the status bar is fixed over the
+   bottom right corner of the window, and the bottom padding is what keeps
+   side panels clear of it: kept, except in the left sidebar, which the
+   status bar never covers. */
+body:not(.is-mobile) .workspace-leaf-content[data-type="ochatting-view"] .view-content {
+  padding: 0 0 var(--size-4-8);
+  overflow: hidden;
+}
+
+body:not(.is-mobile) .mod-left-split .workspace-leaf-content[data-type="ochatting-view"] .view-content {
+  padding-bottom: 0;
+}
+
+/* Phones and tablets: none at all. The sidebar's container already keeps
+   the safe area (the gesture bar) free below the view. */
+.is-mobile .workspace-leaf-content[data-type="ochatting-view"] .view-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* On phones the sidebar's tab menu below the view fades the content above
+   it (Obsidian: box-shadow 0 -12px 12px in the sidebar colour, about 24px
+   high). It is drawn outside the view, and Obsidian isolates each view
+   (contain: strict; isolation: isolate), so nothing in the view can sit
+   above it: keep the input out of that band. Tablets have none.
+   With the keyboard open, Obsidian shrinks the main area but not the
+   sidebar (fixed to the screen); it only sets --keyboard-height. The chat
+   lifts itself by the part of the view the keyboard covers, measured in
+   chat-view.ts (--ochatting-lift). */
+.is-phone .workspace-drawer .workspace-leaf-content[data-type="ochatting-view"] .view-content {
+  padding-bottom: max(24px, var(--ochatting-lift, 0px));
+  transition: padding-bottom 150ms ease-out;
+}
+
+/* A line under the input row separates it from the tab menu below. */
+.is-phone .workspace-drawer .workspace-leaf-content[data-type="ochatting-view"] .ochatting-container {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* With the floating navigation Obsidian also fades the bottom 48px of every
+   sidebar view (a gradient on the view's own ::after). Under a list that
+   hints at more; here it would lie over the input, so not in the chat. */
+.is-mobile.is-floating-nav .workspace-drawer .workspace-leaf-content[data-type="ochatting-view"]::after {
+  display: none;
+}
+
 /* Desktop sidebar min-width */
 .workspace-leaf-content[data-type="ochatting-view"] {
   min-width: 280px;
@@ -29,6 +79,16 @@ body.is-phone .ochatting-settings .setting-item-control {
   justify-content: flex-end;
   row-gap: 6px;
   max-width: 100%;
+}
+
+/* An MCP server: name, address and token fields share the row, the address widest */
+.ochatting-settings .ochatting-mcp-server .setting-item-control input[type="text"],
+.ochatting-settings .ochatting-mcp-server .setting-item-control input[type="password"] {
+  width: 9em;
+}
+
+.ochatting-settings .ochatting-mcp-server .setting-item-control input[placeholder^="https"] {
+  width: 16em;
 }
 
 .ochatting-oauth-explainer {

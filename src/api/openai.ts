@@ -10,6 +10,7 @@ import type {
 } from "../types";
 
 import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
+import { activeServers, openaiMcpTools } from "./mcp";
 
 const DEFAULT_OPENAI_URL = "https://api.openai.com";
 
@@ -41,7 +42,7 @@ export async function sendOpenAIMessage(
   systemPrompt: string
 ): Promise<UnifiedResponse> {
   const baseUrl = DEFAULT_OPENAI_URL;
-  const model = settings.model || "gpt-6.1-sol";
+  const model = settings.model;
 
   const identity = await catalogIdentity("openai", settings.apiKey);
   const previous = conversations.get(messages);
@@ -51,7 +52,7 @@ export async function sendOpenAIMessage(
     messages[previous.messages.length]?.role === "assistant" &&
     messages[previous.messages.length]?.replay === previous.replay;
   // Rebuilt/restored histories include native response items and tool pairs.
-  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : messages, "openai", model, identity);
+  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : messages, "openai", model, identity, activeServers(settings));
 
   const body: Record<string, unknown> = {
     model,
@@ -81,6 +82,8 @@ export async function sendOpenAIMessage(
   if (settings.enableWebSearch) {
     apiTools.push({ type: "web_search" });
   }
+  // Remote MCP servers, connected by OpenAI (`api/mcp.ts`).
+  apiTools.push(...openaiMcpTools(activeServers(settings)));
 
   if (apiTools.length > 0) {
     body.tools = apiTools;
