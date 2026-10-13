@@ -104,6 +104,11 @@
     conversations = listConversations();
   }
 
+  /** The open chats list again (a chat started or finished answering in the background). */
+  export function updateConversations(): void {
+    if (historyOpen) refreshConversations();
+  }
+
   function toggleHistory(): void {
     historyOpen = !historyOpen;
     renamingId = null;
@@ -450,8 +455,13 @@
     if (file) void app.workspace.getLeaf(false).openFile(file);
   }
 
-  export function showAskUser(question: string): Promise<string> {
-    addAssistantMessage(question);
+  /**
+   * The next input answers an `ask_user` question. `question` is shown as
+   * the AI's message; without it the chat already shows it (back in the
+   * chat whose question waited).
+   */
+  export function showAskUser(question?: string): Promise<string> {
+    if (question !== undefined) addAssistantMessage(question);
     inputEnabled = true;
     textareaEl?.focus();
 
@@ -1059,7 +1069,9 @@
                 aria-current={conversation.active ? "true" : undefined}
               >
                 <span class="ochatting-history-title">{conversation.title}</span>
-                <span class="ochatting-history-date">{formatDate(conversation.updatedAt)}</span>
+                <span class="ochatting-history-date">
+                  {#if conversation.running}<span class="ochatting-spinner ochatting-history-running" aria-hidden="true"></span>{/if}{conversation.running ? "Answering…" : formatDate(conversation.updatedAt)}
+                </span>
               </button>
               <button
                 class="ochatting-icon-btn"
@@ -1597,6 +1609,15 @@
   .ochatting-history-date {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
+  }
+
+  /* A chat whose answer runs in the background */
+  .ochatting-history-running {
+    width: 8px;
+    height: 8px;
+    margin-right: 4px;
+    border-width: 1.5px;
+    vertical-align: -1px;
   }
 
   .ochatting-history-rename {

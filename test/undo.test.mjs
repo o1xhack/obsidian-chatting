@@ -165,7 +165,7 @@ function fakeChat() {
     addChanges(turnId, files, state) { chat.shown.push({ id: nextId++, type: 'changes', turnId, files, changesState: state }); },
     setChangesUndone(turnId) { const row = chat.shown.find(m => m.type === 'changes' && m.turnId === turnId); if (row) row.changesState = 'undone'; },
     showThinking() {}, hideThinking() {}, cancelAskUser() {},
-    setInputEnabled() {}, setBusy() {}, folded: [], foldTurn(turnId) { chat.folded.push(turnId); }, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
+    setInputEnabled() {}, setBusy() {}, folded: [], foldTurn(turnId) { chat.folded.push(turnId); }, updateConversations() {}, setQueued() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
     setSelection() {}, getSelection: () => null,
   };
   return chat;

@@ -76,7 +76,7 @@ Click the pencil under a message you sent to change it: the chat continues from 
 
 ## 💬 Chats
 
-The chat header shows the current chat's title, taken from your first message. **New chat** (the pen icon) starts a new one; so do the *New chat* command and the ribbon icon's right-click menu, and *Chat about this note* and *Send selection to chat* always start a new chat. The clock icon opens your chats, most recent first: open one to go on with it, rename it with the pencil, or delete it (you confirm first). **Clear** (the trash icon) empties only the current chat. The chat you had open is open again after a restart. Starting a new chat, switching, or deleting the current chat stops an answer that is still running; what it showed so far stays in its chat. Each chat sends only its own messages to the provider.
+The chat header shows the current chat's title, taken from your first message. **New chat** (the pen icon) starts a new one; so do the *New chat* command and the ribbon icon's right-click menu, and *Chat about this note* and *Send selection to chat* always start a new chat. The clock icon opens your chats, most recent first: open one to go on with it, rename it with the pencil, or delete it (you confirm first). **Clear** (the trash icon) empties only the current chat. The chat you had open is open again after a restart. An answer keeps running when you start a new chat or switch to another: the list shows *Answering…*, a notice says when it is ready or has a question for you, and going back shows it as far as it got. Deleting a chat stops its answer. Each chat sends only its own messages to the provider.
 
 ## 👀 Follow the AI's edits
 

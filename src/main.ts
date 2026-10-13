@@ -55,13 +55,18 @@ export function selectionScope(editor: Editor, text: string, filePath: string): 
 
 export default class ChatPlugin extends Plugin {
   settings: ChatSettings = DEFAULT_SETTINGS;
-  /** Shared agent loop that persists across view open/close cycles */
-  agent!: AgentLoop;
+  /**
+   * An agent loop per conversation that is open or running a turn (a turn
+   * keeps running when the user switches to another chat); it holds that
+   * conversation's API history. Survives the view being closed.
+   */
+  private agents = new Map<string, AgentLoop>();
   /** ChatGPT OAuth service (used by the chatgpt-oauth provider). */
   chatgptOAuth!: ChatGPTOAuthService;
   /**
-   * All conversations. The active one's API history lives in `agent` and
-   * is copied into its record when saving or switching.
+   * All conversations. The API history of the active one, and of one
+   * running a turn, lives in its agent loop (`agentFor`) and is copied into
+   * its record when saving or switching.
    */
   conversations: ConversationRecord[] = [newConversation()];
   activeConversationId = this.conversations[0].id;
@@ -80,6 +85,28 @@ export default class ChatPlugin extends Plugin {
   private lastChatStateSavedAt = 0;
   /** Once unloaded, only the already queued final save may finish. */
   private unloaded = false;
+
+  /** The open conversation's agent loop. */
+  get agent(): AgentLoop {
+    return this.agentFor(this.activeConversation);
+  }
+
+  /** Replaces the open conversation's agent loop (tests). */
+  set agent(agent: AgentLoop) {
+    this.agents.set(this.activeConversation.id, agent);
+  }
+
+  /** The agent loop of `conversation`, made from its saved API history when it has none. */
+  agentFor(conversation: ConversationRecord): AgentLoop {
+    let agent = this.agents.get(conversation.id);
+    if (!agent) {
+      agent = new AgentLoop(this.app, this.settings);
+      // Also forgets OpenAI's response to chain to: it belongs to another conversation.
+      agent.importMessages(conversation.agentMessages);
+      this.agents.set(conversation.id, agent);
+    }
+    return agent;
+  }
 
   /** The conversation the chat view shows. */
   get activeConversation(): ConversationRecord {
@@ -108,8 +135,6 @@ export default class ChatPlugin extends Plugin {
     setChatGPTOAuthService(this.chatgptOAuth);
     // The chat header shows the thinking level from the saved model list.
     await this.activateModelCatalog();
-
-    this.agent = new AgentLoop(this.app, this.settings);
 
     // Restore persisted chat history
     await this.loadChatHistory();
@@ -236,7 +261,7 @@ export default class ChatPlugin extends Plugin {
   }
 
   onunload(): void {
-    this.agent?.abort();
+    for (const agent of this.agents.values()) agent.abort();
     screenAwake.reset();
     // The tab that showed the AI's edits closes with the plugin (and Obsidian).
     closeFollowTab(this.app);
@@ -368,7 +393,8 @@ export default class ChatPlugin extends Plugin {
   }
 
   // ─── Conversations ──────────────────────────────────────────────────
-  // The view stops a running turn before calling these.
+  // A running turn goes on when the user switches; deleting a conversation
+  // stops its turn (the view stops it first).
 
   /** Conversations with content, most recently used first (the history list). */
   listConversations(): ConversationSummary[] {
@@ -409,6 +435,7 @@ export default class ChatPlugin extends Plugin {
   deleteConversation(id: string): void {
     const deleted = this.conversations.find((conversation) => conversation.id === id);
     if (!deleted) return;
+    this.dropAgent(id);
     this.conversations = this.conversations.filter((conversation) => conversation !== deleted);
     if (deleted.id !== this.activeConversationId) {
       void this.saveChatHistory();
@@ -426,23 +453,38 @@ export default class ChatPlugin extends Plugin {
     if (!conversation.customTitle) conversation.title = conversationTitle(conversation.chatHistory);
   }
 
-  /** Switches the agent to `next`; an empty conversation left behind is dropped. */
+  /**
+   * Makes `next` the open conversation. A turn running in the one left
+   * keeps running with its agent loop; an idle one's loop goes (its history
+   * is in the record). An empty conversation left behind is dropped.
+   */
   private activate(next: ConversationRecord): void {
     // None when the active conversation was just deleted.
     const previous = this.conversations.find((conversation) => conversation.id === this.activeConversationId);
-    this.agent.abort();
     this.activeConversationId = next.id;
-    // Also forgets OpenAI's response to chain to: it belongs to the other conversation.
-    this.agent.importMessages(next.agentMessages);
+    // The records get each loop's history first (a turn may have ended in the background since the last save).
+    this.storeActiveMessages();
+    for (const [id, agent] of this.agents) {
+      if (id !== next.id && !agent.isRunning()) this.agents.delete(id);
+    }
     if (previous && previous !== next && isEmptyConversation(previous)) {
       this.conversations = this.conversations.filter((conversation) => conversation !== previous);
     }
     void this.saveChatHistory();
   }
 
-  /** Copies the agent's history into the active conversation's record. */
+  /** Copies each agent loop's history into its conversation's record. */
   private storeActiveMessages(): void {
-    if (this.agent) this.activeConversation.agentMessages = this.agent.exportMessages();
+    for (const [id, agent] of this.agents) {
+      const conversation = this.conversations.find((item) => item.id === id);
+      if (conversation) conversation.agentMessages = agent.exportMessages();
+    }
+  }
+
+  /** Stops and forgets conversation `id`'s agent loop (deleting it). */
+  private dropAgent(id: string): void {
+    this.agents.get(id)?.abort();
+    this.agents.delete(id);
   }
 
   // ─── Chat history persistence ─────────────────────────────────────────
@@ -537,9 +579,15 @@ export default class ChatPlugin extends Plugin {
       for (const conversation of saved.conversations) {
         conversation.chatHistory = restoreImages(conversation.chatHistory, conversation.agentMessages);
       }
+      // An agent loop made before loading (tests set one) goes on with the saved open conversation.
+      const made = this.agents.get(this.activeConversationId);
+      this.agents.clear();
       this.conversations = saved.conversations;
       this.activeConversationId = saved.activeConversationId;
-      this.agent.importMessages(this.activeConversation.agentMessages);
+      if (made) {
+        made.importMessages(this.activeConversation.agentMessages);
+        this.agents.set(this.activeConversationId, made);
+      }
     }
     this.chatHistoryLoaded = true;
   }

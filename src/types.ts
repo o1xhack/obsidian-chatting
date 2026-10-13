@@ -238,6 +238,8 @@ export interface ConversationSummary {
   updatedAt: number;
   /** The conversation shown now. */
   active: boolean;
+  /** A turn runs in it (also in the background). */
+  running?: boolean;
 }
 
 // ─── Tool Execution ─────────────────────────────────────────────────────────
