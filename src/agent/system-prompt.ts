@@ -1,4 +1,4 @@
-import type { ConversationContext } from "../types";
+import type { ConversationContext, VoiceTurn } from "../types";
 
 /**
  * The static system prompt that never changes across turns.
@@ -53,6 +53,23 @@ ${vaultInstructions}`;
   return prompt;
 }
 
+/** Last turns kept as context, and characters per turn. */
+const VOICE_CONTEXT_TURNS = 12;
+const VOICE_CONTEXT_CHARS = 400;
+
+/**
+ * The voice conversation since the last request, for context: the voice
+ * hands over only the sentence that asked for work, while the request may
+ * build on what was said before (e.g. it asked a question first).
+ */
+export function voiceTranscriptText(turns: VoiceTurn[]): string {
+  const lines = turns.slice(-VOICE_CONTEXT_TURNS).map((turn) => {
+    const text = turn.text.replace(/\s+/g, " ").trim().slice(0, VOICE_CONTEXT_CHARS);
+    return `${turn.role === "user" ? "User" : "Voice"}: "${text}"`;
+  });
+  return `Said in the voice conversation before this request (context): ${lines.join(" ")}.`;
+}
+
 /**
  * Builds a dynamic context string injected as the first user message (or prepended
  * to the first user message). This changes per turn but sits after the cached prefix.
@@ -69,6 +86,14 @@ export function buildContextMessage(context: ConversationContext): string {
   if (context.selection) {
     const truncated = context.selection.substring(0, 200);
     parts.push(`Selected text: "${truncated}${context.selection.length > 200 ? "..." : ""}".`);
+  }
+
+  if (context.voice) {
+    parts.push("This turn comes from a voice conversation: answer briefly in plain spoken sentences; no tables or code unless asked.");
+  }
+
+  if (context.voiceTranscript?.length) {
+    parts.push(voiceTranscriptText(context.voiceTranscript));
   }
 
   for (const note of context.notes ?? []) parts.push(note);

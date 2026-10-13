@@ -33,8 +33,14 @@ export interface ChatSettings {
   compactPercent: number | null;
   /** Compaction point in tokens for a model whose window is unknown; null: none. */
   compactTokens: number | null;
+  /** Live voice (the ChatGPT sign-in on Codex's voice service, `voice/codex.ts`): how it sounds. */
+  voice: string;
+  /** Hands-free (the server detects turns) or hold to talk (mic on while pressed). */
+  voiceMicMode: VoiceMicMode;
   modelCatalog?: import("./api/model-catalog").CatalogState;
 }
+
+export type VoiceMicMode = "hands-free" | "hold";
 
 /** A remote MCP server, connected by the provider (`api/mcp.ts`). */
 export interface McpServer {
@@ -86,6 +92,8 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   mcpServers: [],
   compactPercent: null,
   compactTokens: null,
+  voice: "cove",
+  voiceMicMode: "hands-free",
 };
 
 // ─── Unified Message Format ─────────────────────────────────────────────────
@@ -212,6 +220,10 @@ export interface ConversationContext {
   selection: string | null;
   vaultName: string;
   fileCount: number;
+  /** The turn comes from a voice conversation; its answer will be spoken. */
+  voice?: boolean;
+  /** What was said in the voice conversation since the last request (context for this one). */
+  voiceTranscript?: VoiceTurn[];
   /** What the user did since the last turn that the model should know (e.g. undid an answer's changes). */
   notes?: string[];
 }
@@ -221,6 +233,12 @@ export interface MentionContext {
   text: string;
   images: ImageAttachment[];
   files: FileAttachment[];
+}
+
+/** One turn of a voice conversation: what the user or the voice said. */
+export interface VoiceTurn {
+  role: "user" | "assistant";
+  text: string;
 }
 
 // ─── Selection Scope ────────────────────────────────────────────────────────
