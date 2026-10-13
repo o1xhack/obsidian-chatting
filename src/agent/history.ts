@@ -12,22 +12,25 @@ function startsUserTurn(message: UnifiedMessage): boolean {
     message.content.some(block => block.type === "text" || block.type === "image");
 }
 
-/**
- * API messages kept per conversation: sent, saved and restored. Trimming
- * keeps whole user turns, so a long turn can keep a few more.
- */
-export const MAX_CONVERSATION_LENGTH = 80;
+/** Index of the last message whose request compacted the context, or -1. */
+export function lastCompaction(messages: UnifiedMessage[]): number {
+  return messages.map((message) => !!message.compaction).lastIndexOf(true);
+}
 
-/** Keep whole user turns so pruning/persistence cannot orphan tool results. */
-export function trimHistory(messages: UnifiedMessage[], limit: number): UnifiedMessage[] {
-  const firstTurn = messages.findIndex(startsUserTurn);
-  if (firstTurn < 0) return [];
-  let start = firstTurn;
-  const cutoff = Math.max(0, messages.length - limit);
-  for (let index = firstTurn; index <= cutoff; index++) {
-    if (startsUserTurn(messages[index])) start = index;
-  }
-  return start === 0 ? messages : messages.slice(start);
+/**
+ * The API history without what the last compaction covers: from that
+ * message on, as a new array; the same array when nothing goes. A
+ * compaction without a readable summary (OpenAI's is encrypted) keeps what
+ * it covers, from the compaction before it on, so another provider or
+ * model can summarize it; one compaction further back is dropped, so the
+ * history stays within about two compaction windows. There is no cap by
+ * count: the compaction point keeps the history within the model's window.
+ */
+export function fromLastCompaction(messages: UnifiedMessage[]): UnifiedMessage[] {
+  const last = lastCompaction(messages);
+  if (last <= 0) return messages;
+  const start = messages[last].compaction?.summary ? last : lastCompaction(messages.slice(0, last));
+  return start > 0 ? messages.slice(start) : messages;
 }
 
 /** Tool results of the last 2 user turns keep their images and files when sent. */
@@ -85,21 +88,23 @@ export function newTurnId(): string {
 /**
  * The agent history up to just before the turn `turnId`, as a new array
  * (so the OpenAI adapter can't chain to a response from the cut-off part).
- * A turn that isn't there was trimmed away, since every turn goes into both
- * histories: all of the history comes after it, and nothing is kept.
+ * Only for an `editableTurn`; any other turn leaves the history as it is.
  */
 export function cutBeforeTurn(messages: UnifiedMessage[], turnId: string): UnifiedMessage[] {
+  if (!editableTurn(messages, turnId)) return messages;
   const index = messages.findIndex(message => message.turnId === turnId && startsUserTurn(message));
-  return index < 0 ? messages : messages.slice(0, index);
+  return messages.slice(0, index);
 }
 
 /**
  * Turn `turnId` can be edited or answered again: the API history still
- * holds it. A turn cut off by the history's limit can't: cutting there
- * would leave the model without the whole chat.
+ * holds it, after the last compaction. A turn the history no longer holds
+ * (a summary replaced it, or a chat saved before turn IDs) can't, nor one
+ * before the last compaction: its summary also covers the turns after it.
  */
 export function editableTurn(messages: UnifiedMessage[], turnId: string): boolean {
-  return messages.some(message => message.turnId === turnId && startsUserTurn(message));
+  const index = messages.findIndex(message => message.turnId === turnId && startsUserTurn(message));
+  return index >= 0 && index > lastCompaction(messages);
 }
 
 /** The text a user turn was sent with: context first, the user's text last. */

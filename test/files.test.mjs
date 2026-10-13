@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 import { deflateRawSync } from 'node:zlib';
-import { api, settings, callbacks, transport, response, text, call, vaultApp } from './harness.mjs';
+import { api, settings, callbacks, transport, response, text, call, vaultApp, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -269,13 +269,8 @@ function fakeChat() {
 // records what it writes there, and has a chat view with a fake component.
 async function setup(saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async path => { if (!saved || !path.endsWith('/chat-state.json')) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async () => !!saved,
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.agent = new api.AgentLoop(app, settings('anthropic'));
@@ -295,6 +290,7 @@ test('Attached files in the chat: saved once without data and text, back from th
   assert.deepEqual(plugin.chatHistory[0].attachedFiles.map(f => f.fileName), ['Scan.pdf', 'data.csv']);
   assert.deepEqual(requests[0].messages.at(-1).content.slice(0, 2).map(b => b.type), ['document', 'document']);
 
+  await plugin.saveChatHistory();
   const saved = writes.at(-1);
   assert.equal(saved.version, api.chatState.CHAT_STATE_VERSION);
   const json = JSON.stringify(saved);

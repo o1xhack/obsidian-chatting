@@ -91,6 +91,63 @@ body.is-phone .ochatting-settings .setting-item-control {
   width: 16em;
 }
 
+/* Compaction point: the slider with its default labelled above it, its
+   start and end below, and the point in tokens next to it */
+.ochatting-settings .ochatting-compaction-box {
+  display: flex;
+  flex-direction: column;
+  min-width: 14em;
+  flex: 1 1 14em;
+  max-width: 24em;
+}
+
+.ochatting-settings .ochatting-compaction-box .slider {
+  width: 100%;
+}
+
+.ochatting-compaction-marks {
+  position: relative;
+  height: 1.4em;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ochatting-compaction-mark {
+  position: absolute;
+  top: 0;
+  left: var(--ochatting-mark-at);
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.ochatting-compaction-mark.is-start {
+  transform: none;
+}
+
+.ochatting-compaction-mark.is-end {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* The default, above the track: a small tick down to it */
+.ochatting-compaction-mark.is-default {
+  color: var(--text-normal);
+}
+
+.ochatting-compaction-mark.is-default::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -0.45em;
+  height: 0.45em;
+  border-left: 1px solid var(--text-muted);
+}
+
+.ochatting-settings .ochatting-compaction-field {
+  width: 7em;
+}
+
 .ochatting-oauth-explainer {
   padding: 0.75em;
   margin-bottom: 0.75em;

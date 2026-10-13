@@ -123,16 +123,18 @@ test('Stop drops what was added; nothing runs afterwards', async () => {
   assert.equal(requests.length, 1);
 });
 
-test('Trimming the API history never starts at tool results that carry an added message', () => {
+test('Cutting the API history never starts at tool results that carry an added message', () => {
   const messages = [
     { role: 'user', content: 'Q1', turnId: 't1' },
     { role: 'assistant', content: [call('r1', 'read_file', { path: 'Untitled.md' })] },
-    { role: 'user', content: [result('r1', 'Original'), text('[The user added while you were working:] Also this')] },
+    // Even with a turn ID, tool results with an added message start no turn.
+    { role: 'user', content: [result('r1', 'Original'), text('[The user added while you were working:] Also this')], turnId: 'added' },
     { role: 'assistant', content: [text('A1')] },
     { role: 'user', content: 'Q2', turnId: 't2' },
     { role: 'assistant', content: [text('A2')] },
   ];
-  // The cut can't fall inside turn 1, so the whole of it stays.
-  assert.equal(api.trimHistory(messages, 4).length, 6);
-  assert.deepEqual(api.trimHistory(messages, 2).map((m) => m.content), ['Q2', [text('A2')]]);
+  // The cut can't fall inside turn 1: that message can't be edited, and cutting there keeps the history.
+  assert.equal(api.editableTurn(messages, 'added'), false);
+  assert.equal(api.cutBeforeTurn(messages, 'added'), messages);
+  assert.equal(api.cutBeforeTurn(messages, 't2').length, 4);
 });

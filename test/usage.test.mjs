@@ -3,7 +3,7 @@
 // ring of the open conversation (saved with it, reset by Clear).
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, sse, streamEvents, text, transport, withCatalog, settings, callbacks, vaultApp } from './harness.mjs';
+import { api, sse, streamEvents, text, transport, withCatalog, settings, callbacks, vaultApp, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -35,13 +35,8 @@ function fakeChat() {
 // records its writes, and has a chat view with a fake component.
 async function chatSetup(provider, saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async (path) => { if (!saved || !path.endsWith('/chat-state.json')) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async (path) => !!saved && path.endsWith('/chat-state.json'),
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.settings = { ...plugin.settings, ...settings(provider) };
@@ -210,10 +205,10 @@ test('The ring: context against the selected model\'s window, compaction point, 
   const cost = (40000 * 3 + 1000 * 15) / 1e6;
   assert.deepEqual(chat.usage, { contextTokens: 41000, inputTokens: 40000, outputTokens: 1000, contextWindow: 200000, compactAt: 160000, costUsd: cost, lastTurnCostUsd: cost, partialCost: false, plan: false });
 
-  // Saved as an optional field of the conversation (chat-state.json stays version 3).
-  await new Promise(resolve => setTimeout(resolve, 0));
+  // Saved as an optional field of the conversation, in its chat file.
+  await plugin.saveChatHistory();
   const saved = writes.at(-1);
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, api.chatState.CHAT_STATE_VERSION);
   assert.equal(saved.conversations[0].usage.contextTokens, 41000);
   const restored = await chatSetup('anthropic', saved);
   restored.view.renderHistory();

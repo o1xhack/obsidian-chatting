@@ -1,5 +1,5 @@
 import type { ModelOption } from "../api/model-catalog";
-import type { Provider, UnifiedMessage } from "../types";
+import type { ChatSettings, Provider, UnifiedMessage } from "../types";
 
 /** How a readable summary starts when it stands in for the earlier conversation. */
 export const SUMMARY_PREFIX = "[Summary of the earlier part of this conversation, which is no longer in your context:]";
@@ -28,16 +28,42 @@ export function afterCompaction(messages: UnifiedMessage[], replayable: (message
 }
 
 /**
- * When a conversation's context gets compacted: at 80 % of the model's
- * window, leaving room for the answer and the next steps, as Codex compacts
- * before the window is full. The ChatGPT catalog names its own point
- * (`auto_compact_token_limit`); Anthropic's trigger is at least 50,000
- * tokens. Undefined when the window is unknown.
+ * When a conversation's context gets compacted by default: at 80 % of the
+ * model's window, leaving room for the answer and the next steps, as Codex
+ * compacts before the window is full. The ChatGPT catalog names its own
+ * point (`auto_compact_token_limit`); Anthropic's trigger is at least
+ * 50,000 tokens. Undefined when the window is unknown.
  */
 export const COMPACT_SHARE = 0.8;
 export const ANTHROPIC_MIN_TRIGGER = 50000;
+/** The lowest compaction point the setting offers, as Anthropic's minimum. */
+export const MIN_COMPACT_TOKENS = 50000;
 
-export function compactThreshold(provider: Provider, option: ModelOption | undefined): number | undefined {
+/** The compaction point setting. */
+export type CompactionPoint = Partial<Pick<ChatSettings, "compactPercent" | "compactTokens">>;
+
+/**
+ * When a conversation's context gets compacted: the setting's share of the
+ * model's window, not below `MIN_COMPACT_TOKENS` (or the default point
+ * where that is lower); for a model whose window is unknown the setting's
+ * token number. Otherwise the default point.
+ */
+export function compactThreshold(provider: Provider, option: ModelOption | undefined, point: CompactionPoint = {}): number | undefined {
+  const fallback = defaultCompactThreshold(provider, option);
+  let threshold = fallback;
+  if (option?.contextWindow) {
+    if (point.compactPercent) {
+      const floor = Math.min(MIN_COMPACT_TOKENS, fallback ?? MIN_COMPACT_TOKENS);
+      threshold = Math.max(floor, Math.floor(option.contextWindow * point.compactPercent / 100));
+    }
+  } else if (point.compactTokens) {
+    threshold = point.compactTokens;
+  }
+  return threshold !== undefined && provider === "anthropic" ? Math.max(ANTHROPIC_MIN_TRIGGER, threshold) : threshold;
+}
+
+/** The default compaction point. */
+export function defaultCompactThreshold(provider: Provider, option: ModelOption | undefined): number | undefined {
   if (!option) return undefined;
   if (provider === "chatgpt-oauth" && option.autoCompactTokens) {
     return option.contextWindow ? Math.min(option.autoCompactTokens, option.contextWindow) : option.autoCompactTokens;

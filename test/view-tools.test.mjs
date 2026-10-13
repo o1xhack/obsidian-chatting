@@ -4,7 +4,7 @@
 // <canvas>: fakes record what would be drawn.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { api, settings, transport, response, call, text, callbacks } from './harness.mjs';
+import { api, settings, transport, response, call, text, callbacks, chatFiles } from './harness.mjs';
 
 const senders = { anthropic: api.sendAnthropicMessage, openai: api.sendOpenAIMessage, 'chatgpt-oauth': api.sendChatGPTOAuthMessage };
 
@@ -171,8 +171,8 @@ for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) {
     assert.match(shown[0].result, /\[1 image sent to the model\]$/);
 
     // The saved chat holds the image once: in the agent history only.
-    const writes = [];
-    app.vault.adapter = { read: async () => { throw new Error('ENOENT'); }, exists: async () => false, write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(data); } };
+    const { adapter, writes } = chatFiles();
+    app.vault.adapter = adapter;
     const plugin = new api.ChatPlugin();
     plugin.app = app;
     plugin.agent = agent;
@@ -181,11 +181,11 @@ for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) {
     await plugin.saveChatHistory();
     const data = base64(binary.get('Pics/cat.png'));
     assert.equal(writes.length, 1);
-    assert.equal(writes[0].split(data).length - 1, 1);
+    assert.equal(JSON.stringify(writes[0]).split(data).length - 1, 1);
 
     // A restored history sends the image again.
     const restored = new api.AgentLoop(app, settings(provider));
-    restored.importMessages(JSON.parse(writes[0]).conversations[0].agentMessages);
+    restored.importMessages(writes[0].conversations[0].agentMessages);
     const requests = transport(() => response(provider, [text('Still a cat')]));
     await restored.run('And now?', callbacks());
     assert.equal(imageOf(provider, { ...requests[0], messages: requests[0].messages?.slice(0, 3) }), expected);

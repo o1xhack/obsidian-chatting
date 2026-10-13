@@ -146,7 +146,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 | **三個靠譜 provider** | Anthropic + OpenAI 求穩定,ChatGPT 帳號給不想設 API key 的人。 |
 | **密鑰進鑰匙圈** | API key 與 OAuth 憑證都走 Obsidian SecretStorage。絕不進 `data.json`,因此也不會被 Obsidian Sync 同步到其他裝置。 |
 | **不做向量索引** | 線性搜尋加上限保護。可預期、無背景工作、手機記憶體壓力小。 |
-| **會話自動保留** | 聊天紀錄在 Obsidian 重啟後仍在。本機 `chat-state.json`,不同步。 |
+| **會話自動保留** | 聊天紀錄在 Obsidian 重啟後仍在。本機 `chat-state.json` 與 `chats` 資料夾,不同步。 |
 | **手機由右側滑入** | 從右邊滑入側欄,底下的文件不被遮擋。 |
 
 ## 🗺️ 路線圖
@@ -195,7 +195,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>聊天紀錄存在哪?會同步嗎?</b></summary>
 
-存在本機 `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json`。**Obsidian Sync 預設排除外掛資料檔**,不會被同步。API key 透過 SecretStorage 進作業系統鑰匙圈,同樣不同步。
+存在本機 `<vault>/.obsidian/plugins/chatting-with-ai/` 的 `chat-state.json`(聊天列表)與 `chats` 資料夾(每個聊天一個檔案)。**Obsidian Sync 預設排除外掛資料檔**,不會被同步。API key 透過 SecretStorage 進作業系統鑰匙圈,同樣不同步。
 
 </details>
 

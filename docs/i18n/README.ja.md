@@ -146,7 +146,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 | **3 つの堅実なプロバイダ** | Anthropic + OpenAI で安定性、ChatGPT アカウントで API キー不要派をカバー。 |
 | **シークレットはキーチェーンへ** | API キーと OAuth 認証情報は Obsidian SecretStorage 経由。`data.json` には入らないため、他の端末に同期もされません。 |
 | **Vault のインデックス化は行わない** | 上限つきの線形検索のみ。予測可能で、バックグラウンドジョブなし、モバイルでもメモリを圧迫しません。 |
-| **会話は永続化** | チャット履歴は Obsidian 再起動後も残ります。ローカルの `chat-state.json` に保存され、同期されません。 |
+| **会話は永続化** | チャット履歴は Obsidian 再起動後も残ります。ローカルの `chat-state.json` と `chats` フォルダに保存され、同期されません。 |
 | **モバイルでは右からスライドイン** | 右端から入るサイドバーで、下のドキュメントは見えたまま。 |
 
 ## 🗺️ ロードマップ
@@ -195,7 +195,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 <details>
 <summary><b>チャット履歴はどこに保存され、同期されますか?</b></summary>
 
-ローカルの `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json` に保存されます。**Obsidian Sync は既定でプラグインデータファイルを除外する**ため、同期されません。API キーは SecretStorage 経由で OS のキーチェーンに保存され、これも同期されません。
+ローカルの `<vault>/.obsidian/plugins/chatting-with-ai/` にある `chat-state.json`(チャットの一覧)と `chats` フォルダ(チャットごとに 1 ファイル)に保存されます。**Obsidian Sync は既定でプラグインデータファイルを除外する**ため、同期されません。API キーは SecretStorage 経由で OS のキーチェーンに保存され、これも同期されません。
 
 </details>
 

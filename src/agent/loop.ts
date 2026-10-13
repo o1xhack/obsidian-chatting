@@ -24,7 +24,7 @@ import { buildContext } from "./context";
 import { folderInstructions, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, MAX_CONVERSATION_LENGTH } from "./history";
+import { cutBeforeTurn, editableTurn, fromLastCompaction, newTurnId } from "./history";
 import { debugLog } from "../debug";
 import { appLifecycle } from "../platform/lifecycle";
 import { compactThreshold, summaryMessage } from "./compaction";
@@ -34,15 +34,6 @@ import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryRequest } from "./summ
 function summaryTurnId(): string {
   return `summary-${newTurnId()}`;
 }
-
-/**
- * The API history: saving keeps the last 80 messages. Before a turn, a
- * history over 80 messages is cut to the last 60, so it is cut every few
- * turns, not on each; in between it stays the same array and OpenAI can
- * chain to its previous response. Both keep whole user turns, so they
- * round up: a long turn can keep a few more messages.
- */
-const KEEP_RECENT = 60;
 
 /** Sending a request again (a cut-off stream, back from the background); tests shorten the wait. */
 export const RESUME = {
@@ -185,19 +176,19 @@ export class AgentLoop {
     this.messages = cutBeforeTurn(this.messages, turnId);
   }
 
-  /** Turn `turnId` can be edited or answered again (the API history still holds it). */
+  /** Turn `turnId` can be edited or answered again (after the last compaction, in the API history). */
   canEditTurn(turnId: string): boolean {
     return editableTurn(this.messages, turnId);
   }
 
-  /** Export API messages for persistence */
-  exportMessages(limit = MAX_CONVERSATION_LENGTH): UnifiedMessage[] {
-    return trimHistory(this.messages, limit);
+  /** The API history as saved: from the last compaction on. */
+  exportMessages(): UnifiedMessage[] {
+    return fromLastCompaction(this.messages);
   }
 
-  /** Restore API messages from persistence, as many as saving keeps */
+  /** Continue from a saved API history (a new array). */
   importMessages(messages: UnifiedMessage[]): void {
-    this.messages = trimHistory(messages, MAX_CONVERSATION_LENGTH);
+    this.messages = [...messages];
     clearOpenAIState();
     clearChatGPTOAuthState();
   }
@@ -260,7 +251,7 @@ export class AgentLoop {
         debugLog(this.app, "COMPACTED", { reason: "provider switch" });
       }
       const option = catalogModel(settings.provider, settings.model);
-      const threshold = compactThreshold(settings.provider, option);
+      const threshold = compactThreshold(settings.provider, option, settings);
       if (!isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
         const summary = await this.summarize(settings, this.messages, isStopped);
         if (isStopped()) return;
@@ -462,8 +453,9 @@ export class AgentLoop {
       : fullMessage;
     this.messages.push({ role: "user", content, turnId });
 
-    // Prune if conversation is too long
-    this.pruneHistory();
+    // What the last compaction covers goes; a new array only then, so
+    // OpenAI keeps chaining and the prompt caches keep their prefix.
+    this.messages = fromLastCompaction(this.messages);
 
     debugLog(this.app, "USER_MESSAGE", {
       userMessage,
@@ -722,13 +714,6 @@ export class AgentLoop {
     } finally {
       unwatch();
       if (this.request === request) this.request = null;
-    }
-  }
-
-  /** Drop oldest messages when conversation gets too long, keeping recent context */
-  private pruneHistory(): void {
-    if (this.messages.length > MAX_CONVERSATION_LENGTH) {
-      this.messages = trimHistory(this.messages, KEEP_RECENT);
     }
   }
 }

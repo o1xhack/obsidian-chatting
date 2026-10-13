@@ -144,7 +144,7 @@ export async function sendChatGPTOAuthMessage(
     parallel_tool_calls: oauthParallelTools(model),
     // Server-side compaction at the catalog's point (`auto_compact_token_limit`
     // or 80 % of the window), as for OpenAI; not after this route refused it.
-    ...(compactionRefused ? {} : compactionParameter(compactThreshold("chatgpt-oauth", catalogModel("chatgpt-oauth", model)))),
+    ...(compactionRefused ? {} : compactionParameter(compactThreshold("chatgpt-oauth", catalogModel("chatgpt-oauth", model), settings))),
   };
 
   const reasoning = oauthReasoning(model, settings.thinkingLevel);

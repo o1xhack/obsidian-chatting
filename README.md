@@ -28,7 +28,7 @@
 - **Add to a running answer** — type and send while the AI is still working: your message joins the running task (shown as *Queued* until the AI takes it in) instead of waiting. The button is Stop while the input is empty.
 - **Back from the background** — switch apps or lock the phone while an answer runs: when you come back, a request the phone cut off is sent again ("Resuming…"), and if the phone closed Obsidian meanwhile, the chat offers **Continue** to finish the interrupted answer.
 - **Context and cost** — a small ring in the chat header shows how full the model's context is; click it for the tokens the chat used, the estimated cost of the chat and of the last answer (from the provider's list prices; with the ChatGPT account, a link to your plan's usage instead), and **Compact now**.
-- **Long chats** — before the context is full, the earlier part of the chat is summarized so it can go on: by the provider where it offers that (Anthropic, OpenAI, and the ChatGPT account where its backend accepts it), otherwise by the plugin with the same model. A quiet note in the chat shows where.
+- **Long chats** — before the context is full, the earlier part of the chat is summarized so it can go on: by the provider where it offers that (Anthropic, OpenAI, and the ChatGPT account where its backend accepts it), otherwise by the plugin with the same model. A quiet note in the chat shows where. **Settings → Compaction point** sets when. There is no limit on the number of messages: the chat keeps them all, shows its last 20 turns and loads earlier ones as you scroll up.
 - **Selection scope** — highlight text in any note, send it to chat, the assistant edits only inside the selection.
 - **Secrets in the OS keychain** — never in `data.json`, never synced across devices.
 - **MCP servers** — with an Anthropic or OpenAI API key, add remote MCP servers (public https, optional token) in the settings; the provider connects to them and the AI uses their tools, shown as steps in the chat. They run without asking, so add only servers you trust. Not available with the ChatGPT account.
@@ -75,7 +75,7 @@ Type `@` (at the start or after a space) or `[[` in the input and pick a file: r
 
 ## ✏️ Edit, copy, regenerate
 
-Click the pencil under a message you sent to change it: the chat continues from there with the same images, files and selection, and what came after it is dropped. Changes the AI already made to notes stay. Every answer has **Copy** (its Markdown source); the last one also has **Regenerate**. With a mouse the buttons appear on hover; on touch screens they are always shown.
+Click the pencil under a message you sent to change it: the chat continues from there with the same images, files and selection, and what came after it is dropped. Changes the AI already made to notes stay. Messages from before the chat was last summarized have no pencil: the summary covers what came after them too. Every answer has **Copy** (its Markdown source); the last one also has **Regenerate**. With a mouse the buttons appear on hover; on touch screens they are always shown.
 
 ## 💬 Chats
 
@@ -149,6 +149,8 @@ Below **Model**, **Thinking level** offers *Default* plus the levels the model l
 - **Vault instructions** — opens the vault's `AGENTS.md`, or creates it (see [Your instructions in AGENTS.md](#-your-instructions-in-agentsmd)).
 - **Skills** — the folder with your skills (`Skills` by default), the skills in it and **New skill** (see [Skills](#-skills)).
 - **MCP servers** — remote MCP servers for Anthropic and OpenAI: a name (letters, digits, `-`, `_`), a public https address, an optional token and on/off each. The provider connects to the servers that are on and calls their tools without asking; each call shows as a step ("Used create_issue on linear"). Tokens are kept in the OS keychain.
+- **Compaction point** — when a long chat is summarized: a share of the selected model's context (80 % by default, 50k tokens at least), set with a slider or as a number of tokens; for a model whose context size is unknown, a number of tokens (empty: only when a request is too long). Earlier saves cost and time per answer; the model then keeps fewer details.
+- **Saved chats** — how many chats are saved and their size. A chat over 5 MB shows its size in the chats list, so you can delete it if you no longer need it.
 - **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
 
 While an answer is being generated, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.
@@ -219,7 +221,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 | **Three sane providers** | Anthropic + OpenAI for stability, ChatGPT account for users who'd rather not manage an API key. |
 | **Secrets in the keychain** | API keys and OAuth credentials go through Obsidian SecretStorage. They never land in `data.json`, so they never sync to other devices. |
 | **No vault indexing** | Linear search, capped. Predictable, no background work, no memory pressure on phones. |
-| **Conversations persist** | Your chats survive Obsidian restarts. Stored locally in `chat-state.json`, never synced. |
+| **Conversations persist** | Your chats survive Obsidian restarts. Stored locally in `chat-state.json` and a file per chat, never synced. |
 | **Right sidebar on mobile** | Slides in from the edge — your document stays visible underneath. |
 
 ## 🗺️ Roadmap
@@ -270,7 +272,7 @@ Probably not — keeping the provider list small is a deliberate choice. Two API
 <details>
 <summary><b>Where is chat history stored? Will it sync?</b></summary>
 
-Locally, all chats in one file: `<vault>/.obsidian/plugins/chatting-with-ai/chat-state.json`, with a second copy in `chat-state.next.json` to recover from an interrupted save. If neither copy can be read, existing files are kept as `chat-state.corrupt-<time>.json` or `chat-state.next.corrupt-<time>.json` instead of being overwritten; chats saved by a newer version of the plugin are kept as `chat-state.v<version>-<time>.json` when you go back to an older one. If a backup cannot be made, saving is disabled for that session and a notice explains why. It is **not** synced by Obsidian Sync (plugin data files are excluded by default). API keys live in the OS keychain via SecretStorage and are also not synced. Attached images and files are saved once, with the recent messages kept for the provider, until you clear or delete the chat; in older messages the chat shows just the name. Images and files the agent looked at are kept the same way, in the part of the chat kept for the provider. Files of up to 10 MB each can make the file large.
+Locally, in `<vault>/.obsidian/plugins/chatting-with-ai/`: the list of chats in `chat-state.json`, and each chat in its own file in the `chats` folder, read when you open the chat. Each file has a second copy (`.next.json`) to recover from an interrupted save. If neither copy can be read, existing files are kept as `chat-state.corrupt-<time>.json` or `chat-state.next.corrupt-<time>.json` (a chat's as `chats/<id>.corrupt-<time>.json`) instead of being overwritten, and the chats in the `chats` folder stay in the list; chats saved by a newer version of the plugin are kept as `chat-state.v<version>-<time>.json` when you go back to an older one. Chats saved by a version before the `chats` folder are moved into it once; the old file is kept as `chat-state.v<version>-<time>.json`. If a backup cannot be made, saving is disabled for that session and a notice explains why. It is **not** synced by Obsidian Sync (plugin data files are excluded by default). API keys live in the OS keychain via SecretStorage and are also not synced. Attached images and files are saved once, with the messages kept for the provider (those since the chat was last summarized), until you clear or delete the chat; in older messages the chat shows just the name. Images and files the agent looked at are kept the same way, in the part of the chat kept for the provider. Files of up to 10 MB each can make a chat's file large; the settings show the size of the saved chats.
 
 </details>
 
