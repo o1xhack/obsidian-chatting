@@ -314,7 +314,8 @@ for (const action of ['Stop', 'Clear']) {
   test(`${action}: an old request completing does not unlock a newer running turn`, async () => {
     const { view, chat } = await chatSetup('anthropic');
     const pending = [];
-    chat.setInputEnabled = enabled => { chat.enabled = enabled; };
+    // The input stays usable while a turn runs (typing adds to it); busy is the lock.
+    chat.setBusy = busy => { chat.busy = busy; };
     transport(() => new Promise(resolve => pending.push(resolve)));
     const old = view.handleUserMessage('Old', null);
     await until(() => pending.length === 1);
@@ -324,11 +325,11 @@ for (const action of ['Stop', 'Clear']) {
     pending[0](response('anthropic', [text('late old answer')]));
     await old;
     assert.equal(view.running, true);
-    assert.equal(chat.enabled, false);
+    assert.equal(chat.busy, true);
     pending[1](response('anthropic', [text('new answer')]));
     await next;
     assert.equal(view.running, false);
-    assert.equal(chat.enabled, true);
+    assert.equal(chat.busy, false);
   });
 }
 

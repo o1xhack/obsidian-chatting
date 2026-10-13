@@ -64,7 +64,7 @@ Skills use the Claude Code / Codex folder format. Their instructions and support
 
 **Follow the AI's edits** opens changed passages or Canvas cards without taking focus from chat. Finished tool steps fold into a compact row you can expand. Per-answer **Undo** restores recorded edits, creations, renames and deletions; it asks before overwriting files that changed afterward. Snapshots are bounded and kept in memory, so undo is unavailable after a restart or when its snapshots expire.
 
-Create, switch, rename and delete separate chats. Each has its own provider conversation, and chats resume after restarting Obsidian. You can edit a previous message, copy an answer or regenerate the last answer. Editing or regenerating does not undo changes already made to vault files.
+Create, switch, rename and delete separate chats. Each has its own provider conversation, and chats resume after restarting Obsidian. While an answer runs, you can type and send more: the message joins the running task (shown as *Queued* until the assistant takes it in). You can edit a previous message, copy an answer or regenerate the last answer. Editing or regenerating does not undo changes already made to vault files.
 
 Answers appear as the model writes them and render Markdown, tables, wiki links and math. Read earlier messages without being pulled back to the bottom, then jump to the latest reply when you are ready.
 

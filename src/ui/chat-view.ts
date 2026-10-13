@@ -89,6 +89,8 @@ interface ChatContainerApi extends Record<string, unknown> {
   setBusy(busy: boolean): void;
   setComposerLocked?(locked: boolean): void;
   setRetainedAttachments?(entries: ChatHistoryEntry[]): void;
+  /** Messages added to the running turn that the agent hasn't taken in yet. */
+  setQueued(texts: string[]): void;
   clearMessages(): void;
   focus(): void;
   setModel(name: string): void;
@@ -124,6 +126,10 @@ export class ObsidianChatView extends ItemView {
   private runVersion = 0;
   /** Some of the running turn's answer is on screen. */
   private answerShown = false;
+  /** Typed while a turn ran, until the agent takes them in or they run next (shown as queued). */
+  private queued: string[] = [];
+  /** Typed when no loop step could take them (the turn was ending): they run next. */
+  private unsteered: string[] = [];
   /**
    * The answer being streamed, until the loop delivers it whole: its
    * message in the chat, its text so far and the history it belongs to.
@@ -464,9 +470,15 @@ export class ObsidianChatView extends ItemView {
     files: FileAttachment[] = [],
     linkSource = this.plugin.app.workspace.getActiveFile()?.path ?? ""
   ): Promise<void> {
-    if (this.running || this.undoing) {
-      if (this.undoing) this.chatContainer?.restoreDraft?.(text, selection, images, files);
+    // An undo is running: the message waits in the input.
+    if (this.undoing) {
+      this.chatContainer?.restoreDraft?.(text, selection, images, files);
       new Notice("Please wait for the current response to complete.");
+      return;
+    }
+    // While a turn runs, a typed message is added to it (steering).
+    if (this.running) {
+      this.addToRunningTurn(text);
       return;
     }
 
@@ -489,7 +501,7 @@ export class ObsidianChatView extends ItemView {
     const turnId = newTurnId();
     const savedSelection = selection ? historySelection(selection) : undefined;
     const conversation = this.plugin.activeConversation;
-    chat.setInputEnabled(false);
+    // The input stays usable: what is sent now is added to this turn.
     chat.setBusy(true);
     // What the model should know of (an undo), told once, with this turn.
     const notes = conversation.notes ?? [];
@@ -608,7 +620,6 @@ export class ObsidianChatView extends ItemView {
           // Empty: Stop or Clear dropped the question.
           if (!answer || !isCurrent()) return "";
           history.push({ type: "user", text: answer });
-          chat.setInputEnabled(false);
           return answer;
         },
         onError: (error) => {
@@ -616,6 +627,14 @@ export class ObsidianChatView extends ItemView {
           this.endStream(true);
           chat.addError(error);
           history.push({ type: "error", text: error });
+        },
+        // Added to the running turn: shown where the agent took it in.
+        onSteered: (text) => {
+          this.endStream(false);
+          chat.addUserMessage(text);
+          history.push({ type: "user", text });
+          const index = this.queued.indexOf(text);
+          if (index >= 0) this.showQueued(this.queued.filter((_, i) => i !== index));
         },
       }, selection, images, turnId, mentioned, notes, files);
     } catch (e) {
@@ -628,7 +647,8 @@ export class ObsidianChatView extends ItemView {
       if (this.restorePendingDraft === restorePendingDraft) this.restorePendingDraft = undefined;
       if (!started && isCurrent()) restoreNotes();
       if (!started && isCurrent()) this.rollbackResend?.();
-      if (!started && isCurrent()) chat.restoreDraft?.(text, selection, images, files);
+      // Typed meanwhile, added to a message that was never sent: back in the input with it.
+      if (!started && isCurrent()) chat.restoreDraft?.([text, ...this.takeLeftovers()].join("\n\n"), selection, images, files);
       releaseScreen();
       if (!changes.isEmpty()) this.addChanges(history, turnId, changes);
       // The turn is over: its steps fold into one row above the answer.
@@ -649,6 +669,9 @@ export class ObsidianChatView extends ItemView {
         chat.focus();
         // Persist after each turn
         void this.plugin.saveChatHistory();
+        // Typed after the turn's last step: they run as the next turn.
+        const later = this.takeLeftovers();
+        if (later.length) void this.handleUserMessage(later.join("\n\n"), null);
       }
     }
   }
@@ -759,11 +782,36 @@ export class ObsidianChatView extends ItemView {
     }
   }
 
+  /** A message typed while the turn runs: the agent takes it in after its current step. */
+  private addToRunningTurn(text: string): void {
+    this.showQueued([...this.queued, text]);
+    if (!this.plugin.agent.steer(text)) this.unsteered.push(text);
+  }
+
+  /** Added messages the turn didn't take in; they leave the queue (they run next). */
+  private takeLeftovers(): string[] {
+    const later = [...this.unsteered.splice(0), ...this.plugin.agent.takeSteered()];
+    if (later.length) this.showQueued(this.queued.filter((text) => !later.includes(text)));
+    return later;
+  }
+
+  /** Drop what was added to the running turn (Stop and Clear drop the turn too). */
+  private dropQueued(): void {
+    this.unsteered = [];
+    if (this.queued.length) this.showQueued([]);
+  }
+
+  private showQueued(texts: string[]): void {
+    this.queued = texts;
+    this.chatContainer?.setQueued([...texts]);
+  }
+
   /** Stops the running turn; what it showed so far stays. */
   private stopTurn(): void {
     const restoreDraft = this.restorePendingDraft;
     this.restorePendingDraft = undefined;
     this.runVersion++;
+    this.dropQueued();
     this.plugin.agent.abort();
     this.endStream(true);
     this.rollbackResend?.();
@@ -795,6 +843,7 @@ export class ObsidianChatView extends ItemView {
   private handleClear(): void {
     if (this.undoing) return;
     this.runVersion++;
+    this.dropQueued();
     this.plugin.agent.clear();
     this.rollbackResend = undefined;
     this.restorePendingDraft = undefined;

@@ -295,6 +295,8 @@ export interface AgentCallbacks {
   onError: (error: string) => void;
   /** A first request rejected locally before transport; the UI can restore its unsent draft. */
   onPreflightRejected?: (error: string) => void;
+  /** A message the user added to the running turn (`AgentLoop.steer`) went out with its next step. */
+  onSteered?: (text: string) => void;
   /** Where the turn's tools record their vault changes (undo per answer). */
   changes?: ChangeLog;
 }
