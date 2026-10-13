@@ -23,7 +23,8 @@
 
 - **Three providers, your choice** — Anthropic API, OpenAI API, or sign in with your ChatGPT account. No marketplace of half-broken providers.
 - **22 vault-native tools** — read, edit, search, create, rename, frontmatter, tags and properties, links, canvases, web pages, images, skills. The agent goes from idea to changed files without leaving the chat.
-- **Mobile-parity, by design** — no streaming, no Node-only modules, no localhost callbacks. iOS and Android behave the same as desktop.
+- **Mobile-parity, by design** — no localhost callbacks; iOS and Android behave the same as desktop.
+- **Streamed answers** — the answer appears as the model writes it; where a provider doesn't allow that on a phone, it appears at once when it's done.
 - **Selection scope** — highlight text in any note, send it to chat, the assistant edits only inside the selection.
 - **Secrets in the OS keychain** — never in `data.json`, never synced across devices.
 - **MCP servers** — with an Anthropic or OpenAI API key, add remote MCP servers (public https, optional token) in the settings; the provider connects to them and the AI uses their tools, shown as steps in the chat. They run without asking, so add only servers you trust. Not available with the ChatGPT account.
@@ -208,7 +209,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 
 | Principle | What it means |
 |---|---|
-| **Mobile is not an afterthought** | Every change is validated on iOS and Android. No streaming, no Node-only modules, no localhost callbacks. |
+| **Mobile is not an afterthought** | Every change is validated on iOS and Android. Answers stream where the platform allows it and otherwise arrive whole through Obsidian's `requestUrl()`. No localhost callbacks. |
 | **Three sane providers** | Anthropic + OpenAI for stability, ChatGPT account for users who'd rather not manage an API key. |
 | **Secrets in the keychain** | API keys and OAuth credentials go through Obsidian SecretStorage. They never land in `data.json`, so they never sync to other devices. |
 | **No vault indexing** | Linear search, capped. Predictable, no background work, no memory pressure on phones. |
@@ -235,14 +236,14 @@ Have a request? Open an issue.
 <details>
 <summary><b>Will my notes be uploaded somewhere?</b></summary>
 
-Only what the agent needs for the current turn. When you ask a question, the agent decides which tools to call — `read_document`, `search_vault`, etc. — and the contents fetched by those calls (plus the active note context) are sent to your chosen provider. Images and files you attach are sent with that message and kept in the local chat history until you clear or delete the chat or the message is older than the part of the chat the plugin keeps for the provider; so are images the agent looks at (`view_image`, `view_canvas`) and files it reads (`read_file` on a PDF or Office file). So do the names and descriptions of your skills; a skill's `SKILL.md` goes when the AI uses the skill or you name it with `/`. Nothing is uploaded in the background. There is no vault index. Your vault's root `AGENTS.md`, if there is one, goes with every message; a folder's `AGENTS.md` goes with the first tool result in that folder. When the agent reads a web page (`read_web_page`), your device loads that address, as a browser would, and the page's text goes to your provider like a note's. MCP servers you add in the settings get their requests from your provider, not your device: each message names the servers that are on, with their tokens (kept in the OS keychain, never in plugin files), and the provider connects to them for you; what their tools return goes to the model.
+Only what the agent needs for the current turn. When you ask a question, the agent decides which tools to call — `read_document`, `search_vault`, etc. — and the contents fetched by those calls (plus the active note context) are sent to your chosen provider. Images and files you attach are sent with that message and kept in the local chat history until you clear or delete the chat or the message is older than the part of the chat the plugin keeps for the provider; so are images the agent looks at (`view_image`, `view_canvas`) and files it reads (`read_file` on a PDF or Office file). So do the names and descriptions of your skills; a skill's `SKILL.md` goes when the AI uses the skill or you name it with `/`. Nothing is uploaded in the background. There is no vault index. Your vault's root `AGENTS.md`, if there is one, goes with every message; a folder's `AGENTS.md` goes with the first tool result in that folder. When the agent reads a web page (`read_web_page`), your device loads that address, as a browser would, and the page's text goes to your provider like a note's. MCP servers you add in the settings get their requests from your provider, not your device: each message names the servers that are on, with their tokens (kept in the OS keychain, never in plugin files), and the provider connects to them for you; what their tools return goes to the model. Streamed answers change only how an answer arrives, not where requests go or what they contain.
 
 </details>
 
 <details>
 <summary><b>Does it really work on mobile?</b></summary>
 
-Yes — that's the design constraint everything else is built around. Requests go through Obsidian's `requestUrl()` (mobile WebViews enforce CORS), there's no streaming, no Node-only modules, no localhost callback for OAuth. iOS and Android run the same code path as desktop.
+Yes — that's the design constraint everything else is built around. Requests go through Obsidian's `requestUrl()` (mobile WebViews enforce CORS), except the chat answers, which stream: on desktop through Node's `https`, on mobile through `fetch` where the provider allows it, else through `requestUrl()` all at once. There's no localhost callback for OAuth. iOS and Android have the same features as desktop.
 
 </details>
 

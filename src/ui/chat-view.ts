@@ -70,7 +70,10 @@ interface ChatContainerProps {
 
 interface ChatContainerApi extends Record<string, unknown> {
   addUserMessage(text: string, images?: ImageAttachment[], turnId?: string, selection?: SelectionScope, files?: FileAttachment[]): void;
-  addAssistantMessage(text: string): void;
+  addAssistantMessage(text: string, streaming?: boolean): number;
+  /** Replace an assistant message's text; `final` renders it at once and ends its streaming. */
+  updateAssistantMessage(id: number, text: string, final?: boolean): void;
+  removeMessage(id: number): void;
   cutMessages(turnId: string): void;
   addToolCall(name: string, input: Record<string, unknown>): number;
   updateToolResult(msgId: number, name: string, result: ToolResult): void;
@@ -115,6 +118,11 @@ export class ObsidianChatView extends ItemView {
   private runVersion = 0;
   /** Some of the running turn's answer is on screen. */
   private answerShown = false;
+  /**
+   * The answer being streamed, until the loop delivers it whole: its
+   * message in the chat, its text so far and the history it belongs to.
+   */
+  private streaming: { id: number; text: string; history: ChatHistoryEntry[] } | null = null;
   /** Lets the screen sleep again (the running turn holds it on). */
   private releaseScreen = (): void => {};
   /** Resolves once onOpen() has mounted the chat UI, or failed to. */
@@ -426,6 +434,7 @@ export class ObsidianChatView extends ItemView {
 
     this.running = true;
     this.answerShown = false;
+    this.streaming = null;
     // The screen stays on while the answer is generated.
     const releaseScreen = screenAwake.hold();
     this.releaseScreen = releaseScreen;
@@ -458,10 +467,25 @@ export class ObsidianChatView extends ItemView {
       await this.plugin.agent.run(text, {
         changes,
         onThinking: () => {
+          // Streamed text the loop didn't deliver (a cut-off stream) goes before the next request.
+          this.endStream(false);
           chat.showThinking();
+        },
+        onTextDelta: (delta) => {
+          this.answerShown = true;
+          chat.hideThinking();
+          if (this.streaming) {
+            this.streaming.text += delta;
+            chat.updateAssistantMessage(this.streaming.id, this.streaming.text);
+          } else {
+            this.streaming = { id: chat.addAssistantMessage(delta, true), text: delta, history };
+          }
         },
         onToolCall: (name, input) => {
           chat.hideThinking();
+          // Streamed text the loop didn't deliver (it precedes ask_user,
+          // which shows the question itself) is dropped, as before streaming.
+          this.endStream(false);
           if (name === "ask_user") return;
           // A tool step on screen shows that the turn did something.
           this.answerShown = true;
@@ -477,13 +501,17 @@ export class ObsidianChatView extends ItemView {
         onResponse: (text) => {
           this.answerShown = true;
           chat.hideThinking();
-          chat.addAssistantMessage(text);
+          // The whole text replaces the streamed one: the same message as unstreamed.
+          if (this.streaming) chat.updateAssistantMessage(this.streaming.id, text, true);
+          else chat.addAssistantMessage(text);
+          this.streaming = null;
           history.push({ type: "assistant", text });
         },
         onAskUser: async (question) => {
           // The question is the answer so far.
           this.answerShown = true;
           chat.hideThinking();
+          this.endStream(false);
           chat.setInputEnabled(true);
           // The chat shows the question and the typed answer; keep both in
           // the history so they are still there after a reload.
@@ -497,6 +525,7 @@ export class ObsidianChatView extends ItemView {
         },
         onError: (error) => {
           chat.hideThinking();
+          this.endStream(true);
           chat.addError(error);
           history.push({ type: "error", text: error });
         },
@@ -587,10 +616,27 @@ export class ObsidianChatView extends ItemView {
     this.following = this.following.then(() => showInView(this.plugin.app, target)).catch(() => undefined);
   }
 
+  /**
+   * Ends the streamed message the loop hasn't delivered whole: kept (and
+   * saved for display) when the turn was stopped or failed, else removed.
+   */
+  private endStream(keep: boolean): void {
+    const stream = this.streaming;
+    if (!stream) return;
+    this.streaming = null;
+    if (keep) {
+      this.chatContainer?.updateAssistantMessage(stream.id, stream.text, true);
+      stream.history.push({ type: "assistant", text: stream.text });
+    } else {
+      this.chatContainer?.removeMessage(stream.id);
+    }
+  }
+
   /** Stops the running turn; what it showed so far stays. */
   private stopTurn(): void {
     this.runVersion++;
     this.plugin.agent.abort();
+    this.endStream(true);
     // A stopped request may still be waiting for its response.
     this.releaseScreen();
     this.running = false;
@@ -617,6 +663,7 @@ export class ObsidianChatView extends ItemView {
   private handleClear(): void {
     this.runVersion++;
     this.plugin.agent.clear();
+    this.streaming = null;
     this.releaseScreen();
     this.plugin.chatHistory = [];
     delete this.plugin.activeConversation.notes;

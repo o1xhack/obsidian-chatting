@@ -164,6 +164,12 @@ export interface UnifiedResponse {
   serverCalls?: ServerToolCall[];
 }
 
+/** Per request: where streamed answer text goes, and how Stop cancels it. */
+export interface StreamOptions {
+  onTextDelta?: (text: string) => void;
+  signal?: AbortSignal;
+}
+
 // ─── Conversation Context ───────────────────────────────────────────────────
 
 export interface ConversationContext {
@@ -264,6 +270,8 @@ export interface ViewTarget {
 
 export interface AgentCallbacks {
   onThinking: () => void;
+  /** Answer text as it streams in; `onResponse` later gives the whole text. */
+  onTextDelta?: (text: string) => void;
   onToolCall: (name: string, input: Record<string, unknown>) => void;
   onToolResult: (name: string, result: ToolResult) => void;
   onResponse: (text: string) => void;

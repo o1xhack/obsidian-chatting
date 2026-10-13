@@ -1,6 +1,7 @@
 import { type ModelOption, cachedCatalog, catalogIdentity, catalogModel, resolveThinkingLevel } from "./model-catalog";
-import { requestUrl } from "obsidian";
-import { ProviderError, retryAfterMs } from "./errors";
+import { ProviderError, StreamCutError } from "./errors";
+import { streamSSE } from "./stream";
+import { asRecord, getNestedString, isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
 import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 import type {
@@ -12,6 +13,7 @@ import type {
   ContentBlock,
   ImageAttachment,
   FileAttachment,
+  StreamOptions,
 } from "../types";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
@@ -30,7 +32,9 @@ function thinkingTypeByName(model: string): ModelOption["thinkingType"] {
 }
 
 /**
- * Sends a message to the Anthropic Messages API via requestUrl().
+ * Sends a message to the Anthropic Messages API. The answer is streamed
+ * (`api/stream.ts`) and rebuilt into the same message the non-streamed API
+ * returns.
  *
  * Anthropic format:
  * - System prompt is a top-level field, not a message
@@ -41,7 +45,8 @@ export async function sendAnthropicMessage(
   settings: ChatSettings,
   messages: UnifiedMessage[],
   tools: UnifiedToolDef[],
-  systemPrompt: string
+  systemPrompt: string,
+  stream: StreamOptions = {},
 ): Promise<UnifiedResponse> {
   const model = settings.model;
   const identity = await catalogIdentity("anthropic", settings.apiKey);
@@ -51,6 +56,7 @@ export async function sendAnthropicMessage(
   const body: Record<string, unknown> = {
     model,
     max_tokens: 16384,
+    stream: true,
     // System prompt as a content block with cache_control breakpoint.
     // Anthropic caches everything up to the breakpoint across requests.
     system: [
@@ -115,39 +121,27 @@ export async function sendAnthropicMessage(
     body.tools = [...Array.isArray(body.tools) ? body.tools as Record<string, unknown>[] : [], ...mcp.toolsets];
   }
 
-  let response;
-  try {
-    response = await requestUrl({
-      url: ANTHROPIC_API_URL,
-      method: "POST",
-      headers: {
-        "x-api-key": settings.apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-        ...(servers.length ? { "anthropic-beta": ANTHROPIC_MCP_BETA } : {}),
-      },
-      body: JSON.stringify(body),
-      throw: false,
-    });
-  } catch (e: unknown) {
-    // requestUrl throws on network errors; extract API details if available
-    const err = asRecord(e);
-    const status = typeof err.status === "number" ? err.status : "unknown";
-    const apiMsg = getNestedString(err, ["json", "error", "message"]);
-    if (apiMsg) {
-      throw new Error(`Anthropic API error (${status}): ${apiMsg}`);
-    }
-    throw e;
-  }
+  const collected = collectAnthropicStream(stream.onTextDelta);
+  const response = await streamSSE(ANTHROPIC_API_URL, {
+    headers: {
+      "x-api-key": settings.apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      // Required for the CORS answer to `fetch` from Obsidian's origins (mobile).
+      "anthropic-dangerous-direct-browser-access": "true",
+      ...(servers.length ? { "anthropic-beta": ANTHROPIC_MCP_BETA } : {}),
+    },
+    body: JSON.stringify(body),
+  }, collected.onEvent, stream.signal);
 
   if (response.status !== 200) {
-    const responseJson = response.json as unknown;
-    const errorText = getNestedString(responseJson, ["error", "message"]) ?? `HTTP ${response.status}`;
+    const errorText = getNestedString(response.json, ["error", "message"]) ?? `HTTP ${response.status}`;
     throw new ProviderError(`Anthropic API error (${response.status}): ${errorText}`, response.status,
-      getNestedString(responseJson, ["error", "type"]), retryAfterMs(response.headers));
+      getNestedString(response.json, ["error", "type"]), response.retryAfterMs);
   }
 
-  const data = parseAnthropicResponse(response.json as unknown);
+  const data = parseAnthropicResponse(collected.finish());
   const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
   const sources = citedSources(data.content);
   if (sources) {
@@ -167,6 +161,94 @@ export async function sendAnthropicMessage(
       ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
       : undefined,
     ...withServerCalls(anthropicServerCalls(data.content)),
+  };
+}
+
+// ─── Streaming ──────────────────────────────────────────────────────────────
+
+/**
+ * Rebuilds the message from Messages API stream events, block by block:
+ * text, thinking and signatures are concatenated from their deltas, tool
+ * inputs (also of MCP calls) parsed from their JSON deltas, citations
+ * collected; other blocks (redacted thinking, web search and MCP tool
+ * results) arrive whole in `content_block_start`. Text deltas also go to
+ * `onTextDelta`.
+ */
+function collectAnthropicStream(onTextDelta?: (text: string) => void): {
+  onEvent: (event: Record<string, unknown>) => void;
+  finish: () => Record<string, unknown>;
+} {
+  let message: Record<string, unknown> | undefined;
+  const blocks: Record<string, unknown>[] = [];
+  const inputJson = new Map<number, string>();
+  let stopped = false;
+  let failure: ProviderError | undefined;
+  return {
+    onEvent: (event) => {
+      const index = typeof event.index === "number" ? event.index : -1;
+      const delta = asRecord(event.delta);
+      switch (event.type) {
+        case "message_start":
+          message = { ...asRecord(event.message) };
+          break;
+        case "content_block_start":
+          if (index >= 0 && isRecord(event.content_block)) blocks[index] = { ...event.content_block };
+          break;
+        case "content_block_delta": {
+          const block = blocks[index];
+          if (!block) break;
+          if (delta.type === "text_delta" && typeof delta.text === "string") {
+            block.text = (typeof block.text === "string" ? block.text : "") + delta.text;
+            if (delta.text) onTextDelta?.(delta.text);
+          } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+            block.thinking = (typeof block.thinking === "string" ? block.thinking : "") + delta.thinking;
+          } else if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+            block.signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
+          } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            inputJson.set(index, (inputJson.get(index) ?? "") + delta.partial_json);
+          } else if (delta.type === "citations_delta" && delta.citation !== undefined) {
+            block.citations = [...(Array.isArray(block.citations) ? block.citations as unknown[] : []), delta.citation];
+          }
+          break;
+        }
+        case "content_block_stop": {
+          const json = inputJson.get(index);
+          const block = blocks[index];
+          if (block && json) {
+            try {
+              const input: unknown = JSON.parse(json);
+              if (isRecord(input)) block.input = input;
+            } catch {
+              // Truncated input (max_tokens): the loop won't run this call.
+            }
+          }
+          // A server_tool_use may start without `input`; replay needs one.
+          if (block && (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") && !isRecord(block.input)) block.input = {};
+          break;
+        }
+        case "message_delta":
+          if (message) {
+            Object.assign(message, delta);
+            if (isRecord(event.usage)) message.usage = { ...asRecord(message.usage), ...event.usage };
+          }
+          break;
+        case "message_stop":
+          stopped = true;
+          break;
+        case "error": {
+          // Status 0: the error came inside the stream; its type decides on a retry.
+          const error = asRecord(event.error);
+          const type = typeof error.type === "string" ? error.type : "error";
+          failure = new ProviderError(`Anthropic API error (${type}): ${typeof error.message === "string" ? error.message : "stream failed"}`, 0, type);
+          break;
+        }
+      }
+    },
+    finish: () => {
+      if (failure) throw failure;
+      if (!message || !stopped) throw new StreamCutError("Anthropic");
+      return { ...message, content: blocks.filter(Boolean) };
+    },
   };
 }
 
@@ -216,23 +298,6 @@ function isAnthropicContentBlock(value: unknown): value is AnthropicContentBlock
 function normalizeStopReason(value: string | undefined): UnifiedResponse["stopReason"] {
   if (value === "tool_use" || value === "max_tokens" || value === "stop" || value === "pause_turn") return value;
   return "end_turn";
-}
-
-function getNestedString(value: unknown, path: string[]): string | undefined {
-  let current: unknown = value;
-  for (const key of path) {
-    if (!isRecord(current)) return undefined;
-    current = current[key];
-  }
-  return typeof current === "string" ? current : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[]): Record<string, unknown> {

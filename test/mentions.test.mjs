@@ -119,7 +119,8 @@ function fakeChat() {
   const chat = {
     shown: [],
     addUserMessage(value, images = []) { chat.shown.push({ type: 'user', text: value, images }); },
-    addAssistantMessage(value) { chat.shown.push({ type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ type: 'assistant', text: value }); return chat.shown.length - 1; },
+    updateAssistantMessage(id, value) { chat.shown[id].text = value; }, removeMessage(id) { chat.shown.splice(id, 1); },
     addToolCall() { return 0; }, updateToolResult() {},
     addError(value) { chat.shown.push({ type: 'error', text: value }); },
     showThinking() {}, hideThinking() {},
