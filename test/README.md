@@ -118,6 +118,11 @@ unstreamed one, the Codex route with its endpoint and headers; the
 retry only before text is shown; a cut-off stream sent again, at most
 twice). `stream-desktop.test.mjs`: desktop streams through Node's `https`
 (errors, Stop); on mobile a blocked `fetch` switches only that URL.
+`background.test.mjs`: back from the background (the lifecycle hints;
+leaving saves; a request that failed or stalled in the background sent
+again at most twice, "Resuming…"; no `requestUrl()` fallback for a
+`fetch` failing in the background; the mobile stall watch, none on
+desktop; Continue after Obsidian was ended mid-turn and what dismisses it).
 `typed-steering.test.mjs`: typing while an answer runs (queued, taken in
 with the next step or run as the next turn; Stop and Clear drop it;
 trimming never starts at tool results with an added message).

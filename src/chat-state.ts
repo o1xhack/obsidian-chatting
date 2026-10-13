@@ -33,6 +33,17 @@ export interface ConversationRecord {
   agentMessages: UnifiedMessage[];
   /** For the model with the next turn: what the user did meanwhile (e.g. undid an answer's changes). */
   notes?: string[];
+  /**
+   * Set while a turn runs (saved with it when the app goes to the
+   * background); still there at the next start, the turn was cut off.
+   */
+  pendingTurn?: PendingTurn;
+}
+
+/** The turn a conversation was running. */
+export interface PendingTurn {
+  turnId: string;
+  startedAt: number;
 }
 
 /** `chat-state.json` as this version writes it. */
@@ -89,6 +100,11 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
       const chatHistory = arrayOf<ChatHistoryEntry>(item.chatHistory);
       const customTitle = item.customTitle === true && typeof item.title === "string";
       const notes = arrayOf<unknown>(item.notes).filter((note): note is string => typeof note === "string");
+      // Optional, so no new format version: an older plugin just drops it.
+      const pending = item.pendingTurn;
+      const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
+        ? { turnId: pending.turnId, startedAt: pending.startedAt }
+        : undefined;
       return {
         id: item.id as string,
         title: customTitle ? item.title as string : conversationTitle(chatHistory),
@@ -98,6 +114,7 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
         chatHistory,
         agentMessages: arrayOf<UnifiedMessage>(item.agentMessages),
         ...(notes.length ? { notes } : {}),
+        ...(pendingTurn ? { pendingTurn } : {}),
       };
     });
   if (conversations.length === 0) conversations.push(newConversation());

@@ -26,6 +26,7 @@
 - **Mobile-parity, by design** — no localhost callbacks; iOS and Android behave the same as desktop.
 - **Streamed answers** — the answer appears as the model writes it; where a provider doesn't allow that on a phone, it appears at once when it's done.
 - **Add to a running answer** — type and send while the AI is still working: your message joins the running task (shown as *Queued* until the AI takes it in) instead of waiting. The button is Stop while the input is empty.
+- **Back from the background** — switch apps or lock the phone while an answer runs: when you come back, a request the phone cut off is sent again ("Resuming…"), and if the phone closed Obsidian meanwhile, the chat offers **Continue** to finish the interrupted answer.
 - **Selection scope** — highlight text in any note, send it to chat, the assistant edits only inside the selection.
 - **Secrets in the OS keychain** — never in `data.json`, never synced across devices.
 - **MCP servers** — with an Anthropic or OpenAI API key, add remote MCP servers (public https, optional token) in the settings; the provider connects to them and the AI uses their tools, shown as steps in the chat. They run without asking, so add only servers you trust. Not available with the ChatGPT account.

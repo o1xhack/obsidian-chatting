@@ -124,7 +124,7 @@ function fakeChat() {
     addToolCall() { return 0; }, updateToolResult() {},
     addError(value) { chat.shown.push({ type: 'error', text: value }); },
     showThinking() {}, hideThinking() {},
-    setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setQueued() {}, focus() {}, cancelAskUser() {}, setTitle() {},
+    setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {}, focus() {}, cancelAskUser() {}, setTitle() {},
   };
   return chat;
 }

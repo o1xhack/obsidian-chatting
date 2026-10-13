@@ -32,8 +32,9 @@ import { ChatGPTOAuthStore } from "./auth/chatgptOAuthStore";
 import { ChatGPTOAuthService } from "./auth/chatgptOAuth";
 import { migrateOAuthModel as migrateChatGPTOAuthModelSlug, cachedCatalog, catalogIdentity, normalizeCatalogState } from "./api/model-catalog";
 import { setChatGPTOAuthService } from "./api/chatgpt-oauth";
-import { readDebugLog, setDebugLogging } from "./debug";
+import { debugLog, readDebugLog, setDebugLogging } from "./debug";
 import { screenAwake } from "./platform/screen-awake";
+import { appLifecycle } from "./platform/lifecycle";
 
 const PLUGIN_ID = "chatting-with-ai";
 const LEGACY_PLUGIN_ID = "obsidian-chatting";
@@ -138,6 +139,7 @@ export default class ChatPlugin extends Plugin {
 
     // Restore persisted chat history
     await this.loadChatHistory();
+    this.watchLifecycle();
     // A follow tab saved with the layout when Obsidian last closed goes.
     this.app.workspace.onLayoutReady(() => closeLeftoverFollowTab(this.app));
 
@@ -258,6 +260,17 @@ export default class ChatPlugin extends Plugin {
         }
       })
     );
+  }
+
+  /**
+   * Follow whether Obsidian is in the foreground (each hint goes to the
+   * debug log). Leaving it saves the chats: a phone may end Obsidian in the
+   * background without another event, and a running turn's progress and
+   * its mark (`pendingTurn`) are then on disk.
+   */
+  private watchLifecycle(): void {
+    appLifecycle.watch(this, (hint, visibility) => debugLog(this.app, "LIFECYCLE", { hint, visibility }));
+    this.register(appLifecycle.onHidden(() => void this.saveChatHistory()));
   }
 
   onunload(): void {
