@@ -1,7 +1,8 @@
-import type { ContentBlock, FileAttachment, ImageAttachment, Provider, UnifiedMessage, UnifiedResponse } from "../types";
+import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, UnifiedMessage, UnifiedResponse } from "../types";
 import { ProviderError } from "./errors";
 import { withoutOldToolImages } from "../agent/history";
 import { fileAsText, isSentAsFile } from "../files/attachments";
+import { openaiServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 
 /** Encode both fresh input and restored history without losing tool pairs. */
 export function buildResponsesInput(
@@ -9,11 +10,13 @@ export function buildResponsesInput(
   provider: Extract<Provider, "openai" | "chatgpt-oauth">,
   model?: string,
   identity?: string,
+  /** The MCP servers of this request; calls of others aren't replayed. */
+  servers: McpServer[] = [],
 ): Record<string, unknown>[] {
   const items: Record<string, unknown>[] = [];
   for (const message of withoutOldToolImages(messages)) {
     if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
-      items.push(...message.replay.items);
+      items.push(...withoutGoneServerCalls(message.replay.items, servers));
       continue;
     }
     const content: Record<string, unknown>[] = [];
@@ -125,6 +128,8 @@ export function fromResponsesOutput(
     replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
     usage: usage ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) } : undefined,
+    // Tools OpenAI called on MCP servers; their items stay in the replay as sent.
+    ...withServerCalls(openaiServerCalls(output)),
   };
 }
 

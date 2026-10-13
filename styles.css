@@ -81,6 +81,16 @@ body.is-phone .ochatting-settings .setting-item-control {
   max-width: 100%;
 }
 
+/* An MCP server: name, address and token fields share the row, the address widest */
+.ochatting-settings .ochatting-mcp-server .setting-item-control input[type="text"],
+.ochatting-settings .ochatting-mcp-server .setting-item-control input[type="password"] {
+  width: 9em;
+}
+
+.ochatting-settings .ochatting-mcp-server .setting-item-control input[placeholder^="https"] {
+  width: 16em;
+}
+
 .ochatting-oauth-explainer {
   padding: 0.75em;
   margin-bottom: 0.75em;

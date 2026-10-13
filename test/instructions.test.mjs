@@ -121,7 +121,7 @@ test('Settings: Vault instructions creates AGENTS.md with a short comment, then 
   const ignore = () => {};
   delete tab.display;
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderInstructions: setting => drawn.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderInstructions: setting => drawn.push(setting) });
   tab.display();
   assert.equal(drawn.length, 1);
 });

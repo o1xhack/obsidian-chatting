@@ -528,7 +528,7 @@ test('Declarative settings stay searchable and reuse the legacy renderers withou
   const plugin={settings:settings('openai')}; const tab=new api.ChatSettingTab(settingsApp,plugin);
   globalThis.__providerRequest=async()=>assert.fail('Indexing must not perform network I/O');
   const definitions=tab.getSettingDefinitions();
-  assert.deepEqual(definitions.map(d=>d.name),['Provider','API key','ChatGPT account','Model','Custom model ID','Thinking level','Web search','Enter sends message',"Follow the AI's edits",'Vault instructions','Skills',undefined,'Max tool iterations','Debug log']);
+  assert.deepEqual(definitions.map(d=>d.name),['Provider','API key','ChatGPT account','Model','Custom model ID','Thinking level','Web search','Enter sends message',"Follow the AI's edits",'Vault instructions','Skills',undefined,'Max tool iterations','MCP servers',undefined,'Debug log']);
   assert.equal(definitions[1].visible(),true); assert.equal(definitions[2].visible(),false);
   plugin.settings.provider='chatgpt-oauth'; assert.equal(definitions[1].visible(),false); assert.equal(definitions[2].visible(),true);
   let updates=0,displays=0; tab.display=()=>displays++;

@@ -13,6 +13,7 @@ import type {
 import { sendMessage } from "../api/client";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
@@ -300,9 +301,16 @@ export class AgentLoop {
           block.type === "text" ? { type: "text", text: block.text }
           : block.type === "tool_use" ? { type: "tool_use", name: block.name, input: block.input }
           : { type: block.type }),
+        ...(response.serverCalls ? { serverCalls: response.serverCalls } : {}),
       });
 
       if (isStopped()) return;
+
+      // Tools the provider called on MCP servers: shown as steps, not run here.
+      for (const call of response.serverCalls ?? []) {
+        callbacks.onToolCall(serverToolName(call), call.input);
+        callbacks.onToolResult(serverToolName(call), { result: call.result, isError: call.isError });
+      }
 
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {

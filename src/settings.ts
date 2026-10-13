@@ -1,15 +1,19 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, normalizePath, requireApiVersion, type SettingDefinitionItem } from "obsidian";
 import type ChatPlugin from "./main";
-import type { ChatSettings, Provider } from "./types";
+import type { ChatSettings, McpServer, Provider } from "./types";
 import { DEFAULT_PROVIDER_MODELS } from "./types";
 import type { ChatGPTDeviceAuthorization, PollHandle } from "./auth/chatgptOAuth";
 import { clearDebugLog } from "./debug";
 import { INSTRUCTIONS_FILE } from "./agent/instructions";
 import { DEFAULT_SKILLS_FOLDER, SKILL_FILE, SKILL_TEMPLATE, findSkills, type Skill } from "./agent/skills";
+import { validServerName, validServerUrl } from "./api/mcp";
 
 import { type ModelOption, type CatalogState, catalogIdentity, cachedCatalog, refreshCatalog, getCatalogModels, clearCatalogModels, catalogModel, catalogDefaultLevel, resolveThinkingLevel, thinkingLevelLabel, CATALOG_TTL } from "./api/model-catalog";
 
 const CUSTOM_MODEL_OPTION = "__custom__";
+
+/** The MCP heading row's name, in its definition and on the row (MCP is an acronym). */
+const MCP_SERVERS = "MCP servers";
 
 /** A new AGENTS.md: a comment saying what goes in it (the AI reads it too, harmlessly). */
 const INSTRUCTIONS_TEMPLATE = "<!-- Instructions for AI assistants working in this vault (Chatting with AI and other tools that read AGENTS.md). Write each instruction as a plain sentence below. -->\n\n";
@@ -51,12 +55,12 @@ export function getModelHeaderLabel(provider: Provider, modelId: string, level: 
 
 /**
  * Settings for the Test buttons: one word back, as fast as the model allows.
- * No web search and the lightest thinking level the catalog lists (providers
- * list them lightest first); the chat settings stay as they are.
+ * No web search, no MCP servers and the lightest thinking level the catalog
+ * lists (providers list them lightest first); the chat settings stay as they are.
  */
 function connectionTestSettings(settings: ChatSettings): ChatSettings {
   const efforts = catalogModel(settings.provider, settings.model)?.reasoningEfforts;
-  return { ...settings, enableWebSearch: false, thinkingLevel: efforts?.[0] ?? settings.thinkingLevel };
+  return { ...settings, enableWebSearch: false, mcpServers: [], thinkingLevel: efforts?.[0] ?? settings.thinkingLevel };
 }
 
 // ─── Settings Tab ───────────────────────────────────────────────────────────
@@ -109,6 +113,8 @@ export class ChatSettingTab extends PluginSettingTab {
       { name: "Skills", aliases: ["Skill", "SKILL.md", "Skills folder"], render: setting => this.renderSkillsFolder(setting) },
       this.skillList(),
       { name: "Max tool iterations", render: setting => this.renderMaxIterations(setting) },
+      { name: MCP_SERVERS, aliases: ["Connectors", "Model Context Protocol"], render: setting => this.renderMcpHeading(setting) },
+      this.mcpServerList(),
       { name: "Debug log", aliases: ["Troubleshooting"], render: setting => this.renderDebugLog(setting) },
     ];
   }
@@ -146,6 +152,7 @@ export class ChatSettingTab extends PluginSettingTab {
     this.renderInstructions(new Setting(containerEl));
     this.renderSkills(containerEl);
     this.renderMaxIterations(new Setting(containerEl));
+    this.renderMcpServers(containerEl);
     this.renderDebugLog(new Setting(containerEl));
   }
 
@@ -322,6 +329,105 @@ export class ChatSettingTab extends PluginSettingTab {
             }
           })
       );
+  }
+
+  // ─── MCP servers ───────────────────────────────────────────────────────
+
+  private renderMcpHeading(setting: Setting): void {
+    setting
+      .setName(MCP_SERVERS)
+      .setDesc(this.plugin.settings.provider === "chatgpt-oauth"
+        ? "Remote MCP servers work with an Anthropic or OpenAI API key; the ChatGPT account doesn't offer them."
+        : "Remote servers (public https) whose tools the AI can use. The provider connects to them and calls their tools without asking, so add only servers you trust.");
+  }
+
+  /** Obsidian 1.13+: the servers as a list, one row each; add and delete. */
+  private mcpServerList(): SettingDefinitionItem {
+    const s = this.plugin.settings;
+    return {
+      type: "list",
+      emptyState: "No servers yet.",
+      items: (s.mcpServers ?? []).map((server) => ({
+        name: server.name || "New server",
+        aliases: ["MCP"],
+        render: (setting: Setting) => this.renderMcpServer(setting, server),
+      })),
+      onDelete: (index) => {
+        const server = s.mcpServers[index];
+        if (server) void this.removeMcpServer(server.id);
+      },
+      addItem: { name: "Add server", action: () => void this.addMcpServer() },
+    };
+  }
+
+  /** Before Obsidian 1.13: the same as rows, each with a remove button, and Add server below them. */
+  private renderMcpServers(containerEl: HTMLElement): void {
+    this.renderMcpHeading(new Setting(containerEl));
+    for (const server of this.plugin.settings.mcpServers ?? []) {
+      this.renderMcpServer(new Setting(containerEl), server, true);
+    }
+    this.renderAddMcpServer(new Setting(containerEl));
+  }
+
+  /** One server's row: what is missing (or on/off), name, address, token, on/off; Remove where no list deletes it. */
+  private renderMcpServer(setting: Setting, server: McpServer, removable = false): void {
+    const s = this.plugin.settings;
+    const status = () => {
+      const problems = [
+        ...(validServerName(server.name) ? [] : ["a name of letters, digits, - or _"]),
+        ...(validServerUrl(server.url) ? [] : ["an https address"]),
+      ];
+      const duplicate = !!server.name && (s.mcpServers ?? []).some((other) => other !== server && other.name === server.name);
+      setting.setName(server.name || "New server");
+      setting.setDesc(problems.length ? `Needs ${problems.join(" and ")}.` : duplicate ? "Another server has this name." : server.enabled ? "On" : "Off");
+    };
+    const save = async () => {
+      status();
+      await this.plugin.saveSettings();
+    };
+    setting
+      .setClass("ochatting-mcp-server")
+      .addText((text) => text.setPlaceholder("Name").setValue(server.name).onChange(async (value) => {
+        server.name = value.trim();
+        await save();
+      }))
+      .addText((text) => text.setPlaceholder("https://…").setValue(server.url).onChange(async (value) => {
+        server.url = value.trim();
+        await save();
+      }))
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text.setPlaceholder("Token (optional)").setValue(server.token ?? "").onChange(async (value) => {
+          server.token = value.trim() || undefined;
+          await save();
+        });
+      })
+      .addToggle((toggle) => toggle.setValue(server.enabled).setTooltip("Use this server").onChange(async (value) => {
+        server.enabled = value;
+        await save();
+      }));
+    if (removable) {
+      setting.addExtraButton((button) => button.setIcon("trash").setTooltip("Remove").onClick(() => void this.removeMcpServer(server.id)));
+    }
+    status();
+  }
+
+  private renderAddMcpServer(setting: Setting): void {
+    setting
+      .setDesc(this.plugin.settings.mcpServers?.length ? "" : "No servers yet.")
+      .addButton((button) => button.setButtonText("Add server").onClick(() => void this.addMcpServer()));
+  }
+
+  private async addMcpServer(): Promise<void> {
+    const s = this.plugin.settings;
+    s.mcpServers = [...s.mcpServers ?? [], { id: `mcp-${Date.now().toString(36)}`, name: "", url: "", enabled: true }];
+    await this.plugin.saveSettings();
+    this.refreshSettingsTab();
+  }
+
+  private async removeMcpServer(id: string): Promise<void> {
+    await this.plugin.removeMcpServer(id);
+    this.refreshSettingsTab();
   }
 
   private renderDebugLog(setting: Setting): void {
