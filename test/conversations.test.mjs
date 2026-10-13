@@ -1,6 +1,8 @@
-// Named conversations: the chat-state.json version 3 format and its
-// one-time migration, restoring the active conversation, titles, the caps
-// per conversation; new chat, switching, renaming and deleting through the
+// Named conversations: the saved chats (version 4: the index in
+// chat-state.json and a file per chat) and the one-time migrations to it,
+// restoring the active conversation, titles, what each chat file keeps,
+// chats read when opened, unlisted files added back and deleted ones gone;
+// new chat, switching, renaming and deleting through the
 // chat view, and that histories and OpenAI chaining stay within their
 // conversation; a turn that goes on in the background (its question waits
 // for the return, notices, deleting the chat stops it); the commands that
@@ -8,7 +10,7 @@
 // Svelte component.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, settings, text, call, response, transport, vaultApp } from './harness.mjs';
+import { api, settings, text, call, response, transport, vaultApp, chatFiles, PLUGIN_DIR as DIR } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -43,17 +45,13 @@ function fakeChat() {
   return chat;
 }
 
-// A plugin that loads `saved` as its chat-state.json (none when undefined),
-// records its writes, and has a chat view with a fake component.
+// A plugin that loads `saved` as its saved chats (none when undefined; a
+// whole version 4 state is split into the index and its chat files),
+// records the saved states whole, and has a chat view with a fake component.
 async function setup(provider, saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async (path) => { if (!saved || !path.endsWith('/chat-state.json')) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async (path) => !!saved && path.endsWith('/chat-state.json'),
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   // New conversations' agent loops use the plugin's settings.
@@ -63,7 +61,7 @@ async function setup(provider, saved) {
   const view = new api.ObsidianChatView({}, plugin);
   const chat = fakeChat();
   view.chatContainer = chat;
-  return { app, plugin, view, chat, writes };
+  return { app, plugin, view, chat, writes, files: adapter.stored };
 }
 
 // Answers each request with "A<n>" (n counts requests).
@@ -143,13 +141,13 @@ test('A version 1 or 2 chat becomes the first, active conversation, once', async
   assert.deepEqual(userTurns(requests[0]), ['Old question', 'Next']);
   const saved = writes.at(-1);
   assert.equal(saved.version, CHAT_STATE_VERSION);
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, 4);
   assert.equal(saved.conversations.length, 1);
   assert.equal(saved.activeConversationId, plugin.activeConversationId);
   assert.equal('chatHistory' in saved, false);
   assert.equal('agentMessages' in saved, false);
-  // Version 3 isn't migrated again: the same conversation, the same ID.
-  assert.deepEqual(migrateChatState(saved).conversations.map(c => c.id), [saved.activeConversationId]);
+  // The index isn't migrated again: the same conversation, the same ID, waiting for its file.
+  assert.deepEqual(migrateChatState(saved).conversations.map(c => [c.id, c.unloaded]), [[saved.activeConversationId, true]]);
 });
 
 test('The active conversation is restored on load, with its own API history; the others are kept as they were', async () => {
@@ -161,10 +159,13 @@ test('The active conversation is restored on load, with its own API history; the
   const requests = answering('anthropic');
   await view.handleUserMessage('Back to B', null);
   assert.deepEqual(userTurns(requests[0]), ['Topic B', 'Back to B']);
+  await plugin.saveChatHistory();
   const written = writes.at(-1);
   assert.equal(written.activeConversationId, 'b');
   assert.deepEqual(written.conversations.map(c => c.id), ['a', 'b']);
-  assert.deepEqual(written.conversations[0], { ...saved.conversations[0], automaticTitle: 'Topic A', titleSourceTurnId: 'a-t' });
+  const { size, ...a } = written.conversations[0];
+  assert.deepEqual(a, { ...saved.conversations[0], automaticTitle: 'Topic A', titleSourceTurnId: 'a-t' });
+  assert.ok(size > 0);
   assert.deepEqual(texts(written.conversations[1].chatHistory), ['Topic B', 'Topic B answer', 'Back to B', 'A1']);
   assert.equal(written.conversations[1].agentMessages.length, 4);
 });
@@ -197,7 +198,7 @@ test('Titles: first user message, one line, at most 40 characters; a renamed tit
   assert.deepEqual(state.conversations.map(c => [c.title, c.customTitle]), [['Stale title', false], ['My name', true]]);
 });
 
-test('Each conversation is saved with its own caps (100 entries, 80 API messages); empty ones only while active', async () => {
+test('Each conversation is saved whole: every visible entry, the API history from its last compaction on; empty ones only while active', async () => {
   const { plugin, view, writes } = await setup('anthropic');
   answering('anthropic');
   await view.handleUserMessage('Current', null);
@@ -208,15 +209,24 @@ test('Each conversation is saved with its own caps (100 entries, 80 API messages
   }
   plugin.conversations.push(big, api.chatState.newConversation(2));
   await plugin.saveChatHistory();
-  const saved = writes.at(-1);
-  assert.equal(saved.conversations.length, 2);
-  const capped = saved.conversations.find(c => c.id === big.id);
-  assert.equal(capped.chatHistory.length, 100);
-  assert.equal(capped.chatHistory[0].text, 'Q10');
-  assert.equal(capped.agentMessages.length, 80);
-  assert.equal(capped.agentMessages[0].turnId, 't20');
+  const saved = () => writes.at(-1).conversations.find(c => c.id === big.id);
+  assert.equal(writes.at(-1).conversations.length, 2);
+  assert.equal(saved().chatHistory.length, 120);
+  assert.equal(saved().agentMessages.length, 120);
+
+  // A compaction with a readable summary: what it covers isn't kept.
+  big.agentMessages[101].compaction = { summary: 'Earlier' };
+  await plugin.saveChatHistory();
+  assert.equal(saved().agentMessages.length, 19);
+  assert.equal(saved().agentMessages[0].compaction.summary, 'Earlier');
+  assert.equal(saved().chatHistory.length, 120);
+  // An encrypted one (no summary) keeps what it covers, from the compaction before it on.
+  big.agentMessages[111].compaction = {};
+  await plugin.saveChatHistory();
+  assert.equal(saved().agentMessages.length, 19);
+  assert.equal(saved().agentMessages[0].compaction.summary, 'Earlier');
   // In memory nothing is cut.
-  assert.equal(big.chatHistory.length, 120);
+  assert.equal(big.agentMessages.length, 120);
 
   // A fresh start: the active conversation is saved even while empty.
   const fresh = await setup('anthropic');
@@ -261,24 +271,24 @@ test('New chat, switch, rename and delete', async () => {
   assert.deepEqual(titles(plugin), ['Second topic', 'First topic']);
   assert.deepEqual(plugin.listConversations().map(c => c.active), [true, false]);
 
-  view.openConversation(first);
+  await view.openConversation(first);
   assert.equal(plugin.activeConversationId, first);
   assert.deepEqual(texts(chat.shown), ['First topic', 'A1']);
   assert.equal(chat.title, 'First topic');
   assert.deepEqual(texts(plugin.chatHistory), ['First topic', 'A1']);
 
   // Rename: kept over later turns; an empty name goes back to the automatic title.
-  view.renameConversation(first, '  My   own name ');
+  await view.renameConversation(first, '  My   own name ');
   assert.equal(chat.title, 'My own name');
   await tick();
   await view.handleUserMessage('More', null);
   assert.deepEqual(titles(plugin), ['My own name', 'Second topic']);
-  view.renameConversation(first, '   ');
+  await view.renameConversation(first, '   ');
   assert.deepEqual(titles(plugin), ['First topic', 'Second topic']);
   assert.equal(chat.title, 'First topic');
 
   // Deleting another conversation leaves the current one alone.
-  view.deleteConversation(second);
+  await view.deleteConversation(second);
   assert.equal(plugin.activeConversationId, first);
   assert.deepEqual(titles(plugin), ['First topic']);
   assert.deepEqual(texts(chat.shown), ['First topic', 'A1', 'More', 'A3']);
@@ -296,14 +306,14 @@ test('Deleting the current conversation opens the most recent other; deleting th
   await tick();
   await view.handleUserMessage('Newest', null);
 
-  view.deleteConversation(plugin.activeConversationId);
+  await view.deleteConversation(plugin.activeConversationId);
   assert.deepEqual(texts(chat.shown), ['Newer', 'A2']);
   assert.deepEqual(titles(plugin), ['Newer', 'Older']);
-  view.deleteConversation(plugin.activeConversationId);
+  await view.deleteConversation(plugin.activeConversationId);
   assert.equal(plugin.activeConversationId, older);
   assert.deepEqual(texts(chat.shown), ['Older', 'A1']);
 
-  view.deleteConversation(older);
+  await view.deleteConversation(older);
   assert.deepEqual(chat.shown, []);
   assert.equal(chat.title, NEW_CHAT_TITLE);
   assert.deepEqual(titles(plugin), []);
@@ -327,7 +337,7 @@ test('The conversation open last is the one restored after a reload, with its ow
   first.view.newChat();
   await tick();
   await first.view.handleUserMessage('Topic B', null);
-  first.view.openConversation(a);
+  await first.view.openConversation(a);
   await first.plugin.saveChatHistory();
 
   const { plugin, view, chat } = await setup('anthropic', first.writes.at(-1));
@@ -349,13 +359,13 @@ test('Editing the first message updates the automatic title; a rename stays acro
   assert.equal(plugin.activeConversation.title, 'Edited question');
   assert.equal(chat.title, 'Edited question');
 
-  view.renameConversation(plugin.activeConversationId, 'Named');
+  await view.renameConversation(plugin.activeConversationId, 'Named');
   await plugin.saveChatHistory();
   const restored = await setup('anthropic', writes.at(-1));
   assert.equal(restored.plugin.activeConversation.title, 'Named');
   assert.equal(restored.plugin.activeConversation.customTitle, true);
 
-  view.renameConversation(plugin.activeConversationId, '');
+  await view.renameConversation(plugin.activeConversationId, '');
   view.clearConversation();
   assert.equal(chat.title, NEW_CHAT_TITLE);
   assert.deepEqual(titles(plugin), []);
@@ -377,7 +387,7 @@ test('OpenAI: histories and response chaining stay within their conversation', a
   assert.equal(requests[3].previous_response_id, 'resp_2');
   const b = plugin.activeConversationId;
 
-  view.openConversation(a);
+  await view.openConversation(a);
   await view.handleUserMessage('Q3', null);
   assert.equal(requests[4].previous_response_id, undefined);
   assert.deepEqual(inputTexts(requests[4]), ['Q1', 'A1', 'Q2', 'A2', 'Q3']);
@@ -386,7 +396,7 @@ test('OpenAI: histories and response chaining stay within their conversation', a
 
   // Back and forth: the first request after each switch replays only that conversation.
   for (const [id, question, expected] of [[b, 'B3', ['B1', 'A3', 'B2', 'A4', 'B3']], [a, 'Q5', ['Q1', 'A1', 'Q2', 'A2', 'Q3', 'A5', 'Q4', 'A6', 'Q5']]]) {
-    view.openConversation(id);
+    await view.openConversation(id);
     await view.handleUserMessage(question, null);
     assert.equal(requests.at(-1).previous_response_id, undefined);
     assert.deepEqual(inputTexts(requests.at(-1)), expected);
@@ -426,7 +436,7 @@ for (const action of ['New chat', 'Switching']) {
     while (!chat.askUser) await tick();
     const waiting = plugin.activeConversationId;
 
-    if (action === 'New chat') view.newChat(); else view.openConversation(other);
+    if (action === 'New chat') view.newChat(); else await view.openConversation(other);
     assert.equal(view.running, false);
     assert.equal(chat.busy, false);
     // The input no longer answers the other chat's question.
@@ -441,7 +451,7 @@ for (const action of ['New chat', 'Switching']) {
     const shownNow = plugin.activeConversationId;
 
     // Back: the turn still runs, its question is shown once and the input answers it.
-    view.openConversation(waiting);
+    await view.openConversation(waiting);
     assert.equal(view.running, true);
     assert.equal(chat.busy, true);
     assert.deepEqual(texts(chat.shown), ['Waiting question', 'Which note?']);
@@ -453,7 +463,7 @@ for (const action of ['New chat', 'Switching']) {
     assert.deepEqual(texts(plugin.chatHistory), ['Waiting question', 'Which note?', 'Plan', 'B3']);
     assert.ok(JSON.stringify(requests[2].messages).includes('Plan'));
 
-    view.openConversation(shownNow);
+    await view.openConversation(shownNow);
     assert.deepEqual(texts(plugin.chatHistory).slice(-2), ['Next', 'B2']);
   });
 }
@@ -487,7 +497,7 @@ test('A turn goes on in the background: the chat shown stays as it is, the list 
   assert.equal(globalThis.__notices.at(-1), 'Answer ready in "Write a lot".');
   assert.equal(view.turns.has(a), false);
   assert.deepEqual(texts(chat.shown), ['Quick one', 'B1']);
-  view.openConversation(a);
+  await view.openConversation(a);
   assert.deepEqual(texts(chat.shown), ['Write a lot', 'Long answer']);
   assert.equal(view.running, false);
 });
@@ -506,7 +516,7 @@ test('A question asked in the background says so in a notice', async () => {
   while (!globalThis.__notices.length) await tick();
   assert.deepEqual(globalThis.__notices, ['"Ask me" has a question for you.']);
   assert.equal(chat.askUser, null);
-  view.openConversation(a);
+  await view.openConversation(a);
   chat.askUser('Plan');
   await asking;
   assert.deepEqual(texts(plugin.chatHistory), ['Ask me', 'Which note?', 'Plan', 'A2']);
@@ -526,7 +536,7 @@ for (const shown of [true, false]) {
     while (!answer) await tick();
     const slow = plugin.activeConversationId;
     if (!shown) view.newChat();
-    view.deleteConversation(slow);
+    await view.deleteConversation(slow);
     assert.equal(view.running, false);
     assert.equal(view.turns.size, 0);
     answer(response('anthropic', [text('Late answer')]));
@@ -554,7 +564,7 @@ test('Typed into a turn after its last step while it runs in the background: run
   assert.equal(requests.length, 1);
   // Saved with its chat, not only in the view, until the chat is shown.
   assert.deepEqual(plugin.conversations.find(c => c.id === a).pendingMessages, ['Also this']);
-  view.openConversation(a);
+  await view.openConversation(a);
   while (view.running || requests.length < 2) await tick();
   assert.deepEqual(userTurns(requests[1]).at(-1), 'Also this');
   assert.deepEqual(texts(plugin.chatHistory), ['First', 'First.', 'Also this', 'A2']);
@@ -580,6 +590,73 @@ test('Switching during an edit not yet answered: the original turn comes back, t
   assert.deepEqual(texts(plugin.conversations.find(c => c.id === a).chatHistory), ['Q1', 'A1']);
 });
 
+test('Renaming a chat not read yet keeps the new name when it is opened', async () => {
+  const first = await setup('anthropic');
+  answering('anthropic');
+  await first.view.handleUserMessage('First chat', null);
+  const a = first.plugin.activeConversationId;
+  first.view.newChat();
+  await first.view.handleUserMessage('Second chat', null);
+  await first.plugin.saveChatHistory();
+  // After a restart only the open chat is read; the other is renamed unread.
+  const { plugin, view } = await setup('anthropic', first.writes.at(-1));
+  assert.ok(plugin.conversations.find(c => c.id === a).unloaded);
+  await view.renameConversation(a, 'My name');
+  await view.openConversation(a);
+  assert.equal(plugin.activeConversation.title, 'My name');
+  assert.equal(plugin.activeConversation.customTitle, true);
+});
+
+test('Deleting a chat not read yet: a failed save keeps the deletion for the next one, and the chat stays gone', async () => {
+  const first = await setup('anthropic');
+  answering('anthropic');
+  await first.view.handleUserMessage('Old chat', null);
+  const a = first.plugin.activeConversationId;
+  first.view.newChat();
+  await first.view.handleUserMessage('Current chat', null);
+  await first.plugin.saveChatHistory();
+  const { plugin, view, files } = await setup('anthropic', first.writes.at(-1));
+  const adapter = plugin.app.vault.adapter;
+  const write = adapter.write;
+  let failing = true;
+  adapter.write = async (path, data) => {
+    if (failing && path.includes(`chats/${a}`)) throw new Error('The file is locked');
+    return write(path, data);
+  };
+  await view.deleteConversation(a);
+  await plugin.saveChatHistory();
+  failing = false;
+  await plugin.saveChatHistory();
+  assert.ok(![...files.keys()].some(path => path.endsWith(`chats/${a}.json`) && files.get(path) && !files.get(path).includes('"deleted"')));
+});
+
+test('Opening an old chat keeps its attachments: chats unchanged since read are not stripped by the budget', async () => {
+  const first = await setup('anthropic');
+  const payload = 'A'.repeat(20 * 1024 * 1024);
+  const attachment = id => ({ id, fileName: `${id}.pdf`, mediaType: 'application/pdf', sizeBytes: 15 * 1024 * 1024, data: payload });
+  const records = ['old', 'recent'].map((name, i) => {
+    const c = api.chatState.newConversation(1000 + i);
+    c.chatHistory.push({ type: 'user', text: name, turnId: `t${i}`, attachedFiles: [attachment(name)] });
+    c.agentMessages.push({ role: 'user', turnId: `t${i}`, content: [{ type: 'file', file: attachment(name) }, text(name)] });
+    return c;
+  });
+  // Saved one by one, each within the budget on its own.
+  first.plugin.conversations = [records[0]];
+  first.plugin.activeConversationId = records[0].id;
+  await first.plugin.saveChatHistory();
+  first.plugin.conversations = records;
+  first.plugin.activeConversationId = records[1].id;
+  first.plugin.agent.importMessages(records[1].agentMessages);
+  await first.plugin.saveChatHistory();
+  const { plugin, view } = await setup('anthropic', first.writes.at(-1));
+  const old = plugin.conversations.find(c => c.id === records[0].id);
+  await view.openConversation(old.id);
+  await plugin.saveChatHistory();
+  const files = old.agentMessages.flatMap(m => typeof m.content === 'string' ? [] : m.content).filter(b => b.type === 'file');
+  assert.equal(files.length, 1);
+  assert.equal(files[0].file.data.length, payload.length);
+});
+
 test('Edit and regenerate work within the conversation they belong to', async () => {
   const { plugin, view } = await setup('anthropic');
   const requests = answering('anthropic');
@@ -591,18 +668,180 @@ test('Edit and regenerate work within the conversation they belong to', async ()
   await view.handleUserMessage('Other', null);
   const b = plugin.activeConversationId;
 
-  view.openConversation(a);
+  await view.openConversation(a);
   await view.editMessage(q2, 'Q2 edited');
   assert.deepEqual(userTurns(requests.at(-1)), ['Q1', 'Q2 edited']);
   await view.regenerate();
   assert.deepEqual(userTurns(requests.at(-1)), ['Q1', 'Q2 edited']);
   assert.deepEqual(texts(plugin.chatHistory), ['Q1', 'A1', 'Q2 edited', `A${requests.length}`]);
 
-  view.openConversation(b);
+  await view.openConversation(b);
   assert.deepEqual(texts(plugin.chatHistory), ['Other', 'A3']);
 });
 
-test('Switching away and back keeps the API history up to 80 messages, and its images', async () => {
+const STATE = `${DIR}/chat-state.json`;
+const NEXT = `${DIR}/chat-state.next.json`;
+const chatPath = id => `${DIR}/chats/${id}.json`;
+
+// A plugin loading from `adapter` (another start of Obsidian).
+async function reload(adapter) {
+  const { app } = vaultApp();
+  app.vault.adapter = adapter;
+  const plugin = new api.ChatPlugin();
+  plugin.app = app;
+  plugin.agent = new api.AgentLoop(app, settings('anthropic'));
+  await plugin.loadChatHistory();
+  return plugin;
+}
+
+test('A save writes only the chats that changed, each to its own file, then the index; sizes are bytes', async () => {
+  const { plugin, view, files } = await setup('anthropic');
+  answering('anthropic');
+  await view.handleUserMessage('A question', null);
+  view.newChat();
+  await view.handleUserMessage('Other', null);
+  await plugin.saveChatHistory();
+  const adapter = plugin.app.vault.adapter;
+  const order = [];
+  const write = adapter.write;
+  adapter.write = async (path, data) => { order.push(path.replace(`${DIR}/`, '')); await write(path, data); };
+  // Sizes count bytes: "…" and "ü" take more than one.
+  plugin.chatHistory.push({ type: 'error', text: 'A note … über' });
+  await plugin.saveChatHistory();
+  const id = plugin.activeConversationId;
+  assert.deepEqual(order, [`chats/${id}.next.json`, `chats/${id}.json`, 'chat-state.next.json', 'chat-state.json']);
+  // Nothing changed: only the index.
+  order.length = 0;
+  await plugin.saveChatHistory();
+  assert.deepEqual(order, ['chat-state.next.json', 'chat-state.json']);
+  // The index lists each chat with its file's size, not its messages.
+  const index = JSON.parse(files.get(STATE));
+  assert.equal(index.version, CHAT_STATE_VERSION);
+  for (const entry of index.conversations) {
+    assert.deepEqual(Object.keys(entry).sort(), ['automaticTitle', 'createdAt', 'customTitle', 'id', 'size', 'title', 'titleSourceTurnId', 'updatedAt']);
+    assert.equal(entry.size, Buffer.byteLength(files.get(chatPath(entry.id))));
+  }
+  assert.deepEqual(plugin.savedChatsSize(), { chats: 2, bytes: index.conversations.reduce((sum, c) => sum + c.size, 0) });
+  assert.ok(plugin.listConversations().every(c => c.size > 0));
+});
+
+test('At start only the open chat\'s file is read; another chat\'s when it is opened', async () => {
+  const first = await setup('anthropic');
+  answering('anthropic');
+  await first.view.handleUserMessage('First chat', null);
+  first.view.newChat();
+  await first.view.handleUserMessage('Second chat', null);
+  await first.plugin.saveChatHistory();
+
+  const restored = await setup('anthropic', first.writes.at(-1));
+  const other = restored.plugin.conversations.find(c => c.id !== restored.plugin.activeConversationId);
+  assert.equal(other.unloaded, true);
+  assert.deepEqual(other.chatHistory, []);
+  assert.deepEqual(titles(restored.plugin).sort(), ['First chat', 'Second chat']);
+  // Saving meanwhile leaves its file as it is.
+  const kept = restored.files.get(chatPath(other.id));
+  await restored.plugin.saveChatHistory();
+  assert.equal(restored.files.get(chatPath(other.id)), kept);
+
+  await restored.view.openConversation(other.id);
+  assert.equal(other.unloaded, undefined);
+  assert.deepEqual(texts(restored.plugin.chatHistory), ['First chat', 'A1']);
+  assert.deepEqual(texts(restored.chat.shown), ['First chat', 'A1']);
+});
+
+test('A chat whose file can\'t be read leaves the list, its file kept aside; one from a newer version is left as it is', async () => {
+  for (const [content, corrupt] of [['{"version": 4, "conv', true], [JSON.stringify({ version: 4, conversation: { id: 'x', chatHistory: [{ type: 'user', text: 42 }] } }), true], [JSON.stringify({ version: 99, conversation: {} }), false]]) {
+    const first = await setup('anthropic');
+    answering('anthropic');
+    await first.view.handleUserMessage('Broken later', null);
+    first.view.newChat();
+    await first.view.handleUserMessage('Fine', null);
+    await first.plugin.saveChatHistory();
+    const restored = await setup('anthropic', first.writes.at(-1));
+    const other = restored.plugin.conversations.find(c => c.id !== restored.plugin.activeConversationId);
+    restored.files.set(chatPath(other.id), content);
+    restored.files.delete(`${DIR}/chats/${other.id}.next.json`);
+    globalThis.__notices = [];
+    await restored.view.openConversation(other.id);
+    assert.match(globalThis.__notices[0], /couldn't be read/);
+    assert.deepEqual(titles(restored.plugin), ['Fine']);
+    assert.deepEqual(texts(restored.plugin.chatHistory), ['Fine', 'A2']);
+    assert.equal([...restored.files.keys()].some(path => path.startsWith(`${DIR}/chats/${other.id}.corrupt-`)), corrupt);
+    assert.equal(restored.files.has(chatPath(other.id)), !corrupt);
+  }
+});
+
+test('A chat file the index doesn\'t list comes back; a deleted chat\'s doesn\'t', async () => {
+  const { plugin, view, files } = await setup('anthropic');
+  answering('anthropic');
+  await view.handleUserMessage('Kept', null);
+  view.newChat();
+  await view.handleUserMessage('Deleted', null);
+  const deleted = plugin.activeConversationId;
+  view.newChat();
+  await view.handleUserMessage('Unlisted', null);
+  const unlisted = plugin.activeConversationId;
+  await view.deleteConversation(deleted);
+  await plugin.saveChatHistory();
+  assert.equal(files.has(chatPath(deleted)), false);
+  // Obsidian ended after the new chat's file was written, before the index listed it.
+  const index = JSON.parse(files.get(STATE));
+  index.conversations = index.conversations.filter(c => c.id !== unlisted);
+  files.set(STATE, JSON.stringify(index));
+  files.delete(NEXT);
+  // A deleted chat's file that couldn't be removed stays marked deleted.
+  files.set(chatPath(deleted), JSON.stringify({ version: 4, deleted: true }));
+
+  const reloaded = await reload(plugin.app.vault.adapter);
+  assert.deepEqual(titles(reloaded).sort(), ['Kept', 'Unlisted']);
+});
+
+test('A version 3 chat-state.json is split once into the index and a file per chat; the old file is kept aside', async () => {
+  const v3 = version3('b', [record('a', 'First', 2), record('b', 'Second', 1)]);
+  const { adapter, writes } = chatFiles(v3);
+  const plugin = await reload(adapter);
+  // Saved in the new format right after loading.
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].version, CHAT_STATE_VERSION);
+  assert.deepEqual(writes[0].conversations.map(c => [c.id, c.chatHistory[0].text]), [['a', 'First'], ['b', 'Second']]);
+  const kept = [...adapter.stored.keys()].find(path => /\/chat-state\.v3-\d+\.json$/.test(path));
+  assert.deepEqual(JSON.parse(adapter.stored.get(kept)), v3);
+  assert.ok(adapter.stored.has(chatPath('a')) && adapter.stored.has(chatPath('b')));
+  assert.equal(plugin.activeConversationId, 'b');
+  // Loading again reads the index; nothing to migrate.
+  const again = await reload(adapter);
+  assert.equal(writes.length, 1);
+  assert.equal(again.activeConversationId, 'b');
+  assert.deepEqual(texts(again.chatHistory), ['Second', 'Second answer']);
+  assert.equal(again.conversations.find(c => c.id === 'a').unloaded, true);
+});
+
+test('Back from an older version that saved the index as version 3: its empty records take the chat files, nothing is lost', async () => {
+  const first = await setup('anthropic');
+  answering('anthropic');
+  await first.view.handleUserMessage('Long chat', null);
+  const long = first.plugin.activeConversationId;
+  first.view.newChat();
+  await first.view.handleUserMessage('Other chat', null);
+  const other = first.plugin.activeConversationId;
+  await first.plugin.saveChatHistory();
+  const { adapter } = chatFiles(first.writes.at(-1));
+  // An older version read only the index: it saved the open chat without its messages, and another chat of its own.
+  const entry = id => JSON.parse(adapter.stored.get(STATE)).conversations.find(c => c.id === id);
+  adapter.stored.set(STATE, JSON.stringify(version3(other, [
+    { ...entry(other), chatHistory: [], agentMessages: [] },
+    record('newer', 'Asked in the older version', 9),
+  ])));
+  adapter.stored.delete(NEXT);
+
+  const plugin = await reload(adapter);
+  assert.deepEqual(titles(plugin).sort(), ['Asked in the older version', 'Long chat', 'Other chat']);
+  assert.deepEqual(texts(plugin.chatHistory), ['Other chat', 'A2']);
+  await plugin.openConversation(long);
+  assert.deepEqual(texts(plugin.chatHistory), ['Long chat', 'A1']);
+});
+
+test('Switching away and back keeps the API history and its images', async () => {
   const { plugin, view, writes } = await setup('anthropic');
   const requests = answering('anthropic');
   const long = plugin.activeConversation;
@@ -616,7 +855,7 @@ test('Switching away and back keeps the API history up to 80 messages, and its i
   plugin.agent.importMessages(long.agentMessages);
 
   view.newChat();
-  view.openConversation(long.id);
+  await view.openConversation(long.id);
   assert.equal(plugin.agent.exportMessages().length, 70);
   await view.handleUserMessage('Next', null);
   assert.equal(requests[0].messages.length, 71);
@@ -689,32 +928,35 @@ test('The New chat command opens the chat on a new conversation; an empty one is
 
   // Without a provider set up, nothing changes (a notice says what to do).
   plugin.isProviderConfigured = () => false;
-  view.openConversation(earlier);
+  await view.openConversation(earlier);
   await plugin.newChat();
   assert.equal(plugin.activeConversationId, earlier);
   assert.equal(globalThis.__notices.length, 1);
 });
 
-test('Automatic titles survive repeated capped saves, reloads, appends and temporary custom names', async () => {
+test('Automatic titles survive long chats, reloads, appends and temporary custom names', async () => {
   const { plugin, view, writes } = await setup('anthropic');
   answering('anthropic');
   for (let i = 0; i < 61; i++) await view.handleUserMessage(`Original topic ${i}`, null);
   await plugin.saveChatHistory();
   const state = writes.at(-1);
-  assert.notEqual(state.conversations[0].chatHistory[0].text, 'Original topic 0');
+  // Long chats keep their whole visible history (no cap), so the first turn stays.
+  assert.equal(state.conversations[0].chatHistory[0].text, 'Original topic 0');
   const restored = await setup('anthropic', state);
   assert.equal(restored.plugin.activeConversation.title, 'Original topic 0');
   await restored.view.handleUserMessage('Later follow-up', null);
   assert.equal(restored.plugin.activeConversation.title, 'Original topic 0');
-  restored.view.renameConversation(restored.plugin.activeConversationId, 'Custom name');
+  await restored.view.renameConversation(restored.plugin.activeConversationId, 'Custom name');
   await restored.plugin.saveChatHistory();
   const again = await setup('anthropic', restored.writes.at(-1));
   assert.equal(again.plugin.activeConversation.title, 'Custom name');
-  again.view.renameConversation(again.plugin.activeConversationId, '');
+  await again.view.renameConversation(again.plugin.activeConversationId, '');
   assert.equal(again.plugin.activeConversation.title, 'Original topic 0');
-  // Editing the first retained turn cannot rename a pruned original source.
-  await again.view.editMessage(again.plugin.chatHistory.find(row => row.type === 'user').turnId, 'Edited retained turn');
+  // Editing a later turn keeps the title; editing the first one renames the chat.
+  await again.view.editMessage(again.plugin.chatHistory.filter(row => row.type === 'user')[1].turnId, 'Edited later turn');
   assert.equal(again.plugin.activeConversation.title, 'Original topic 0');
+  await again.view.editMessage(again.plugin.chatHistory.find(row => row.type === 'user').turnId, 'Edited first turn');
+  assert.equal(again.plugin.activeConversation.title, 'Edited first turn');
   again.view.clearConversation();
   await again.view.handleUserMessage('New topic after clear', null);
   assert.equal(again.plugin.activeConversation.title, 'New topic after clear');
@@ -743,21 +985,24 @@ test('Saving many attachment-heavy named chats bounds all retained data before e
   plugin.conversations = records;
   plugin.activeConversationId = records[0].id;
   plugin.agent.importMessages(records[0].agentMessages);
-  let latest;
-  const writeSizes = [];
-  plugin.app.vault.adapter.write = async (_path, json) => { writeSizes.push(Buffer.byteLength(json)); latest = JSON.parse(json); };
+  const written = new Map();
+  const write = plugin.app.vault.adapter.write;
+  plugin.app.vault.adapter.write = async (path, json) => { written.set(path, json); await write(path, json); };
   await plugin.saveChatHistory();
-  assert.ok(writeSizes.every(size => size < 33 * 1024 * 1024));
-  assert.equal(latest.conversations.length, 4);
+  // Each chat file and the index stay below the request ceiling; the index lists all four.
+  assert.ok([...written.values()].every(json => Buffer.byteLength(json) < 33 * 1024 * 1024));
+  assert.equal(writes.at(-1).conversations.length, 4);
   const data = c => c.agentMessages.flatMap(m => typeof m.content === 'string' ? [] : m.content).filter(b => b.type === 'file').map(b => b.file);
   assert.equal(data(records[0]).length, 1, 'active gets priority despite oldest timestamp');
   assert.equal(data(records[3]).length, 1, 'most recently used inactive gets remaining room');
   assert.equal(data(records[1]).length, 0);
   assert.equal(records[1].chatHistory[0].attachedFiles[0].data, '');
-  const restored = await setup('anthropic', latest);
+  const restored = await setup('anthropic', writes.at(-1));
   assert.equal(restored.plugin.conversations.length, 4);
-  assert.equal(data(restored.plugin.conversations[1]).length, 0);
-  assert.equal(restored.plugin.conversations[1].chatHistory[0].attachedFiles[0].fileName, 'Large1.pdf');
+  const second = restored.plugin.conversations.find(c => c.id === records[1].id);
+  assert.ok(await restored.plugin.loadConversation(second));
+  assert.equal(data(second).length, 0);
+  assert.equal(second.chatHistory[0].attachedFiles[0].fileName, 'Large1.pdf');
 });
 
 test('Retention during an in-flight chained response forces replay of the bounded history next turn', async () => {

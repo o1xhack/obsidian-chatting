@@ -232,11 +232,16 @@ test('get_links delivers folder instructions for its linked sources and unlinked
   assert.doesNotMatch(JSON.stringify(loop.exportMessages()), /instructionPaths/);
 });
 
-test('Linked-file rules are given again when pruning discards their earlier delivery', async () => {
+test('Linked-file rules are given again when a compaction drops their earlier delivery', async () => {
   const { app, loop } = loopWith({ 'Work/AGENTS.md': 'Retain the work rule.', 'Work/Plan.md': 'Plan' });
   const rules = await api.instructions.folderInstructions(app, ['Work/Plan.md'], new Set());
-  const history = [];
-  for (let i = 0; i < 40; i++) history.push({ role: 'user', content: i === 0 ? rules : `Question ${i}`, ...(i === 0 ? { instructionSources: ['Work/AGENTS.md'] } : {}), turnId: `old${i}` }, { role: 'assistant', content: [text('Answer')] });
+  // The rules came with the first turn; a later compaction summarized it away.
+  const history = [
+    { role: 'user', content: rules, instructionSources: ['Work/AGENTS.md'], turnId: 'old0' },
+    { role: 'assistant', content: [text('Answer')] },
+    { role: 'user', content: 'Question 1', turnId: 'old1' },
+    { role: 'assistant', content: [text('Answer')], compaction: { summary: 'The user asked about the plan.' } },
+  ];
   loop.importMessages(history);
   const requests = transport(() => response('anthropic', [text('ok')]));
   await loop.run('Summarize linked plan', callbacks(), null, [], 'next', { text: 'Plan content', images: [], files: [], instructionPaths: ['Work/Plan.md'] });
@@ -282,7 +287,7 @@ test('Settings: Vault instructions creates AGENTS.md with a short comment, then 
   const ignore = () => {};
   delete tab.display;
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderInstructions: setting => drawn.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderInstructions: setting => drawn.push(setting) });
   tab.display();
   assert.equal(drawn.length, 1);
 });

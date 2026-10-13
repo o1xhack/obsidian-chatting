@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Platform, PluginSettingTab, Setting, normalizePath, requireApiVersion, type SettingDefinitionItem } from "obsidian";
+import { App, Modal, Notice, Platform, PluginSettingTab, Setting, SliderComponent, normalizePath, requireApiVersion, type SettingDefinitionItem, type TextComponent } from "obsidian";
 import type ChatPlugin from "./main";
 import type { ChatSettings, McpServer, Provider } from "./types";
 import { DEFAULT_PROVIDER_MODELS } from "./types";
@@ -8,6 +8,9 @@ import { clearDebugLog } from "./debug";
 import { INSTRUCTIONS_FILE } from "./agent/instructions";
 import { DEFAULT_SKILLS_FOLDER, SKILL_FILE, SKILL_TEMPLATE, findSkills, type Skill } from "./agent/skills";
 import { validServerName, validServerUrl } from "./api/mcp";
+import { MIN_COMPACT_TOKENS, compactThreshold, defaultCompactThreshold } from "./agent/compaction";
+import { formatTokens } from "./agent/usage";
+import { formatBytes } from "./images";
 
 import { type ModelOption, type CatalogState, catalogIdentity, cachedCatalog, refreshCatalog, getCatalogModels, clearCatalogModels, catalogModel, catalogDefaultLevel, resolveThinkingLevel, thinkingLevelLabel, CATALOG_TTL } from "./api/model-catalog";
 
@@ -52,6 +55,15 @@ export function getModelHeaderLabel(provider: Provider, modelId: string, level: 
   const thinking = thinkingLevelLabel(catalogModel(provider, modelId), level);
   const name = getModelDisplayName(provider, modelId);
   return thinking ? `${name} · ${thinking}` : name;
+}
+
+/** A token number as typed: "160000", "160 000", "160k", "1.2M"; null when empty or not a number. */
+export function parseTokens(value: string): number | null {
+  const match = /^([\d.,]+)\s*([km]?)$/i.exec(value.replace(/[\s_']/g, ""));
+  if (!match) return null;
+  const number = Number.parseFloat(match[1].replace(/,/g, ""));
+  const scale = match[2].toLowerCase() === "m" ? 1_000_000 : match[2].toLowerCase() === "k" ? 1000 : 1;
+  return Number.isFinite(number) && number > 0 ? Math.round(number * scale) : null;
 }
 
 /**
@@ -114,6 +126,10 @@ export class ChatSettingTab extends PluginSettingTab {
       { name: "Skills", aliases: ["Skill", "SKILL.md", "Skills folder"], render: setting => this.renderSkillsFolder(setting) },
       this.skillList(),
       { name: "Max tool iterations", render: setting => this.renderMaxIterations(setting) },
+      { type: "group", heading: "Chats", items: [
+        { name: "Compaction point", aliases: ["Context", "Summarize", "Compact"], render: setting => this.renderCompactionPoint(setting) },
+        { name: "Saved chats", aliases: ["Chat history", "Storage"], render: setting => this.renderSavedChats(setting) },
+      ] },
       { name: MCP_SERVERS, aliases: ["Connectors", "Model Context Protocol"], render: setting => this.renderMcpHeading(setting) },
       this.mcpServerList(),
       { name: "Debug log", aliases: ["Troubleshooting"], render: setting => this.renderDebugLog(setting) },
@@ -153,6 +169,7 @@ export class ChatSettingTab extends PluginSettingTab {
     this.renderInstructions(new Setting(containerEl));
     this.renderSkills(containerEl);
     this.renderMaxIterations(new Setting(containerEl));
+    this.renderChats(containerEl);
     this.renderMcpServers(containerEl);
     this.renderDebugLog(new Setting(containerEl));
   }
@@ -330,6 +347,105 @@ export class ChatSettingTab extends PluginSettingTab {
             }
           })
       );
+  }
+
+  // ─── Chats ─────────────────────────────────────────────────────────────
+
+  /** Before Obsidian 1.13: the Chats heading and its rows (a group on 1.13+). */
+  private renderChats(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Chats").setHeading();
+    this.renderCompactionPoint(new Setting(containerEl));
+    this.renderSavedChats(new Setting(containerEl));
+  }
+
+  /**
+   * The compaction point: a slider over the selected model's window from
+   * 50k (or the default point where that is lower) to 100 %, with its
+   * start, the default point and its end labelled, and the point in tokens
+   * in a field. Without a known window only the field, as a token number.
+   */
+  private renderCompactionPoint(setting: Setting): void {
+    const s = this.plugin.settings;
+    const option = catalogModel(s.provider, s.model);
+    const window = option?.contextWindow;
+    const fallback = defaultCompactThreshold(s.provider, option);
+    setting.setName("Compaction point");
+    const describe = () => {
+      const point = compactThreshold(s.provider, option, s);
+      const base = "When a long chat is summarized, so it stays within the model's context. Earlier saves cost and time per answer; the model then keeps fewer details.";
+      if (!window) {
+        setting.setDesc(`${base} This model's context size is unknown: set a number of tokens, or leave it empty to summarize only when a request is too long.`);
+      } else {
+        const share = Math.round((point ?? 0) / window * 100);
+        setting.setDesc(`${base} Now ${formatTokens(point ?? 0)} of ${formatTokens(window)} tokens (${share} %${s.compactPercent === null ? ", the default" : ""}).`);
+      }
+    };
+    let field: TextComponent | undefined;
+    let slider: SliderComponent | undefined;
+    if (window && fallback) {
+      const low = Math.min(MIN_COMPACT_TOKENS, fallback);
+      const min = Math.ceil(low / window * 100);
+      const standard = Math.round(fallback / window * 100);
+      const box = setting.controlEl.createDiv({ cls: "ochatting-compaction-box" });
+      // The default above the slider, its start and end below: they don't collide.
+      const above = box.createDiv({ cls: "ochatting-compaction-marks is-above" });
+      slider = new SliderComponent(box)
+        .setLimits(min, 100, 1)
+        .setValue(Math.round((compactThreshold(s.provider, option, s) ?? fallback) / window * 100))
+        .onChange(async (value) => {
+          // On the mark: the default (it follows the model's own point).
+          s.compactPercent = value === standard ? null : value;
+          field?.setValue(String(compactThreshold(s.provider, option, s) ?? ""));
+          describe();
+          await this.plugin.saveSettings();
+        });
+      const below = box.createDiv({ cls: "ochatting-compaction-marks" });
+      const mark = (marks: HTMLElement, at: number, text: string, cls: string) => {
+        const el = marks.createSpan({ cls: `ochatting-compaction-mark ${cls}`, text });
+        el.setCssProps({ "--ochatting-mark-at": `${(at - min) / (100 - min) * 100}%` });
+      };
+      mark(above, standard, `Default: ${standard} % · ${formatTokens(fallback)}`, "is-default");
+      mark(below, min, formatTokens(low), "is-start");
+      mark(below, 100, `100 % · ${formatTokens(window)}`, "is-end");
+    }
+    setting.addText((text) => {
+      field = text;
+      text.inputEl.addClass("ochatting-compaction-field");
+      text.setPlaceholder(window ? String(fallback ?? "") : "Tokens");
+      text.setValue(String((window ? compactThreshold(s.provider, option, s) : s.compactTokens) ?? ""));
+      // Saved when the field is left or Enter is pressed, not per keystroke.
+      const commit = async () => {
+        const tokens = parseTokens(text.getValue());
+        if (window && fallback) {
+          if (tokens === null) s.compactPercent = null;
+          else s.compactPercent = tokens === fallback ? null : Math.min(100, tokens / window * 100);
+          const point = compactThreshold(s.provider, option, s);
+          text.setValue(String(point ?? ""));
+          slider?.setValue(Math.round((point ?? fallback) / window * 100));
+        } else {
+          s.compactTokens = tokens;
+          text.setValue(tokens === null ? "" : String(tokens));
+        }
+        describe();
+        await this.plugin.saveSettings();
+      };
+      text.inputEl.addEventListener("change", () => void commit());
+      text.inputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.isComposing) {
+          event.preventDefault();
+          void commit();
+        }
+      });
+    });
+    describe();
+  }
+
+  /** How many chats are saved and their size; large ones are marked in the chat list. */
+  private renderSavedChats(setting: Setting): void {
+    const { chats, bytes } = this.plugin.savedChatsSize();
+    setting
+      .setName("Saved chats")
+      .setDesc(`${chats === 1 ? "1 chat" : `${chats} chats`}, ${formatBytes(bytes)}, in the plugin's chats folder. A chat over 5 MB shows its size in the chat list; delete chats you no longer need there.`);
   }
 
   // ─── MCP servers ───────────────────────────────────────────────────────

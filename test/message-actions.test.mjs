@@ -3,7 +3,7 @@
 // fake Svelte component.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, settings, image, text, call, response, transport, vaultApp } from './harness.mjs';
+import { api, settings, image, text, call, response, transport, vaultApp, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -42,13 +42,8 @@ function fakeChat() {
 // records its writes, and has a chat view with a fake component.
 async function setup(provider, saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async () => { if (!saved) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async () => !!saved,
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.agent = new api.AgentLoop(app, settings(provider));

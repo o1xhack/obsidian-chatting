@@ -83,7 +83,7 @@ export async function sendAnthropicMessage(
 
   // Threshold compaction where the model list says the model has it.
   const betas: string[] = [];
-  const trigger = option?.compaction ? compactThreshold("anthropic", option) : undefined;
+  const trigger = option?.compaction ? compactThreshold("anthropic", option, settings) : undefined;
   if (trigger) {
     body.context_management = { edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: trigger } }] };
     betas.push(ANTHROPIC_COMPACTION_BETA);

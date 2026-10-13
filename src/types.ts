@@ -26,6 +26,13 @@ export interface ChatSettings {
   skillsFolder: string;
   /** Remote MCP servers the provider connects to (`api/mcp.ts`); tokens only in SecretStorage. */
   mcpServers: McpServer[];
+  /**
+   * Compaction point as a share of the model's window in percent; null:
+   * the default (80 %, or the Codex catalog's point).
+   */
+  compactPercent: number | null;
+  /** Compaction point in tokens for a model whose window is unknown; null: none. */
+  compactTokens: number | null;
   modelCatalog?: import("./api/model-catalog").CatalogState;
 }
 
@@ -77,6 +84,8 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   debugLog: false,
   skillsFolder: "Skills",
   mcpServers: [],
+  compactPercent: null,
+  compactTokens: null,
 };
 
 // ─── Unified Message Format ─────────────────────────────────────────────────
@@ -284,6 +293,8 @@ export interface ConversationSummary {
   updatedAt: number;
   /** The conversation shown now. */
   active: boolean;
+  /** Size of its saved file in bytes, once saved. */
+  size?: number;
   /** A turn runs in it (also in the background). */
   running?: boolean;
 }
