@@ -83,8 +83,10 @@ folder's with the first tool result touching it (outer first, not repeated,
 again after a cut, the active note counts) and the *Vault instructions*
 settings row in both settings paths. `conversations.test.mjs`: the version 3
 format of `chat-state.json` and its one-time migration, new chat, switching,
-renaming and deleting through the chat view, OpenAI chaining and stopped
-turns per conversation, and the commands that start a new chat.
+renaming and deleting through the chat view, OpenAI chaining per
+conversation, turns that go on in the background (a question waiting for
+the return, the notices, deleting the chat stops its turn, messages added
+after the last step), and the commands that start a new chat.
 `follow-edits.test.mjs`: following the AI's edits (the changed range or
 cards, the reused follow tab and Obsidian's match state, canvas cards
 selected and centered, the follow tab closed on unload and at the next

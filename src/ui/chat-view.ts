@@ -4,6 +4,8 @@ import type { Component } from "svelte";
 import type ChatPlugin from "../main";
 import ChatContainer from "./ChatContainer.svelte";
 import type { ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry } from "../types";
+import type { ConversationRecord } from "../chat-state";
+import type { AgentLoop } from "../agent/loop";
 import { showInView } from "./show-in-view";
 import { confirmUndo } from "./undo-confirm";
 import { ChangeLog } from "../tools/undo";
@@ -83,7 +85,8 @@ interface ChatContainerApi extends Record<string, unknown> {
   addError(text: string, errorKind?: "stopped"): void;
   showThinking(): void;
   hideThinking(): void;
-  showAskUser(question: string): Promise<string>;
+  /** The next input answers a question; `question` is shown first unless the chat shows it already. */
+  showAskUser(question?: string): Promise<string>;
   cancelAskUser(): void;
   setInputEnabled(enabled: boolean): void;
   setBusy(busy: boolean): void;
@@ -91,6 +94,8 @@ interface ChatContainerApi extends Record<string, unknown> {
   setRetainedAttachments?(entries: ChatHistoryEntry[]): void;
   /** Messages added to the running turn that the agent hasn't taken in yet. */
   setQueued(texts: string[]): void;
+  /** The open chats list again (a chat started or finished answering). */
+  updateConversations(): void;
   clearMessages(): void;
   focus(): void;
   setModel(name: string): void;
@@ -114,29 +119,57 @@ interface ChatContainerApi extends Record<string, unknown> {
 export type ChangesState = "undoable" | "undone" | "kept";
 
 /**
+ * A turn in progress, in the shown conversation or another: a turn keeps
+ * running when the user switches chats. What appears while it arrives
+ * (the streamed answer, running tool steps, the thinking dots, a question)
+ * is kept here, so the chat shows it again when the user comes back.
+ */
+interface RunningTurn {
+  conversation: ConversationRecord;
+  /** The conversation's visible history when the turn started (edit and Clear replace the array). */
+  history: ChatHistoryEntry[];
+  agent: AgentLoop;
+  /** Some of the answer is on screen (streamed or whole, a step or a question). */
+  answerShown: boolean;
+  /** The answer being streamed, until the loop delivers it whole; `id` is its message while shown. */
+  streaming: { id: number; text: string } | null;
+  /** Tool steps still running, by tool name, with their row while shown. */
+  tools: Map<string, { id: number; input: Record<string, unknown> }>;
+  /** The thinking dots are up. */
+  thinking: boolean;
+  /** An `ask_user` question waiting for its answer. */
+  ask: ((answer: string) => void) | null;
+  /** Typed while it runs, until the agent takes them in or they run next (shown as queued). */
+  queued: string[];
+  /** Typed when no loop step could take them (the turn was ending): they run next. */
+  unsteered: string[];
+  /** Lets the screen sleep again (the turn holds it on). */
+  releaseScreen: () => void;
+  /** Past its preflight (linked files read, the request allowed): its user row is in the history. */
+  started: boolean;
+  /** An edit's original turn, put back if the new one is stopped or refused before any answer. */
+  rollback?: () => void;
+  /** Puts the unsent message back in the input, until the turn has started. */
+  /** Puts the unsent message back in the input, with `queued` texts typed meanwhile, until the turn has started (an edit: until answered). */
+  restoreDraft?: (queued: string[]) => void;
+}
+
+/**
  * Chat view for Chatting with AI.
  * Desktop: right sidebar. Mobile: right sidebar (slides in from edge).
- * Uses the plugin's shared AgentLoop and chatHistory so conversations
- * survive the view being closed and reopened (e.g. sidebar toggle).
+ * Uses the plugin's conversations and agent loops, so chats and running
+ * turns survive switching and the view being closed and reopened (e.g.
+ * sidebar toggle).
  */
 export class ObsidianChatView extends ItemView {
   private plugin: ChatPlugin;
   private chatContainer: ChatContainerApi | undefined;
-  private running = false;
-  private runVersion = 0;
-  /** Some of the running turn's answer is on screen. */
-  private answerShown = false;
-  /** Typed while a turn ran, until the agent takes them in or they run next (shown as queued). */
-  private queued: string[] = [];
-  /** Typed when no loop step could take them (the turn was ending): they run next. */
-  private unsteered: string[] = [];
   /**
-   * The answer being streamed, until the loop delivers it whole: its
-   * message in the chat, its text so far and the history it belongs to.
+   * The running turn of each conversation, by its ID. A turn is current
+   * while it is its conversation's entry here: Stop, Clear and edit remove
+   * or replace it, and a stopped turn that ends late changes nothing.
    */
-  private streaming: { id: number; text: string; history: ChatHistoryEntry[] } | null = null;
-  /** Lets the screen sleep again (the running turn holds it on). */
-  private releaseScreen = (): void => {};
+  private turns = new Map<string, RunningTurn>();
   /** Resolves once onOpen() has mounted the chat UI, or failed to. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
@@ -153,6 +186,21 @@ export class ObsidianChatView extends ItemView {
 
   getViewType(): string {
     return VIEW_TYPE_CHAT;
+  }
+
+  /** The shown conversation's running turn. */
+  private get turn(): RunningTurn | undefined {
+    return this.turns.get(this.plugin.activeConversationId);
+  }
+
+  /** The shown conversation runs a turn. */
+  get running(): boolean {
+    return !!this.turn;
+  }
+
+  /** The chat UI while it shows `turn`'s conversation (and `turn` still runs there). */
+  private shownChat(turn: RunningTurn): ChatContainerApi | undefined {
+    return this.turn === turn ? this.chatContainer : undefined;
   }
 
   getDisplayText(): string {
@@ -230,7 +278,7 @@ export class ObsidianChatView extends ItemView {
         onCopy: (text: string) => this.copyAnswer(text),
         title: this.plugin.activeConversation.title,
         onNewChat: () => this.newChat(),
-        listConversations: () => this.plugin.listConversations(),
+        listConversations: () => this.plugin.listConversations().map((item) => ({ ...item, running: this.turns.has(item.id) })),
         onOpenConversation: (id: string) => this.openConversation(id),
         onRenameConversation: (id: string, title: string) => this.renameConversation(id, title),
         onDeleteConversation: (id: string) => this.deleteConversation(id),
@@ -246,7 +294,10 @@ export class ObsidianChatView extends ItemView {
     this.chatContainer.focus();
   }
 
-  /** Show the active conversation's history in the UI, replacing what it shows. */
+  /**
+   * Show the active conversation's history in the UI, replacing what it
+   * shows, and what its running turn shows so far.
+   */
   renderHistory(): void {
     const chat = this.chatContainer;
     if (!chat) return;
@@ -279,6 +330,13 @@ export class ObsidianChatView extends ItemView {
     // Finished turns show folded; a running one is the last and stays open.
     const turnIds = this.plugin.chatHistory.flatMap((entry) => entry.type === "user" && entry.turnId ? [entry.turnId] : []);
     for (const turnId of this.running ? turnIds.slice(0, -1) : turnIds) chat.foldTurn(turnId);
+    // The running turn's steps, answer and dots as far as they got.
+    const turn = this.turn;
+    if (turn) {
+      for (const [name, call] of turn.tools) call.id = chat.addToolCall(name, call.input);
+      if (turn.streaming) turn.streaming.id = chat.addAssistantMessage(turn.streaming.text, true);
+      if (turn.thinking) chat.showThinking();
+    }
     // Turns the API history no longer holds lose their pencil.
     this.updateEditable();
   }
@@ -291,6 +349,8 @@ export class ObsidianChatView extends ItemView {
 
   async onClose(): Promise<void> {
     this.handleStop();
+    // The turns in the background stop too: they show and save through this view.
+    for (const turn of [...this.turns.values()]) this.stopTurn(turn);
     if (this.chatContainer) {
       await unmount(this.chatContainer);
       this.chatContainer = undefined;
@@ -345,24 +405,28 @@ export class ObsidianChatView extends ItemView {
   }
 
   // ─── Conversations ──────────────────────────────────────────────────
-  // Switching stops a running turn (as Stop does); what it showed stays in
-  // its conversation.
+  // A running turn keeps running when the user switches: it goes on in its
+  // conversation, which shows it again on the return.
 
   /** Start a new conversation (an empty current one is kept instead). */
   newChat(): void {
     if (this.undoing) return;
-    if (this.running) this.stopTurn();
+    const restore = this.cancelPreflight();
     this.plugin.startNewConversation();
     this.showConversation();
+    // After rendering, which clears the input's attachments.
+    restore?.();
   }
 
   /** Switch to conversation `id`. */
   openConversation(id: string): void {
     if (this.undoing) return;
     if (id === this.plugin.activeConversationId) return;
-    if (this.running) this.stopTurn();
+    const restore = this.cancelPreflight();
     this.plugin.openConversation(id);
     this.showConversation();
+    // After rendering, which clears the input's attachments.
+    restore?.();
   }
 
   /** Rename conversation `id` (empty: back to the automatic title). */
@@ -375,58 +439,76 @@ export class ObsidianChatView extends ItemView {
   deleteConversation(id: string): void {
     if (this.undoing) return;
     const active = id === this.plugin.activeConversationId;
-    if (active && this.running) this.stopTurn();
+    // Its turn stops, shown or not.
+    const turn = this.turns.get(id);
+    if (turn) this.stopTurn(turn);
     this.plugin.deleteConversation(id);
     if (active) this.showConversation();
   }
 
-  /** Show the active conversation, ready for input. */
+  /**
+   * Show the active conversation: its history, and its running turn as far
+   * as it got (the input adds to it, a waiting question can be answered).
+   */
   private showConversation(): void {
     const chat = this.chatContainer;
     if (!chat) return;
+    // The input stops waiting for another conversation's answer (its question waits).
     chat.cancelAskUser();
     this.renderHistory();
     chat.setTitle(this.plugin.activeConversation.title);
+    const turn = this.turn;
     chat.setInputEnabled(true);
-    chat.setBusy(false);
+    chat.setBusy(!!turn);
+    chat.setQueued([...turn?.queued ?? []]);
+    if (turn?.ask) this.askNow(turn);
     chat.focus();
+    // Typed after its turn's last step while it ran in the background: they run now.
+    const conversation = this.plugin.activeConversation;
+    const later = conversation.pendingMessages;
+    if (later?.length && !turn) {
+      delete conversation.pendingMessages;
+      void this.handleUserMessage(later.join("\n\n"), null);
+    }
   }
 
   /**
    * Edit and continue: stop a running turn, cut both histories to
    * just before the turn `turnId`, and run `text` as a new turn with
    * that turn's images, files and selection scope. Vault changes stay. Resolves
-   * when the new turn has ended. Rejected preflight restores the original histories.
+   * when the new turn has ended. Stopped or refused before any answer, the
+   * original turn comes back.
    */
   async editMessage(turnId: string, text: string): Promise<void> {
     if (this.undoing || !this.chatContainer) return;
-    if (this.running) this.stopTurn();
+    const running = this.turn;
+    if (running) this.stopTurn(running);
     const history = this.plugin.chatHistory;
     const index = history.findIndex((entry) => entry.type === "user" && entry.turnId === turnId);
+    const agent = this.plugin.agent;
     // A turn the API history no longer holds can't be edited: cutting there
     // would leave the model without the chat.
-    if (index < 0 || !this.plugin.agent.canEditTurn(turnId)) return;
+    if (index < 0 || !agent.canEditTurn(turnId)) return;
     const { selection = null } = history[index];
     // Images and files the saved API history no longer holds can't be sent again.
     const images = (history[index].images ?? []).filter((image) => image.data);
     const files = (history[index].attachedFiles ?? []).filter((file) => file.data || file.text);
     if (!text.trim() && images.length === 0 && files.length === 0) return;
-    const originalMessages = this.plugin.agent.exportMessages(Number.MAX_SAFE_INTEGER);
+    const originalMessages = agent.exportMessages(Number.MAX_SAFE_INTEGER);
     const conversation = this.plugin.activeConversation;
     const originalTitle = conversation.title;
     const originalAutomaticTitle = conversation.automaticTitle;
     const originalTitleSource = conversation.titleSourceTurnId;
     const originalUpdatedAt = conversation.updatedAt;
     const originalNotes = conversation.notes ?? [];
-    this.plugin.agent.cutBeforeTurn(turnId);
-    this.plugin.chatHistory = history.slice(0, index);
+    agent.cutBeforeTurn(turnId);
+    conversation.chatHistory = history.slice(0, index);
     if (history[index].turnId === conversation.titleSourceTurnId) delete conversation.titleSourceTurnId;
-    const replacementHistory = this.plugin.chatHistory;
+    const replacementHistory = conversation.chatHistory;
+    // In its own conversation, also when another one is shown by then.
     const rollback = () => {
-      if (this.rollbackResend !== rollback) return;
-      this.rollbackResend = undefined;
-      this.plugin.agent.importMessages(originalMessages);
-      this.plugin.chatHistory = history;
+      agent.importMessages(originalMessages);
+      conversation.chatHistory = history;
       conversation.title = originalTitle;
       conversation.automaticTitle = originalAutomaticTitle;
       conversation.titleSourceTurnId = originalTitleSource;
@@ -434,20 +516,15 @@ export class ObsidianChatView extends ItemView {
       if (originalNotes.length) conversation.notes = [...new Set([...originalNotes, ...conversation.notes ?? []])];
       // Preserve the rejection explanation alongside the original conversation.
       history.push(...replacementHistory.slice(index).filter(row => row.type === "error"));
-      this.renderHistory();
-      this.chatContainer?.setTitle(conversation.title);
+      if (this.plugin.activeConversationId === conversation.id) {
+        this.renderHistory();
+        this.chatContainer?.setTitle(conversation.title);
+      }
       void this.plugin.saveChatHistory();
     };
-    this.rollbackResend = rollback;
     this.chatContainer?.cutMessages(turnId);
-    await this.handleUserMessage(text, selection, images, files, history[index].linkSource ?? "");
-    if (this.rollbackResend === rollback) this.rollbackResend = undefined;
+    await this.handleUserMessage(text, selection, images, files, history[index].linkSource ?? "", rollback);
   }
-
-  /** Until resend preflight succeeds, Stop/switch or rejection can restore the original turn. */
-  private rollbackResend?: () => void;
-  /** Restore synchronously on Stop, before an old async preflight can become stale. */
-  private restorePendingDraft?: () => void;
 
   /** Regenerate the last answer: run the last user turn again, unchanged. */
   async regenerate(): Promise<void> {
@@ -463,12 +540,19 @@ export class ObsidianChatView extends ItemView {
     );
   }
 
+  /**
+   * Run one turn in the shown conversation with its agent loop. Progress,
+   * tool steps and the answer go to the conversation's history, and to the
+   * chat while it shows that conversation: the turn goes on when the user
+   * switches. Saved at the end.
+   */
   private async handleUserMessage(
     text: string,
     selection: SelectionScope | null,
     images: ImageAttachment[] = [],
     files: FileAttachment[] = [],
-    linkSource = this.plugin.app.workspace.getActiveFile()?.path ?? ""
+    linkSource = this.plugin.app.workspace.getActiveFile()?.path ?? "",
+    rollback?: () => void
   ): Promise<void> {
     // An undo is running: the message waits in the input.
     if (this.undoing) {
@@ -488,38 +572,49 @@ export class ObsidianChatView extends ItemView {
       new Notice("The chat panel couldn't be shown, so the message wasn't sent.");
       return;
     }
-    const version = ++this.runVersion;
-    const isCurrent = () => version === this.runVersion;
-    const history = this.plugin.chatHistory;
+    const conversation = this.plugin.activeConversation;
+    const agent = this.plugin.agentFor(conversation);
+    // Kept by the plugin while it runs, also when the user switches away.
+    const release = agent.hold();
+    const turn: RunningTurn = {
+      conversation, history: conversation.chatHistory, agent, answerShown: false,
+      streaming: null, tools: new Map(), thinking: false, ask: null, queued: [], unsteered: [],
+      // The screen stays on while the answer is generated.
+      releaseScreen: screenAwake.hold(),
+      started: false, rollback,
+    };
+    this.turns.set(conversation.id, turn);
+    chat.updateConversations();
+    // Stop, Clear, edit and deleting the chat end a turn early; it may still
+    // end later (a request in flight), and then changes nothing.
+    const isCurrent = () => this.turns.get(conversation.id) === turn;
+    const ui = () => this.shownChat(turn);
+    const history = turn.history;
 
-    this.running = true;
-    this.answerShown = false;
-    this.streaming = null;
-    // The screen stays on while the answer is generated.
-    const releaseScreen = screenAwake.hold();
-    this.releaseScreen = releaseScreen;
     const turnId = newTurnId();
     const savedSelection = selection ? historySelection(selection) : undefined;
-    const conversation = this.plugin.activeConversation;
     // The input stays usable: what is sent now is added to this turn.
     chat.setBusy(true);
     // What the model should know of (an undo), told once, with this turn.
     const notes = conversation.notes ?? [];
     delete conversation.notes;
 
-    const toolCalls = new Map<string, { id: number; input: Record<string, unknown> }>();
     const changes = new ChangeLog();
-    let started = false;
     let notesRestored = false;
     const restoreNotes = () => {
       if (!notesRestored && notes.length) conversation.notes = [...new Set([...notes, ...conversation.notes ?? []])];
       notesRestored = true;
     };
-    const restorePendingDraft = () => {
+    // Until the turn has started, Stop or a switch puts the message back in the input.
+    turn.restoreDraft = (queued) => {
       restoreNotes();
-      chat.restoreDraft?.(text, selection, images, files);
+      chat.restoreDraft?.([text, ...queued].join("\n\n"), selection, images, files);
     };
-    this.restorePendingDraft = restorePendingDraft;
+    // The first sign of an answer: the edit's original turn can't come back any more.
+    const answering = () => {
+      turn.rollback = undefined;
+      turn.restoreDraft = undefined;
+    };
 
     try {
       // The files the message links to go along as they are now; the chat
@@ -536,146 +631,201 @@ export class ObsidianChatView extends ItemView {
         : linked;
       const budgetError = attachmentBudgetError([...images, ...mentioned?.images ?? []], [...files, ...mentioned?.files ?? []]);
       if (budgetError) {
-        chat.addError(budgetError);
+        ui()?.addError(budgetError);
         history.push({ type: "error", text: budgetError });
         return;
       }
       // Only consume the submitted draft after its linked context is valid.
       // A rejected draft must not become an uneditable visible-only turn.
+      // (A switch during the preflight stopped the turn, so it is shown here.)
       chat.addUserMessage(text, images, turnId, savedSelection, files);
       history.push({ type: "user", text, images, turnId, linkSource, ...(savedSelection ? { selection: savedSelection } : {}), ...(files.length ? { attachedFiles: files } : {}) });
       this.plugin.touchConversation();
       chat.setTitle(conversation.title);
-      started = true;
-      this.restorePendingDraft = undefined;
-      await this.plugin.agent.run(text, {
+      turn.started = true;
+      // An edit keeps its draft until answered: stopped before, it goes back to the input.
+      if (!turn.rollback) turn.restoreDraft = undefined;
+      await agent.run(text, {
         changes,
         onPreflightRejected: (error) => {
-          started = false;
+          turn.started = false;
           const pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);
           if (pending !== -1) history.splice(pending);
-          chat.cutMessages(turnId);
-          this.plugin.touchConversation();
-          chat.setTitle(conversation.title);
-          chat.hideThinking();
-          chat.addError(error);
+          const shown = ui();
+          if (shown) {
+            shown.cutMessages(turnId);
+            this.plugin.touchConversation();
+            shown.setTitle(conversation.title);
+          }
+          this.setThinking(turn, false);
+          shown?.addError(error);
           history.push({ type: "error", text: error });
         },
         onThinking: () => {
           // Streamed text the loop didn't deliver (a cut-off stream) goes before the next request.
-          this.endStream(false);
-          chat.showThinking();
+          this.endStream(turn, false);
+          this.setThinking(turn, true);
         },
         onTextDelta: (delta) => {
-          // Text is on screen: Stop keeps it, an edit's original turn doesn't come back.
-          this.rollbackResend = undefined;
-          this.answerShown = true;
-          chat.hideThinking();
-          if (this.streaming) {
-            this.streaming.text += delta;
-            chat.updateAssistantMessage(this.streaming.id, this.streaming.text);
+          answering();
+          turn.answerShown = true;
+          this.setThinking(turn, false);
+          const shown = ui();
+          if (turn.streaming) {
+            turn.streaming.text += delta;
+            shown?.updateAssistantMessage(turn.streaming.id, turn.streaming.text);
           } else {
-            this.streaming = { id: chat.addAssistantMessage(delta, true), text: delta, history };
+            turn.streaming = { id: shown ? shown.addAssistantMessage(delta, true) : -1, text: delta };
           }
         },
         onToolCall: (name, input) => {
-          this.rollbackResend = undefined;
-          chat.hideThinking();
+          answering();
+          this.setThinking(turn, false);
           // Streamed text the loop didn't deliver (it precedes ask_user,
           // which shows the question itself) is dropped, as before streaming.
-          this.endStream(false);
+          this.endStream(turn, false);
           if (name === "ask_user") return;
           // A tool step on screen shows that the turn did something.
-          this.answerShown = true;
-          toolCalls.set(name, { id: chat.addToolCall(name, input), input });
+          turn.answerShown = true;
+          turn.tools.set(name, { id: ui()?.addToolCall(name, input) ?? -1, input });
         },
         onToolResult: (name, { focus, ...result }: ToolResult) => {
           if (name === "ask_user") return;
-          const call = toolCalls.get(name);
-          if (call) chat.updateToolResult(call.id, name, result);
+          const call = turn.tools.get(name);
+          turn.tools.delete(name);
+          if (call) ui()?.updateToolResult(call.id, name, result);
           history.push({ type: "tool-result", toolName: name, toolInput: savedToolInput(call?.input ?? {}), toolResult: result });
           const bounded = withoutLargeVisibleToolText(history);
           if (bounded !== history) for (let i = 0; i < history.length; i++) history[i] = bounded[i];
           if (focus && !result.isError && this.plugin.settings.followEdits) this.follow(focus);
         },
         onResponse: (text) => {
-          this.rollbackResend = undefined;
-          this.answerShown = true;
-          chat.hideThinking();
+          answering();
+          turn.answerShown = true;
+          this.setThinking(turn, false);
           // The whole text replaces the streamed one: the same message as unstreamed.
-          if (this.streaming) chat.updateAssistantMessage(this.streaming.id, text, true);
-          else chat.addAssistantMessage(text);
-          this.streaming = null;
+          const shown = ui();
+          if (turn.streaming) shown?.updateAssistantMessage(turn.streaming.id, text, true);
+          else shown?.addAssistantMessage(text);
+          turn.streaming = null;
           history.push({ type: "assistant", text });
         },
         onAskUser: async (question) => {
-          this.rollbackResend = undefined;
+          answering();
           // The question is the answer so far.
-          this.answerShown = true;
-          chat.hideThinking();
-          this.endStream(false);
-          chat.setInputEnabled(true);
+          turn.answerShown = true;
+          this.setThinking(turn, false);
+          this.endStream(turn, false);
           // The chat shows the question and the typed answer; keep both in
           // the history so they are still there after a reload.
           history.push({ type: "assistant", text: question });
-          const answer = await chat.showAskUser(question);
-          // Empty: Stop or Clear dropped the question.
+          // Answered in its conversation: now, or when the user comes back to it.
+          const answer = await new Promise<string>((resolve) => {
+            turn.ask = resolve;
+            if (ui()) this.askNow(turn, question);
+            else new Notice(`"${conversation.title}" has a question for you.`);
+          });
+          // Empty: Stop, Clear or deleting the chat dropped the question.
           if (!answer || !isCurrent()) return "";
           history.push({ type: "user", text: answer });
           return answer;
         },
         onError: (error) => {
-          chat.hideThinking();
-          this.endStream(true);
-          chat.addError(error);
+          this.setThinking(turn, false);
+          this.endStream(turn, true);
+          ui()?.addError(error);
           history.push({ type: "error", text: error });
         },
         // Added to the running turn: shown where the agent took it in.
         onSteered: (text) => {
-          this.endStream(false);
-          chat.addUserMessage(text);
+          this.endStream(turn, false);
+          ui()?.addUserMessage(text);
           history.push({ type: "user", text });
-          const index = this.queued.indexOf(text);
-          if (index >= 0) this.showQueued(this.queued.filter((_, i) => i !== index));
+          const index = turn.queued.indexOf(text);
+          if (index >= 0) this.showQueued(turn, turn.queued.filter((_, i) => i !== index));
         },
       }, selection, images, turnId, mentioned, notes, files);
     } catch (e) {
       if (!isCurrent()) return;
-      if (this.rollbackResend) started = false;
+      if (turn.rollback) turn.started = false;
       const msg = e instanceof Error ? e.message : String(e);
-      chat.addError(`Unexpected error: ${msg}`);
+      ui()?.addError(`Unexpected error: ${msg}`);
       history.push({ type: "error", text: `Unexpected error: ${msg}` });
     } finally {
-      if (this.restorePendingDraft === restorePendingDraft) this.restorePendingDraft = undefined;
-      if (!started && isCurrent()) restoreNotes();
-      if (!started && isCurrent()) this.rollbackResend?.();
-      // Typed meanwhile, added to a message that was never sent: back in the input with it.
-      if (!started && isCurrent()) chat.restoreDraft?.([text, ...this.takeLeftovers()].join("\n\n"), selection, images, files);
-      releaseScreen();
+      turn.restoreDraft = undefined;
+      if (!turn.started && isCurrent()) {
+        // Never sent: the edit's original turn and the message come back.
+        restoreNotes();
+        const back = turn.rollback;
+        turn.rollback = undefined;
+        back?.();
+        // Rollback renders history, which clears attachment chips. Restore after it.
+        // Typed meanwhile, added to a message that was never sent: back in the input with it.
+        const unsent = [text, ...this.takeLeftovers(turn)].join("\n\n");
+        if (ui()) chat.restoreDraft?.(unsent, selection, images, files);
+        else history.push({ type: "error", text: `This message wasn't sent: "${unsent}"` });
+      }
+      turn.releaseScreen();
+      release();
       if (!changes.isEmpty()) this.addChanges(history, turnId, changes);
-      // The turn is over: its steps fold into one row above the answer.
-      chat.foldTurn(turnId);
+      // The turn is over: its steps fold into one row above the answer
+      // (when the chat shows its conversation; a stopped turn too).
+      if (this.plugin.activeConversationId === conversation.id) this.chatContainer?.foldTurn(turnId);
       if (isCurrent()) {
-        // The history's limit may have cut older turns off.
-        this.updateEditable();
-        this.running = false;
-        if (!changes.isEmpty()) {
-          for (const row of this.plugin.chatHistory) {
-            if (row.type === "changes" && row.turnId && !row.undone && this.plugin.changeLogs.get(row)?.canUndo() === false) {
-              chat.setChangesKept?.(row.turnId);
+        const shown = ui();
+        // Typed after the turn's last step: they run as the next turn, here
+        // or when its conversation is shown again.
+        const later = this.takeLeftovers(turn);
+        this.turns.delete(conversation.id);
+        this.chatContainer?.updateConversations();
+        if (shown) {
+          // The history's limit may have cut older turns off.
+          this.updateEditable();
+          if (!changes.isEmpty()) {
+            for (const row of this.plugin.chatHistory) {
+              if (row.type === "changes" && row.turnId && !row.undone && this.plugin.changeLogs.get(row)?.canUndo() === false) {
+                shown.setChangesKept?.(row.turnId);
+              }
             }
           }
+          shown.setInputEnabled(true);
+          shown.setBusy(false);
+          shown.focus();
+        } else {
+          new Notice(`Answer ready in "${conversation.title}".`);
         }
-        chat.setInputEnabled(true);
-        chat.setBusy(false);
-        chat.focus();
+        // Not shown: saved with the chat, they run when it's shown again.
+        if (later.length && !shown) conversation.pendingMessages = [...conversation.pendingMessages ?? [], ...later];
         // Persist after each turn
         void this.plugin.saveChatHistory();
-        // Typed after the turn's last step: they run as the next turn.
-        const later = this.takeLeftovers();
-        if (later.length) void this.handleUserMessage(later.join("\n\n"), null);
+        if (later.length && shown) void this.handleUserMessage(later.join("\n\n"), null);
       }
     }
+  }
+
+  /** The thinking dots, on or off; shown while the chat shows the turn. */
+  private setThinking(turn: RunningTurn, on: boolean): void {
+    turn.thinking = on;
+    const chat = this.shownChat(turn);
+    if (on) chat?.showThinking();
+    else chat?.hideThinking();
+  }
+
+  /**
+   * Let the user answer `turn`'s question in the input (its conversation is
+   * shown). `question`: shown now; without it the chat shows it already.
+   */
+  private askNow(turn: RunningTurn, question?: string): void {
+    const chat = this.chatContainer;
+    if (!chat || !turn.ask) return;
+    chat.setInputEnabled(true);
+    void chat.showAskUser(question).then((answer) => {
+      // Switching away cancels the input, not the question: it waits for the return.
+      if (!answer && this.turns.get(turn.conversation.id) === turn && !this.shownChat(turn)) return;
+      const resolve = turn.ask;
+      turn.ask = null;
+      resolve?.(answer);
+    });
   }
 
   // ─── Undo per answer ────────────────────────────────────────────────
@@ -772,65 +922,91 @@ export class ObsidianChatView extends ItemView {
    * Ends the streamed message the loop hasn't delivered whole: kept (and
    * saved for display) when the turn was stopped or failed, else removed.
    */
-  private endStream(keep: boolean): void {
-    const stream = this.streaming;
+  private endStream(turn: RunningTurn, keep: boolean): void {
+    const stream = turn.streaming;
     if (!stream) return;
-    this.streaming = null;
+    turn.streaming = null;
+    const chat = this.shownChat(turn);
     if (keep) {
-      this.chatContainer?.updateAssistantMessage(stream.id, stream.text, true);
-      stream.history.push({ type: "assistant", text: stream.text });
+      chat?.updateAssistantMessage(stream.id, stream.text, true);
+      turn.history.push({ type: "assistant", text: stream.text });
     } else {
-      this.chatContainer?.removeMessage(stream.id);
+      chat?.removeMessage(stream.id);
     }
   }
 
-  /** A message typed while the turn runs: the agent takes it in after its current step. */
+  /** A message typed while the shown turn runs: the agent takes it in after its current step. */
   private addToRunningTurn(text: string): void {
-    this.showQueued([...this.queued, text]);
-    if (!this.plugin.agent.steer(text)) this.unsteered.push(text);
+    const turn = this.turn;
+    if (!turn) return;
+    this.showQueued(turn, [...turn.queued, text]);
+    if (!turn.agent.steer(text)) turn.unsteered.push(text);
   }
 
   /** Added messages the turn didn't take in; they leave the queue (they run next). */
-  private takeLeftovers(): string[] {
-    const later = [...this.unsteered.splice(0), ...this.plugin.agent.takeSteered()];
-    if (later.length) this.showQueued(this.queued.filter((text) => !later.includes(text)));
+  private takeLeftovers(turn: RunningTurn): string[] {
+    const later = [...turn.unsteered.splice(0), ...turn.agent.takeSteered()];
+    if (later.length) this.showQueued(turn, turn.queued.filter((text) => !later.includes(text)));
     return later;
   }
 
-  /** Drop what was added to the running turn (Stop and Clear drop the turn too). */
-  private dropQueued(): void {
-    this.unsteered = [];
-    if (this.queued.length) this.showQueued([]);
+  /** `turn`'s queue, shown while the chat shows its conversation. */
+  private showQueued(turn: RunningTurn, texts: string[]): void {
+    turn.queued = texts;
+    this.shownChat(turn)?.setQueued([...texts]);
   }
 
-  private showQueued(texts: string[]): void {
-    this.queued = texts;
-    this.chatContainer?.setQueued([...texts]);
+  /**
+   * Before a switch or a new chat: a message still in its preflight (its
+   * linked files being read), or an edit not yet answered, is stopped and
+   * goes back to the input. An answer under way keeps running.
+   */
+  private cancelPreflight(): (() => void) | undefined {
+    const turn = this.turn;
+    return turn && (!turn.started || turn.rollback) ? this.stopTurn(turn, true) : undefined;
   }
 
-  /** Stops the running turn; what it showed so far stays. */
-  private stopTurn(): void {
-    const restoreDraft = this.restorePendingDraft;
-    this.restorePendingDraft = undefined;
-    this.runVersion++;
-    this.dropQueued();
-    this.plugin.agent.abort();
-    this.endStream(true);
-    this.rollbackResend?.();
-    // Resend rollback renders history, which clears attachment chips. Restore after it.
-    restoreDraft?.();
+  /**
+   * Stops `turn` (shown or in the background): what it showed so far
+   * stays; what was added to it and a waiting question are dropped. Not
+   * yet answered, an edit's original turn and the unsent message come back,
+   * with what was typed meanwhile. `deferRestore`: the input is filled by
+   * the returned function instead (after the next conversation rendered).
+   */
+  private stopTurn(turn: RunningTurn, deferRestore = false): (() => void) | undefined {
+    const restoreDraft = turn.restoreDraft;
+    const rollback = turn.rollback;
+    turn.restoreDraft = undefined;
+    turn.rollback = undefined;
+    const queued = [...turn.queued];
+    const shown = this.shownChat(turn);
+    turn.unsteered = [];
+    if (turn.queued.length) this.showQueued(turn, []);
+    turn.agent.abort();
+    this.endStream(turn, true);
+    this.setThinking(turn, false);
     // A stopped request may still be waiting for its response.
-    this.releaseScreen();
-    this.running = false;
+    turn.releaseScreen();
+    this.turns.delete(turn.conversation.id);
+    this.chatContainer?.updateConversations();
+    const ask = turn.ask;
+    turn.ask = null;
+    ask?.("");
     // Otherwise the next message would answer the stopped turn's question.
-    this.chatContainer?.cancelAskUser();
-    this.chatContainer?.hideThinking();
+    shown?.cancelAskUser();
+    rollback?.();
+    // Rollback renders history, which clears attachment chips. Restore after it.
+    const restore = shown && restoreDraft ? () => restoreDraft(queued) : undefined;
+    if (deferRestore) return restore;
+    restore?.();
+    return undefined;
   }
 
   private handleStop(): void {
+    const turn = this.turn;
     // Nothing of the answer is on screen yet: say that the turn was stopped.
-    const silent = this.running && !this.answerShown;
-    this.stopTurn();
+    const silent = !!turn && !turn.answerShown;
+    if (turn) this.stopTurn(turn);
     const chat = this.chatContainer;
     if (chat) {
       if (silent) chat.addError("Stopped.", "stopped");
@@ -844,20 +1020,21 @@ export class ObsidianChatView extends ItemView {
 
   private handleClear(): void {
     if (this.undoing) return;
-    this.runVersion++;
-    this.dropQueued();
+    const turn = this.turn;
+    if (turn) {
+      // Clear drops the turn: nothing comes back.
+      turn.rollback = undefined;
+      turn.restoreDraft = undefined;
+      this.stopTurn(turn);
+    }
+    delete this.plugin.activeConversation.pendingMessages;
     this.plugin.agent.clear();
-    this.rollbackResend = undefined;
-    this.restorePendingDraft = undefined;
-    this.streaming = null;
-    this.releaseScreen();
     this.plugin.chatHistory = [];
     delete this.plugin.activeConversation.notes;
     this.plugin.touchConversation();
     this.chatContainer?.setTitle(this.plugin.activeConversation.title);
     this.chatContainer?.clearMessages();
     this.chatContainer?.cancelAskUser();
-    this.running = false;
     this.chatContainer?.setInputEnabled(true);
     this.chatContainer?.setBusy(false);
     // Clear persisted state
