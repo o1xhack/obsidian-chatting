@@ -9,11 +9,14 @@ globalThis.require = createRequire(import.meta.url);
 // Bundle the actual production adapters/loop; only transport and the vault are fake.
 export const bundled = await build({
   stdin: { contents: `
-    export { ChatSettingTab } from './src/settings';
+    export { ChatSettingTab, parseTokens } from './src/settings';
     export * from './src/api/model-catalog';
     export { sendMessage } from './src/api/client';
     export { AgentLoop, RESUME } from './src/agent/loop';
-    export { trimHistory, withoutLargeToolText, withoutLargeVisibleToolText, MAX_TOOL_TEXT_CHARS } from './src/agent/history';
+    export { withoutLargeToolText, withoutLargeVisibleToolText, MAX_TOOL_TEXT_CHARS, fromLastCompaction, editableTurn, cutBeforeTurn } from './src/agent/history';
+    export * as compaction from './src/agent/compaction';
+    export { pageStart, PAGE_TURNS } from './src/ui/chat-view';
+
     export { sendAnthropicMessage } from './src/api/anthropic';
     export { sendOpenAIMessage, clearOpenAIState } from './src/api/openai';
     export { sendChatGPTOAuthMessage, setChatGPTOAuthService } from './src/api/chatgpt-oauth';
@@ -71,7 +74,19 @@ export const bundled = await build({
       export const MarkdownRenderer = { render: async () => {} };
       export class Modal {}
       export class PluginSettingTab { constructor(app) { this.app = app; } containerEl = { addClass() {} }; hide() {} }
-      export class Setting {}
+      // Rows display() makes; their name, description and heading are recorded.
+      export class Setting {
+        setName(name) { this.name = name; return this; }
+        setDesc(desc) { this.desc = desc; return this; }
+        setHeading() { this.heading = true; return this; }
+      }
+      // A slider, found on the element it was added to (\`slider\`).
+      export class SliderComponent {
+        constructor(containerEl) { containerEl.slider = this; }
+        setLimits(min, max, step) { this.limits = [min, max, step]; return this; }
+        setValue(value) { this.value = value; return this; }
+        onChange(fn) { this.change = fn; return this; }
+      }
       export const requireApiVersion = () => globalThis.__supportsNewObsidian === true;
       export class Notice { constructor(message) { (globalThis.__notices ??= []).push(message); } }
       export class TAbstractFile {}
@@ -219,6 +234,55 @@ export function transport(handler) {
   };
   return requests;
 }
+/** The plugin folder of the test vault. */
+export const PLUGIN_DIR = '.obsidian/plugins/chatting-with-ai';
+
+/**
+ * An in-memory adapter for the saved chats: files by path (`stored`). `saved`
+ * is what `chat-state.json` holds at the start: an older whole state, or a
+ * whole version 4 state from `writes` (split into the index and a file per
+ * conversation). Each write of `chat-state.json` adds the whole saved state
+ * to `writes`: the index with each conversation's chat file merged in.
+ */
+export function chatFiles(saved) {
+  const stored = new Map();
+  const dir = PLUGIN_DIR;
+  if (saved?.version >= 4) {
+    for (const { size: _size, ...conversation } of saved.conversations) {
+      stored.set(`${dir}/chats/${conversation.id}.json`, JSON.stringify({ version: saved.version, savedAt: saved.savedAt ?? 0, conversation }));
+    }
+    const conversations = saved.conversations.map(({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size }) => ({ id, title, ...(automaticTitle !== undefined ? { automaticTitle } : {}), ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}), customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}) }));
+    stored.set(`${dir}/chat-state.json`, JSON.stringify({ ...saved, conversations }));
+  } else if (saved) {
+    stored.set(`${dir}/chat-state.json`, JSON.stringify(saved));
+  }
+  const writes = [];
+  const chatFile = (id) => { const text = stored.get(`${dir}/chats/${id}.json`); return text ? JSON.parse(text) : undefined; };
+  const whole = (index) => ({
+    ...index,
+    conversations: index.conversations.map((entry) => ({ ...entry, ...chatFile(entry.id)?.conversation })),
+  });
+  const adapter = {
+    stored,
+    append: async () => {},
+    read: async (path) => { if (!stored.has(path)) throw new Error('ENOENT'); return stored.get(path); },
+    exists: async (path) => stored.has(path) || [...stored.keys()].some((file) => file.startsWith(`${path}/`)),
+    mkdir: async () => {},
+    list: async (path) => ({ files: [...stored.keys()].filter((file) => file.startsWith(`${path}/`)), folders: [] }),
+    remove: async (path) => { stored.delete(path); },
+    rename: async (from, to) => {
+      if (stored.has(to)) throw new Error('Destination file already exists!');
+      stored.set(to, stored.get(from));
+      stored.delete(from);
+    },
+    write: async (path, data) => {
+      stored.set(path, data);
+      if (path === `${dir}/chat-state.json`) writes.push(whole(JSON.parse(data)));
+    },
+  };
+  return { adapter, writes, whole: () => whole(JSON.parse(stored.get(`${dir}/chat-state.json`))) };
+}
+
 export function vaultApp() {
   const files = new Map([['Cases/Case Template.md', '# Template\n日本語本文'], ['Untitled.md', 'Original']]);
   const app = {

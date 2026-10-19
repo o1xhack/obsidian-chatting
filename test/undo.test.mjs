@@ -5,7 +5,7 @@
 // next turn.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, settings, text, call, response, transport } from './harness.mjs';
+import { api, settings, text, call, response, transport, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -219,14 +219,9 @@ function fakeChat() {
 // view with a fake component.
 async function chatSetup(saved) {
   const { app, files } = fakeVault({ 'Plan.md': 'My plan' });
-  const writes = [];
+  const { adapter, writes } = chatFiles(saved);
   app.vault.configDir = '.obsidian';
-  app.vault.adapter = {
-    append: async () => {},
-    read: async (path) => { if (!saved || !path.endsWith('/chat-state.json')) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async (path) => !!saved && path.endsWith('/chat-state.json'),
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.settings = { ...plugin.settings, followEdits: false };
@@ -358,9 +353,9 @@ test('The row and a pending note are saved; after a restart the row shows withou
   files.set('Plan.md', 'User plan');
   await view.handleUserMessage('Rewrite my plan', null);
   await view.undoChanges(changesRow(plugin).turnId);
-  await tick();
+  await plugin.saveChatHistory();
   const saved = JSON.parse(JSON.stringify(writes.at(-1)));
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, api.chatState.CHAT_STATE_VERSION);
   const [conversation] = saved.conversations;
   assert.deepEqual(conversation.chatHistory.filter(e => e.type === 'changes').map(e => e.undone ?? false), [false, true]);
   assert.equal(conversation.notes.length, 1);
@@ -390,14 +385,14 @@ test('Undo stays within its conversation: another chat can\'t undo the row, the 
   await view.undoChanges(turnId);
   assert.equal(files.get('Plan.md'), 'AI plan');
 
-  view.openConversation(first.id);
+  await view.openConversation(first.id);
   assert.equal(chat.shown.find(m => m.type === 'changes').changesState, 'undoable');
   await view.undoChanges(turnId);
   assert.equal(files.get('Plan.md'), 'My plan');
   assert.equal(first.notes.length, 1);
   assert.equal(second.notes, undefined);
 
-  view.openConversation(second.id);
+  await view.openConversation(second.id);
   await view.handleUserMessage('Next', null);
   assert.doesNotMatch(sentText(requests.at(-1)), /undid/);
 });

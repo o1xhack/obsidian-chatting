@@ -5,6 +5,7 @@
   import type { ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ChatErrorKind } from "../types";
   import { ACCEPTED_FILES, MAX_FILE_BYTES, fileAttachment, attachmentBudgetError } from "../files/attachments";
   import { formatBytes } from "../images";
+  import { LARGE_CHAT_BYTES } from "../chat-state";
   import { insertMention, mentionAt, mentionCandidates, type MentionQuery } from "./mentions";
   import { skillAt, skillCandidates, type Skill } from "../agent/skills";
   import { normalizeMathMarkdown } from "./math-markdown";
@@ -88,12 +89,14 @@
     onContinue: () => void;
     /** Summarize the chat now (the context ring's details). */
     onCompact: () => void;
+    /** Show the turns before the shown ones (scrolled near the top). */
+    onLoadEarlier: () => void;
   }
 
   let {
     app, component, provider, model, onSend, onClear, onStop, onEdit, onRegenerate, onCopy,
     title, onNewChat, listConversations, onOpenConversation, onRenameConversation, onDeleteConversation,
-    onToggleFollow, onUndo, listSkills, onContinue, onCompact,
+    onToggleFollow, onUndo, listSkills, onContinue, onCompact, onLoadEarlier,
   }: Props = $props();
 
   // ─── Context ring ─────────────────────────────────────────────────────
@@ -289,6 +292,12 @@
   const BOTTOM_SLACK = 32;
   let messageListEl: HTMLElement | undefined = $state();
   let stickToBottom = true;
+  /**
+   * Scrolled up from the bottom: the browser keeps the view on what it shows
+   * when rows above change height (scroll anchoring: earlier turns coming
+   * in, rows laid out late). Off while following the bottom.
+   */
+  let readingBack = $state(false);
   let showJump = $state(false);
   let lastQuestionId = -1;
   let lastScrollTop = 0;
@@ -312,7 +321,49 @@
 
   function jumpToBottom(): void {
     stickToBottom = true;
+    readingBack = false;
     followBottom();
+  }
+
+  // ─── Earlier turns ────────────────────────────────────────────────────
+  // The view shows a chat's last turns; scrolled near the top, or when they
+  // don't fill the view, the turns before them come in above, and the view
+  // stays where it was (Safari doesn't keep it by itself).
+  /** Pixels from the top at which the earlier turns load. */
+  const EARLIER_SLACK = 400;
+  let hasEarlier = false;
+
+  /** Whether the chat has turns before the shown ones (set by the view). */
+  export function setHasEarlier(value: boolean): void {
+    hasEarlier = value;
+    if (value) void tick().then(loadEarlierIfNear);
+  }
+
+  function loadEarlierIfNear(): void {
+    const el = messagesEl;
+    // A hidden chat (a background tab) has no height: it would load every turn.
+    if (hasEarlier && el && el.clientHeight > 0 && el.scrollTop < EARLIER_SLACK) onLoadEarlier();
+  }
+
+  /**
+   * Rows from an earlier part of the chat: `fill` adds them as it would at
+   * the end; they go above the shown ones, and the view keeps its place.
+   */
+  export function prependMessages(fill: () => void): void {
+    const shown = messages;
+    const el = messagesEl;
+    const fromBottom = el ? el.scrollHeight - el.scrollTop : 0;
+    messages = [];
+    try {
+      fill();
+    } finally {
+      messages = [...messages, ...shown];
+    }
+    void tick().then(() => {
+      if (!el) return;
+      el.scrollTop = el.scrollHeight - fromBottom;
+      lastScrollTop = el.scrollTop;
+    });
   }
 
   // A new question (sent, or the history shown anew) brings the view down.
@@ -322,6 +373,7 @@
     if (lastId !== lastQuestionId) {
       lastQuestionId = lastId;
       stickToBottom = true;
+      readingBack = false;
     }
     followBottom();
   });
@@ -331,7 +383,11 @@
   $effect(() => {
     const el = messagesEl;
     if (!el || !messageListEl) return;
-    const observer = new ResizeObserver(() => followBottom());
+    // Shown after being hidden, the chat may need its earlier turns too.
+    const observer = new ResizeObserver(() => {
+      followBottom();
+      loadEarlierIfNear();
+    });
     observer.observe(el, { box: "border-box" });
     observer.observe(messageListEl);
     // Scrolling up (wheel, touch, scrollbar, keys) stops following; back at the bottom it follows.
@@ -340,6 +396,8 @@
       else if (el.scrollTop < lastScrollTop) stickToBottom = false;
       lastScrollTop = el.scrollTop;
       showJump = !stickToBottom && !isAtBottom(el);
+      readingBack = !stickToBottom;
+      loadEarlierIfNear();
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
@@ -1242,6 +1300,10 @@
                 <span class="ochatting-history-title">{conversation.title}</span>
                 <span class="ochatting-history-date">
                   {#if conversation.running}<span class="ochatting-spinner ochatting-history-running" aria-hidden="true"></span>{/if}{conversation.running ? "Answering…" : formatDate(conversation.updatedAt)}
+                  <!-- A large chat: its size, so it can be deleted when no longer needed -->
+                  {#if (conversation.size ?? 0) > LARGE_CHAT_BYTES}
+                    · <span class="ochatting-history-size" title="A large chat. Delete it if you no longer need it.">{formatBytes(conversation.size ?? 0)}</span>
+                  {/if}
                 </span>
               </button>
               <button
@@ -1270,7 +1332,7 @@
   {/if}
 
   <!-- Messages -->
-  <div class="ochatting-messages" bind:this={messagesEl}>
+  <div class="ochatting-messages" class:is-reading-back={readingBack} bind:this={messagesEl}>
     <div class="ochatting-message-list" bind:this={messageListEl}>
     {#each messages as msg (msg.id)}
       {#if msg.type === "user"}
@@ -1860,6 +1922,10 @@
     font-size: var(--font-ui-smaller);
   }
 
+  .ochatting-history-size {
+    color: var(--text-warning);
+  }
+
   /* A chat whose answer runs in the background */
   .ochatting-history-running {
     width: 8px;
@@ -1975,10 +2041,25 @@
     user-select: text;
   }
 
+  /* Scrolled up: the browser keeps the view where it is when rows above
+     change height (Safari doesn't; there the earlier turns are placed by
+     prependMessages) */
+  .ochatting-messages.is-reading-back {
+    overflow-anchor: auto;
+  }
+
   .ochatting-message-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* Rows off screen aren't laid out or painted; they keep their last size.
+     Not on iOS: Safari doesn't keep the scroll position when a row above
+     gets its real size. */
+  :global(body:not(.is-ios)) .ochatting-message-list > * {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 80px;
   }
 
   /* Round "to the latest message" button, stuck to the bottom edge of the view */

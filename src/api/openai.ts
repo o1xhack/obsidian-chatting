@@ -77,7 +77,7 @@ export async function sendOpenAIMessage(
     model,
     input,
     stream: true,
-    ...compactionParameter(compactThreshold("openai", option)),
+    ...compactionParameter(compactThreshold("openai", option, settings)),
   };
 
   // Chain to previous response for multi-turn context
