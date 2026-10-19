@@ -74,6 +74,30 @@ export function transcript(messages: UnifiedMessage[], maxTokens: number): strin
   return `(The beginning of the conversation is left out.)\n…${all.slice(start)}`;
 }
 
+/** Ordered transcript chunks leave room for a rolling summary and instructions. */
+export function summaryChunks(messages: UnifiedMessage[], contextWindow: number | undefined): string[] {
+  const text = transcript(messages, Infinity);
+  const room = Math.max(1, Math.floor((contextWindow ?? DEFAULT_TRANSCRIPT_TOKENS * 2) * 0.35));
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = start, tokens = 0;
+    while (end < text.length && tokens + tokenCost(text.charCodeAt(end)) <= room) {
+      tokens += tokenCost(text.charCodeAt(end++));
+    }
+    if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    if (end === start) end = start + (text.codePointAt(start)! > 0xffff ? 2 : 1);
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks.length ? chunks : [""];
+}
+
+/** Fold each chunk into a readable summary instead of dropping the oldest text. */
+export function summaryChunkRequest(chunk: string, previous: string): string {
+  return `${SUMMARY_INSTRUCTION}${previous ? `\n\nPreserve the facts from this earlier summary and update it with the next part:\n<earlier-summary>\n${previous}\n</earlier-summary>` : ""}\n\n<conversation>\n${chunk}\n</conversation>`;
+}
+
 /** The summary request for `messages`, its transcript sized to half the window. */
 export function summaryRequest(messages: UnifiedMessage[], contextWindow: number | undefined): string {
   const maxTokens = contextWindow ? Math.floor(contextWindow * 0.5) : DEFAULT_TRANSCRIPT_TOKENS;

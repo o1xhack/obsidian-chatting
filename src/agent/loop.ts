@@ -33,7 +33,7 @@ import { RequestBudgetError } from "../api/request-budget";
 import { appLifecycle } from "../platform/lifecycle";
 import { afterCompaction, compactThreshold, summaryMessage } from "./compaction";
 import { catalogIdentity } from "../api/model-catalog";
-import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryRequest } from "./summary";
+import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryChunks, summaryChunkRequest } from "./summary";
 
 /** The turn ID of a summary message (it starts its own turn, with no visible entry). */
 function summaryTurnId(): string {
@@ -363,16 +363,23 @@ export class AgentLoop {
    */
   private async summarize(settings: ChatSettings, messages: UnifiedMessage[], isStopped: () => boolean,
     onUsage?: AgentCallbacks["onUsage"]): Promise<string> {
-    const window = catalogModel(settings.provider, settings.model)?.contextWindow;
+    const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() : await catalogIdentity(settings.provider, settings.apiKey);
+    const window = settings.modelCatalog?.entries.find(entry => entry.provider === settings.provider && entry.identity === identity)
+      ?.models.find(model => model.value === settings.model)?.contextWindow;
     const request = new AbortController();
     this.request = request;
     try {
-      const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
-        [{ role: "user", content: summaryRequest(messages, window) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
-      if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
-      const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
-      if (!text) throw new Error("The summary came back empty.");
-      return text;
+      let summary = "";
+      for (const chunk of summaryChunks(messages, window)) {
+        if (isStopped()) throw new Error("Summarization stopped.");
+        const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
+          [{ role: "user", content: summaryChunkRequest(chunk, summary) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
+        if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
+        const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
+        if (!text) throw new Error("The summary came back empty.");
+        summary = text;
+      }
+      return summary;
     } finally {
       if (this.request === request) this.request = null;
     }

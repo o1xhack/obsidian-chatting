@@ -374,3 +374,63 @@ test('Clearing a manually compacting chat cancels it and unlocks the composer im
   assert.equal(plugin.agent.exportMessages().length, 0);
   assert.equal(plugin.chatHistory.length, 0);
 });
+
+for (const change of ['provider', 'model', 'api-key', 'chatgpt-account']) test(`Repeated opaque compactions preserve the earliest fact through saved-history ${change} changes`, async () => {
+  const provider = change === 'chatgpt-account' ? 'chatgpt-oauth' : 'openai';
+  const initial = settings(provider);
+  transport((body, index) => compactedResponsesAnswer(provider, `Answer ${index}`, index));
+  const agent = new api.AgentLoop(vaultApp().app, initial);
+  await agent.run('Earliest fact: the archive key is EARLIEST-7319.', callbacks());
+  await agent.run('Second compaction', callbacks());
+  await agent.run('Third compaction', callbacks());
+  agent.trimForRetention();
+  const saved = JSON.parse(JSON.stringify(api.chatState.savedConversation({ id: 'repeat', title: 'Repeated', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory: [], agentMessages: agent.exportMessages() })));
+  assert.match(JSON.stringify(saved.agentMessages), /EARLIEST-7319/);
+  const next = { ...initial };
+  if (change === 'provider') Object.assign(next, settings('anthropic'));
+  if (change === 'model') next.model = 'gpt-6.1-sol';
+  if (change === 'api-key') next.apiKey = 'new-key';
+  if (change === 'chatgpt-account') api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'other-token', accountId: 'other-account' }) });
+  const restored = new api.AgentLoop(vaultApp().app, next);
+  restored.importMessages(saved.agentMessages);
+  const requests = transport((body, index) => {
+    if (isSummaryRequest(body)) {
+      assert.match(JSON.stringify(body), /EARLIEST-7319/);
+      return sse(streamEvents(next.provider, [text('Portable summary: archive key EARLIEST-7319.')], 'end_turn', index));
+    }
+    return sse(streamEvents(next.provider, [text('EARLIEST-7319')], 'end_turn', index));
+  });
+  const cb = callbacks();
+  await restored.run('What was the earliest fact?', cb);
+  assert.deepEqual(cb.errors, []);
+  assert.equal(requests.filter(isSummaryRequest).length, 1);
+  assert.match(JSON.stringify(requests.at(-1)), /Portable summary: archive key EARLIEST-7319/);
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).input ?? requests.at(-1).messages), /encrypted_content/);
+});
+
+test('A multi-window portable summary carries earliest facts forward through every chunk', async () => {
+  const loopSettings = await withCatalog('openai', [{ value: 'gpt-5.5', label: 'GPT', contextWindow: 1000 }]);
+  const original = [{ role: 'user', content: `EARLIEST-FACT ${'middle '.repeat(1000)} LATEST-FACT`, turnId: 't1' }];
+  const requests = transport(body => {
+    const input = JSON.stringify(body.input);
+    assert.match(input, /EARLIEST-FACT/);
+    return sse(streamEvents('openai', [text(`Remember EARLIEST-FACT${input.includes('LATEST-FACT') ? ' and LATEST-FACT' : ''}`)]));
+  });
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  agent.importMessages(original);
+  assert.equal(await agent.compact(), true);
+  assert.ok(requests.length > 2);
+  assert.match(JSON.stringify(agent.exportMessages()), /EARLIEST-FACT and LATEST-FACT/);
+  for (const body of requests) assert.equal(body.tools, undefined);
+});
+
+test('A failure partway through a rolling summary retains the whole original history', async () => {
+  const loopSettings = await withCatalog('openai', [{ value: 'gpt-5.5', label: 'GPT', contextWindow: 1000 }]);
+  const original = [{ role: 'user', content: `EARLIEST-FACT ${'middle '.repeat(1000)} LATEST-FACT`, turnId: 't1' }];
+  const requests = transport((body, index) => index === 0 ? sse(streamEvents('openai', [text('EARLIEST-FACT')])) : { status: 400, json: { error: { message: 'Summary rejected' } } });
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  agent.importMessages(original);
+  await assert.rejects(agent.compact(), /Summary rejected/);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(agent.exportMessages(), original);
+});

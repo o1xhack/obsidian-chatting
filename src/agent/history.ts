@@ -18,18 +18,14 @@ export function lastCompaction(messages: UnifiedMessage[]): number {
 }
 
 /**
- * The API history without what the last compaction covers: from that
- * message on, as a new array; the same array when nothing goes. A
- * compaction without a readable summary (OpenAI's is encrypted) keeps what
- * it covers, from the compaction before it on, so another provider or
- * model can summarize it; one compaction further back is dropped, so the
- * history stays within about two compaction windows. There is no cap by
- * count: the compaction point keeps the history within the model's window.
+ * Retain everything since the latest readable summary. Encrypted compaction
+ * items cannot supply a portable summary after a provider/model/account
+ * switch, even if another opaque compaction follows them. Keep their raw
+ * prefix until a readable summary exists. Request replay still starts at
+ * the latest native compaction; attachment and tool-text budgets still apply.
  */
 export function fromLastCompaction(messages: UnifiedMessage[]): UnifiedMessage[] {
-  const last = lastCompaction(messages);
-  if (last <= 0) return messages;
-  const start = messages[last].compaction?.summary ? last : lastCompaction(messages.slice(0, last));
+  const start = messages.map(message => !!message.compaction?.summary).lastIndexOf(true);
   return start > 0 ? messages.slice(start) : messages;
 }
 

@@ -13,8 +13,8 @@
     "chatStateVersion": 4
   },
   "automated": {
-    "tests": 685,
-    "passed": 685,
+    "tests": 691,
+    "passed": 691,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -91,7 +91,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "16d09a4e93240fbf1122485cc791ff3dd0b03fa41da88dd7916428b67fa17938",
+    "mainSha256": "368afadfc59455797b1c80146c4c3c7705073f872c1cf2fb4bd5094e0990a873",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -111,7 +111,7 @@
       "real-usage-counted"
     ],
     "toolCount": 0,
-    "conversationId": "chat-mvfw4yve-i36mxu",
+    "conversationId": "chat-mvfwny57-go9ppz",
     "passed": true
   },
   "reloadChatGPT": {
@@ -197,5 +197,11 @@
       "checked": 1809,
       "changed": 0
     }
+  },
+  "reviewFix": {
+    "priority": "P2",
+    "issue": "Repeated opaque compactions discarded the earliest raw context before a provider/model/account change.",
+    "resolution": "Keep the prefix until a readable summary exists; process oversized transcripts as ordered rolling summaries, preserving history on failure.",
+    "regressions": 6
   }
 }
