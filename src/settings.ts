@@ -338,7 +338,7 @@ export class ChatSettingTab extends PluginSettingTab {
     setting
       .setName(MCP_SERVERS)
       .setDesc(this.plugin.settings.provider === "chatgpt-oauth"
-        ? "Remote MCP servers work with an Anthropic or OpenAI API key; the ChatGPT account doesn't offer them."
+        ? "Remote MCP servers work with an Anthropic or OpenAI API key. This plugin's ChatGPT account integration doesn't support remote MCP yet."
         : "Remote servers (public https) whose tools the AI can use. The provider connects to them and calls their tools without asking, so add only servers you trust.");
   }
 

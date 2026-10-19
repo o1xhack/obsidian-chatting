@@ -105,6 +105,17 @@ function withBoundedServerResults(items: Record<string, unknown>[], room: number
   };
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
+    if (item.type === "mcp_list_tools") {
+      const size = JSON.stringify(item).length;
+      if (size > Math.min(MAX_TOOL_TEXT_CHARS, room)) {
+        // Dropping the catalog makes the provider discover tools again. An
+        // empty/truncated schema could instead hide tools or misdescribe them.
+        const text = "[MCP tool catalog omitted to keep chat history bounded. Rediscover tools from the configured server when needed.]";
+        bounded[i] = { type: "message", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] };
+        room = Math.max(0, room - text.length);
+        changed = true;
+      } else room -= size;
+    }
     if (item.type === "mcp_call") {
       // Errors can contain the same arbitrary server payload as output. Both
       // fields share one call's allowance, including structured execution errors.

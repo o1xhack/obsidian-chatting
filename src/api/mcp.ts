@@ -5,8 +5,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
  * Remote MCP servers through the provider: Anthropic's MCP connector and
  * OpenAI's remote MCP tool connect to the server and call its tools
  * themselves; the plugin only names the servers in the request and shows
- * the calls. The ChatGPT account's route doesn't offer it ("hosted
- * MCP/connectors" unsupported).
+ * the calls. This plugin's ChatGPT account integration doesn't implement
+ * remote MCP; that is separate from subscription clients supporting MCP.
  */
 
 /** Anthropic's MCP connector beta. */
@@ -131,8 +131,9 @@ export function openaiServerCalls(items: Record<string, unknown>[]): ServerToolC
       server: typeof item.server_label === "string" ? item.server_label : "",
       tool: typeof item.name === "string" ? item.name : "",
       input,
-      result: error ? resultText(error) || (typeof error === "string" ? error : JSON.stringify(error)) : resultText(item.output),
-      isError: !!error,
+      result: error ? resultText(error) || (typeof error === "string" ? error : JSON.stringify(error))
+        : resultText(item.output) || (item.status === "failed" ? "MCP call failed without a result." : ""),
+      isError: !!error || item.status === "failed",
       ...(item.status === "in_progress" || item.status === "calling" || item.status === "incomplete" ? { pending: true } : {}),
     };
   });

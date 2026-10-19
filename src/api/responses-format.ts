@@ -16,8 +16,9 @@ export function buildResponsesInput(
   const items: Record<string, unknown>[] = [];
   for (const message of withoutOldToolImages(messages)) {
     if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
-      items.push(...withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers));
-      continue;
+      const replay = withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers);
+      if (replay.length) { items.push(...replay); continue; }
+      // Portable receipts still explain external changes after revocation.
     }
     const content: Record<string, unknown>[] = [];
     const flush = () => {

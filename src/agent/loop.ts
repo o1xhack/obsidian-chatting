@@ -510,14 +510,19 @@ export class AgentLoop {
       callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
     }
     const content = response.content.filter(block => block.type !== "tool_use");
-    // Portable text is only used if native replay is unavailable (for example
-    // after changing provider); it must still explain what already ran.
-    if (calls.length) content.push({ type: "text", text: boundedToolText(calls.map(call =>
+    // Keep the receipt in both representations: even a partial native replay
+    // must retain it after revoking one of its servers.
+    const receipt = calls.length ? boundedToolText(calls.map(call =>
       `Remote MCP receipt (${call.server}/${call.tool}, ${call.isError ? "error" : "completed"}): ${boundedToolText(call.result, 1000)}`,
-    ).join("\n"), 8000) });
+    ).join("\n"), 8000) : "";
+    if (receipt) content.push({ type: "text", text: receipt });
+    const replay = response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") };
+    if (replay && receipt) replay.items.push(replay.provider === "anthropic"
+      ? { type: "text", text: receipt }
+      : { type: "message", role: "assistant", content: [{ type: "output_text", text: receipt, annotations: [] }] });
     this.messages.push({
       role: "assistant", content,
-      replay: response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") },
+      replay,
     });
     this.messages = withoutLargeToolText(this.messages);
   }
