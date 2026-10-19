@@ -545,3 +545,63 @@ test('Failed OpenAI remote receipts are shown, persisted, replayed after restart
   const portable = api.buildResponsesInput(saved, 'chatgpt-oauth');
   assert.match(JSON.stringify(portable), /CREATED-99/);
 });
+
+test('Exhausted shared MCP text allowance emits one marker per older result, not one per part', () => {
+  const result=(id,content)=>({type:'mcp_tool_result',tool_use_id:id,content});
+  const messages=[{role:'user',content:'Q'},{role:'assistant',content:[text('A')],replay:{provider:'anthropic',items:[
+    result('old',Array.from({length:10000},()=>({type:'text',text:'old payload'}))),
+    result('new1',[{type:'text',text:'N'.repeat(100000)}]),
+    result('new2',[{type:'text',text:'N'.repeat(100000)}]),
+  ]}}];
+  const bounded=api.withoutLargeToolText(messages),old=bounded[1].replay.items[0];
+  assert.equal(old.content.length,1);
+  assert.match(old.content[0].text,/Tool text truncated/);
+  assert.ok(JSON.stringify(bounded).length<202000);
+  assert.equal(api.withoutLargeToolText(bounded),bounded);
+});
+
+test('An MCP result cut exactly between blocks still reports the missing tail', () => {
+  const messages=[{role:'assistant',content:[text('A')],replay:{provider:'anthropic',items:[
+    {type:'mcp_tool_result',tool_use_id:'r',content:[{type:'text',text:'A'.repeat(100000)},{type:'text',text:'MISSING-TAIL'}]},
+  ]}}];
+  const bounded=api.withoutLargeToolText(messages),parts=bounded[0].replay.items[0].content;
+  assert.match(parts.map(part=>part.text).join(''),/Tool text truncated/);
+  assert.ok(parts.reduce((total,part)=>total+part.text.length,0)<=100000);
+  assert.equal(api.withoutLargeToolText(bounded),bounded);
+});
+
+test('OpenAI structured MCP errors share the output allowance and stay bounded on restore and replay', async () => {
+  const requests = transport(() => response('openai', [text('Next')]));
+  const items = [
+    { type: 'mcp_call', id: 'old', server_label: 'linear', name: 'read', arguments: '{}', error: { type: 'http_error', code: 500, message: 'E'.repeat(200000) } },
+    { type: 'mcp_call', id: 'new', server_label: 'linear', name: 'read', arguments: '{}', output: 'O'.repeat(60000), error: { type: 'mcp_tool_execution_error', content: [{ type: 'image', data: 'B'.repeat(2000000) }] } },
+  ];
+  const parsed = api.fromResponsesOutput({ output: items }, 'openai', 'gpt-5.5');
+  const loop = new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS });
+  loop.importMessages([{ role: 'user', content: 'Read' }, assistant(parsed)]);
+  const saved = loop.exportMessages(), bounded = saved[1].replay.items;
+  assert.equal(bounded[0].error.type, 'http_error');
+  assert.equal(bounded[0].error.code, 500);
+  assert.ok(bounded[0].error.message.length <= 100000);
+  assert.equal(bounded[1].error.type, 'mcp_tool_execution_error');
+  assert.ok(bounded[1].output.length + bounded[1].error.content.text.length <= 100000);
+  assert.match(bounded[1].error.content.text, /Tool text truncated/);
+  assert.ok(JSON.stringify(saved).length < 202000);
+  assert.equal(api.withoutLargeToolText(saved), saved);
+  loop.importMessages(JSON.parse(JSON.stringify(saved)));
+  await loop.run('Continue', callbacks());
+  assert.deepEqual(requests[0].input.filter(item => item.type === 'mcp_call'), bounded);
+});
+
+test('An incomplete OpenAI MCP call is not shown or persisted as completed', async () => {
+  transport(() => ({ status: 200, json: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [
+    { type: 'mcp_call', id: 'partial', server_label: 'linear', name: 'create', arguments: '{}', status: 'incomplete', output: null, error: null },
+  ] } }));
+  const results = [];
+  const loop = new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS });
+  await loop.run('Create', callbacks({ onToolResult: (name, result) => results.push({ name, result }) }));
+  assert.deepEqual(results, []);
+  const saved = loop.exportMessages();
+  assert.doesNotMatch(JSON.stringify(saved.map(message => message.content)), /Remote MCP receipt|completed/);
+  assert.equal(saved.at(-1).replay.items[0].status, 'incomplete');
+});

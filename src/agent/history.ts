@@ -33,9 +33,11 @@ export const MAX_TOOL_FILE_BYTES = 10 * 1024 * 1024;
 export const MAX_TOOL_TEXT_CHARS = 100000;
 const TOTAL_TOOL_TEXT_CHARS = 200000;
 
+const TOOL_TEXT_OMISSION = "\n[Tool text truncated to keep chat history within its size limit. Use search or a smaller focused extract for omitted content.]";
+
 export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): string {
   if (text.length <= limit) return text;
-  const notice = "\n[Tool text truncated to keep chat history within its size limit. Use search or a smaller focused extract for omitted content.]";
+  const notice = TOOL_TEXT_OMISSION;
   let end = Math.max(0, limit - notice.length);
   if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
   const prefix = new TextDecoder().decode(new TextEncoder().encode(text.slice(0, end)));
@@ -103,34 +105,81 @@ function withBoundedServerResults(items: Record<string, unknown>[], room: number
   };
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
-    if (item.type === "mcp_call" && typeof item.output === "string") {
-      const output = take(item.output);
-      if (output !== item.output) { bounded[i] = { ...item, output }; changed = true; }
+    if (item.type === "mcp_call") {
+      // Errors can contain the same arbitrary server payload as output. Both
+      // fields share one call's allowance, including structured execution errors.
+      let allowance = MAX_TOOL_TEXT_CHARS;
+      const callText = (text: string) => {
+        const short = take(text, allowance);
+        allowance = Math.max(0, allowance - short.length);
+        return short;
+      };
+      const next = { ...item };
+      if (typeof item.output === "string") next.output = callText(item.output);
+      if (typeof item.error === "string") next.error = callText(item.error);
+      else if (item.error && typeof item.error === "object") {
+        const error = item.error as Record<string, unknown>;
+        const short = { ...error };
+        if (typeof error.message === "string") short.message = callText(error.message);
+        if (error.content !== undefined) {
+          const content = error.content;
+          // A clipped payload has this small, schema-valid object form. Read
+          // its text directly so repeated saves do not re-encode and shrink it.
+          const summary = content && typeof content === "object" && !Array.isArray(content)
+            && Object.keys(content).length === 1 && typeof (content as { text?: unknown }).text === "string"
+            ? (content as { text: string }).text : JSON.stringify(content);
+          const text = callText(summary);
+          if (text !== summary) short.content = { text };
+        }
+        if (short.message !== error.message || short.content !== error.content) next.error = short;
+      }
+      if (next.output !== item.output || next.error !== item.error) { bounded[i] = next; changed = true; }
     }
     if (item.type === "mcp_tool_result") {
       if (typeof item.content === "string") {
         const content = take(item.content);
         if (content !== item.content) { bounded[i] = { ...item, content }; changed = true; }
       } else if (Array.isArray(item.content)) {
-        let remaining = MAX_TOOL_TEXT_CHARS;
+        const limit = Math.min(MAX_TOOL_TEXT_CHARS, room);
+        let remaining = limit;
         const content: Record<string, unknown>[] = [];
-        let clipped = false;
-        for (const part of item.content as unknown[]) {
-          if (remaining <= 0) { clipped = true; break; }
-          if (typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string") {
-            const block = part as { type: string; text: string };
-            const text = take(block.text, remaining);
-            remaining = Math.max(0, remaining - text.length);
-            content.push(text === block.text ? block : { ...block, text });
-            clipped ||= text !== block.text;
-          } else {
-            const text = take("[Non-text MCP result omitted from chat history.]", remaining);
-            remaining = Math.max(0, remaining - text.length);
-            content.push({ type: "text", text });
-            clipped = true;
+        let clipped = false, truncated = false;
+        const source = item.content as unknown[];
+        for (let index = 0; index < source.length; index++) {
+          // One omission per result, even with thousands of blocks after the
+          // shared allowance is exhausted. Also bound empty block overhead.
+          if (remaining <= 0 || index >= 128) { clipped = truncated = true; break; }
+          const part = source[index];
+          const block = typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string"
+            ? part as { type: string; text: string }
+            : { type: "text", text: "[Non-text MCP result omitted from chat history.]" };
+          clipped ||= block !== part;
+          if (block.text.length > remaining) {
+            content.push({ type: "text", text: block.text.slice(0, remaining) });
+            clipped = truncated = true;
+            break;
+          }
+          content.push(block);
+          remaining -= block.text.length;
+        }
+        if (truncated) {
+          // Reserve room in the retained prefix even when a block consumed
+          // the limit exactly. A missing tail must never look complete.
+          const prefix = content.map(part => part.text as string).join("\n");
+          let end = Math.max(0, limit - TOOL_TEXT_OMISSION.length);
+          if (end > 0 && /[\uD800-\uDBFF]/.test(prefix[end - 1])) end--;
+          const text = new TextDecoder().decode(new TextEncoder().encode(prefix.slice(0, end))) + TOOL_TEXT_OMISSION;
+          content.splice(0, content.length, { type: "text", text });
+        }
+        if (clipped) {
+          const old = source.length === 1 ? source[0] as { type?: string; text?: string } | null : null;
+          // Stable omission markers do not keep replacing their message.
+          if (source.length !== content.length || content.some((part, index) => part !== source[index] &&
+            !(index === 0 && source.length === 1 && old?.type === "text" && old.text === part.text))) {
+            bounded[i] = { ...item, content }; changed = true;
           }
         }
-        if (clipped) { bounded[i] = { ...item, content }; changed = true; }
+        room = Math.max(0, room - content.reduce((total, part) => total + (part.text as string).length, 0));
       }
     }
   }

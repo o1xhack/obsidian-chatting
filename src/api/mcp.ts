@@ -133,7 +133,7 @@ export function openaiServerCalls(items: Record<string, unknown>[]): ServerToolC
       input,
       result: error ? resultText(error) || (typeof error === "string" ? error : JSON.stringify(error)) : resultText(item.output),
       isError: !!error,
-      ...(item.status === "in_progress" || item.status === "calling" ? { pending: true } : {}),
+      ...(item.status === "in_progress" || item.status === "calling" || item.status === "incomplete" ? { pending: true } : {}),
     };
   });
 }

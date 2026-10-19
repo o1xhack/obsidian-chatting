@@ -1,7 +1,7 @@
 {
-  "productionMainSha256": "55d9cedcc028729d9c7dd7a230b162a62b906d3d8c3fa82b04bc5e69fb7560cb",
-  "automatedTests": 523,
-  "mcpRegressions": 34,
+  "productionMainSha256": "3b4c25572c6aca7d451eb9af0c398f0bcacd7054ed9b94526a39a7dab17512bd",
+  "automatedTests": 527,
+  "mcpRegressions": 38,
   "desktop": {
     "scope": "native desktop Obsidian, exact production bundle and mounted Svelte UI; provider transport mocked; no live-provider claim",
     "appVersion": "1.14.4",
@@ -16,6 +16,9 @@
       "native-settings-no-token",
       "native-narrow-settings-no-horizontal-overflow",
       "native-add-default-off",
+      "production-shared-mcp-budget",
+      "production-block-boundary-marker",
+      "production-structured-error-budget",
       "native-mcp-result-history",
       "native-mcp-step-label",
       "native-mcp-answer-rendered",
@@ -26,10 +29,12 @@
       "native-failed-receipt-step-rendered",
       "native-failed-response-warning",
       "native-failed-receipt-persistable",
+      "native-incomplete-no-completed-result",
+      "native-incomplete-no-success-label",
       "protected-vault-files-unchanged"
     ],
     "version": "0.8.0",
-    "candidateSha256": "55d9cedcc028729d9c7dd7a230b162a62b906d3d8c3fa82b04bc5e69fb7560cb",
+    "candidateSha256": "3b4c25572c6aca7d451eb9af0c398f0bcacd7054ed9b94526a39a7dab17512bd",
     "narrowLayout": {
       "width": 375,
       "scrollWidth": 375,
@@ -43,7 +48,7 @@
   },
   "physicalIPhone": {
     "scope": "physical iPhone; exact production plugin; real Obsidian settings controls, synthetic token store; no provider/network request",
-    "time": "2026-10-19T18:20:10.653Z",
+    "time": "2026-10-19T18:30:14.422Z",
     "appVersion": "1.14.5",
     "isPhone": true,
     "checks": [
@@ -58,10 +63,13 @@
       "no-horizontal-overflow",
       "add-default-off-distinct-ids",
       "chatgpt-route-explained",
-      "original-settings-retained"
+      "original-settings-retained",
+      "production-shared-mcp-budget",
+      "production-block-boundary-marker",
+      "production-structured-error-budget"
     ],
     "version": "0.8.0",
-    "candidateSha256": "55d9cedcc028729d9c7dd7a230b162a62b906d3d8c3fa82b04bc5e69fb7560cb",
+    "candidateSha256": "3b4c25572c6aca7d451eb9af0c398f0bcacd7054ed9b94526a39a7dab17512bd",
     "chats": 4,
     "activeEntries": 12,
     "layout": {
