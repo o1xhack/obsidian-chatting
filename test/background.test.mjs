@@ -561,3 +561,35 @@ test('A plan quota failure in the background is not resent', async () => {
   assert.equal(requests.length, 1);
   appLifecycle.markVisible();
 });
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: no headers with enabled MCP never falls back or auto-resends`, async () => {
+  const { plugin, view } = await chatSetup(provider);
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  let attempts = 0;
+  globalThis.__fetch = async () => { attempts++; appLifecycle.markHidden(); throw new TypeError('Lost response before headers'); };
+  transport(() => assert.fail('Unsafe fallback would duplicate a POST'));
+  await view.handleUserMessage('Create once', null);
+  assert.equal(attempts, 1);
+  assert.match(JSON.stringify(plugin.agent.exportMessages()), /Remote MCP request outcome unknown/);
+  assert.match(plugin.chatHistory.find(row => row.type === 'error').text, /MCP tools may already have run/);
+  appLifecycle.markVisible();
+});
+
+test('Restart after an in-flight MCP request preserves uncertainty and refuses Continue', async () => {
+  const { plugin, view, writes } = await chatSetup('openai');
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  let sent = false;
+  globalThis.__fetch = async () => { sent = true; return new Promise(() => {}); };
+  void view.handleUserMessage('Create externally', null);
+  await until(() => sent);
+  await plugin.saveChatHistory();
+  const saved = JSON.parse(JSON.stringify(writes.at(-1)));
+  assert.equal(saved.conversations[0].pendingTurn.remoteEffectsPossible, true);
+  const restored = await chatSetup('openai', saved);
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, false);
+  assert.ok(restored.chat.shown.some(row => /may have run remote MCP tools/.test(row.text)));
+  const after = transport(() => assert.fail('Must not repeat unknown external operations'));
+  await restored.view.continueTurn();
+  assert.equal(after.length, 0);
+});

@@ -30,6 +30,8 @@ import { appLifecycle } from "../platform/lifecycle";
 export interface StreamRequest {
   headers: Record<string, string>;
   body: string;
+  /** A failed POST may have reached remote tools even without response headers. */
+  noFallback?: boolean;
 }
 
 /**
@@ -120,7 +122,7 @@ export async function streamSSE(
     } catch (error) {
       // No answer at all (a system proxy, a certificate only the OS trusts):
       // Obsidian's requestUrl() reaches the server as before streaming.
-      if (signal?.aborted || !(error instanceof NoResponse)) throw error;
+      if (signal?.aborted || !(error instanceof NoResponse) || request.noFallback) throw error;
       return viaRequestUrl(url, request, onEvent, signal);
     }
   }
@@ -132,6 +134,7 @@ export async function streamSSE(
       response = await browserFetch(url, { method: "POST", headers: request.headers, body: request.body, signal });
     } catch (error) {
       throwIfAborted(signal);
+      if (request.noFallback) throw error;
       // In the background the network is cut, not blocked: no fallback
       // now, no block for later; the loop sends it again when the app is back.
       if (appLifecycle.hiddenSince(startedAt)) throw error;

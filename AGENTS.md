@@ -140,3 +140,5 @@ npm run svelte-check   # Svelte check
 ## Debug
 
 Turn on **Debug log** in the settings to write each message as sent (with its context lines), the model's answers with their text and tool calls, each tool call with its input and result, and errors to `<vault-config-dir>/plugins/chatting-with-ai/debug.log` (`src/debug.ts`). It includes the user's messages, never keys or tokens. The row's Copy and Clear buttons and the "Copy debug log" command get it off a phone.
+
+Stream recovery safety: MCP-capable POSTs disable transport fallback after a lost response; absent headers do not prove absent external effects. Optional pendingTurn.remoteEffectsPossible prevents Continue after restart for an uncertain remote request. Continue requires the original visible user turn, retains its selection fingerprint, and re-reads MCP settings on each request.

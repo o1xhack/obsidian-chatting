@@ -142,6 +142,7 @@ export async function sendAnthropicMessage(
       ...(servers.length ? { "anthropic-beta": ANTHROPIC_MCP_BETA } : {}),
     },
     body: requestBody,
+    noFallback: servers.length > 0,
   }, collected.onEvent, stream.signal).catch((error: unknown) => {
     throw withReceipts(error instanceof StreamDropped ? new StreamCutError("Anthropic", collected.serverTool()) : error);
   });
@@ -158,10 +159,12 @@ export async function sendAnthropicMessage(
   return toResponse(complete);
 
   function withReceipts(error: unknown): unknown {
-    if (!collected.serverTool()) return error;
+    if (!collected.serverTool() && !servers.length) return error;
     const source = error instanceof Error ? error.message : String(error);
+    const partial = toResponse(collected.snapshot());
+    if (!partial.serverCalls?.length) partial.content.push({ type: "text", text: "Remote MCP request outcome unknown. Check the external service before repeating this request." });
     return new ProviderError(source + " Remote MCP tools may already have run; check their results before retrying.", 0,
-      error instanceof ProviderError ? error.code : undefined, undefined, true, toResponse(collected.snapshot()));
+      error instanceof ProviderError ? error.code : undefined, undefined, true, partial);
   }
 
   function toResponse(packet: Record<string, unknown>): UnifiedResponse {

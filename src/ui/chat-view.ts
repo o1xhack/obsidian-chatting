@@ -345,6 +345,9 @@ export class ObsidianChatView extends ItemView {
     // Turns the API history no longer holds lose their pencil.
     this.updateEditable();
     chat.setContinue(this.canContinue());
+    if (!this.running && this.plugin.activeConversation.pendingTurn?.remoteEffectsPossible) {
+      chat.addError("This interrupted request may have run remote MCP tools. Check the external service before sending a new message; Continue is unavailable to avoid repeating changes.");
+    }
   }
 
   /**
@@ -353,7 +356,9 @@ export class ObsidianChatView extends ItemView {
    */
   private canContinue(): boolean {
     const pending = this.plugin.activeConversation.pendingTurn;
-    return !this.running && !!pending && this.plugin.agent.owesAnswer(pending.turnId);
+    return !this.running && !!pending && !pending.remoteEffectsPossible &&
+      this.plugin.chatHistory.some(row => row.type === "user" && row.turnId === pending.turnId) &&
+      this.plugin.agent.owesAnswer(pending.turnId);
   }
 
   /** Forget a cut-off turn: no Continue (a new message, Stop, Clear, leaving the chat). */
@@ -709,6 +714,9 @@ export class ObsidianChatView extends ItemView {
     try {
       await start(agent, {
         changes,
+        onRequestStarted: (remoteEffectsPossible) => {
+          if (isCurrent() && conversation.pendingTurn) conversation.pendingTurn.remoteEffectsPossible = remoteEffectsPossible;
+        },
         onPreflightRejected: (error) => {
           turn.started = false;
           const pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);

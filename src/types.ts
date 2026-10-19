@@ -291,6 +291,8 @@ export interface ViewTarget {
 // ─── Agent Loop Callbacks ───────────────────────────────────────────────────
 
 export interface AgentCallbacks {
+  /** Persist uncertainty before a request capable of external side effects. */
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void;
   onThinking: () => void;
   /** Answer text as it streams in; `onResponse` later gives the whole text. */
   onTextDelta?: (text: string) => void;

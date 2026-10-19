@@ -52,6 +52,8 @@ export interface ConversationRecord {
 
 /** The turn a conversation was running. */
 export interface PendingTurn {
+  /** A lost response could have already run external tools; never offer replay. */
+  remoteEffectsPossible?: boolean;
   turnId: string;
   startedAt: number;
 }
@@ -120,7 +122,7 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
       // Optional, so no new format version: an older plugin just drops it.
       const pending = item.pendingTurn;
       const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
-        ? { turnId: pending.turnId, startedAt: pending.startedAt }
+        ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) }
         : undefined;
       return {
         id: item.id as string,

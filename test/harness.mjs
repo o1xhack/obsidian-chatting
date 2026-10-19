@@ -187,6 +187,13 @@ const nodeFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
   if (globalThis.__fetch) return globalThis.__fetch(url, init);
   if (/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(String(url))) return nodeFetch(url, init);
+  // MCP tests use a reachable streaming transport: a pre-response failure
+  // is deliberately unsafe to fall back/repeat when remote tools are enabled.
+  const body = init?.body ? JSON.parse(init.body) : {};
+  if (body.mcp_servers?.length || body.tools?.some(tool => tool.type === 'mcp')) {
+    const result = await globalThis.__providerRequest({ url, ...init });
+    return new Response(result.text ?? JSON.stringify(result.json), { status: result.status, headers: result.headers });
+  }
   throw new TypeError('Failed to fetch');
 };
 export function transport(handler) {

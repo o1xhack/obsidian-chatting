@@ -36,11 +36,12 @@ export async function sendResponsesRequest(
   const collected = collectResponsesStream(stream.onTextDelta, stream.onServerTool);
   // The final size check (`serializeRequest`) runs before anything is sent.
   const requestBody = serializeRequest(body);
+  const remoteEnabled = Array.isArray(body.tools) && body.tools.some(tool => isRecord(tool) && tool.type === "mcp");
   let response: StreamResult;
   try {
-    response = await streamSSE(url, { headers, body: requestBody }, collected.onEvent, stream.signal);
+    response = await streamSSE(url, { headers, body: requestBody, noFallback: remoteEnabled }, collected.onEvent, stream.signal);
   } catch (error) {
-    if (collected.serverTool()) return collected.remoteFailure(error instanceof Error ? error.message : String(error));
+    if (collected.serverTool() || remoteEnabled) return collected.remoteFailure(error instanceof Error ? error.message : String(error));
     if (error instanceof StreamDropped) throw new StreamCutError(name, collected.serverTool());
     throw error;
   }
@@ -51,7 +52,7 @@ export async function sendResponsesRequest(
     throw errors.stream(failure);
   }
   if (!data) {
-    if (collected.serverTool()) return collected.remoteFailure(`${name} stream ended before the answer was complete.`);
+    if (collected.serverTool() || remoteEnabled) return collected.remoteFailure(`${name} stream ended before the answer was complete.`);
     throw new StreamCutError(name);
   }
   return data;
@@ -147,6 +148,9 @@ export function fromResponsesOutput(
   const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
   const failed = data.status === "failed" || !!data.error;
   const content: ContentBlock[] = [];
+  if (failed && data.mcpEffectsPossible === true && !output.some(item => item.type === "mcp_call")) {
+    content.push({ type: "text", text: "Remote MCP request outcome unknown. Check the external service before repeating this request." });
+  }
   for (const item of output) {
     if (item.type === "message" && Array.isArray(item.content)) {
       for (const part of item.content.filter(isRecord)) {
@@ -182,7 +186,7 @@ export function fromResponsesOutput(
   };
   if (failed) {
     const error = isRecord(data.error) ? data.error : {};
-    const remoteEffectsPossible = !!result.serverCalls?.length;
+    const remoteEffectsPossible = !!result.serverCalls?.length || data.mcpEffectsPossible === true;
     // Keep receipts even though the error still ends the turn. The dispatcher
     // must not repeat a request that may have changed an external service.
     throw new ProviderError((typeof error.message === "string" ? error.message : "Response failed.") +
@@ -272,7 +276,7 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
       return { data: { ...completed, output: items.size > 0 ? Array.from(items.values()) : completed.output ?? [] } };
     },
     serverTool: () => serverTool,
-    remoteFailure: (message, code) => ({ ...completed, status: "failed", error: { message, code },
+    remoteFailure: (message, code) => ({ ...completed, status: "failed", mcpEffectsPossible: true, error: { message, code },
       output: Array.isArray(completed?.output) && completed.output.length ? completed.output : [...items.values()] }),
   };
 }

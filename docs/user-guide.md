@@ -269,3 +269,7 @@ Yes. Word, Excel and PowerPoint files are ZIP archives, and the plugin unpacks t
 
 </details>
 
+
+### Interrupted remote requests
+
+If a request with enabled MCP servers loses its response, it is not automatically posted again through a different transport. External tools may already have run. After an app restart, that interrupted request shows a warning instead of Continue; check the remote service before sending another message. Other pending turns can use Continue while their original user turn is retained. Continued selections keep their original fingerprint; if the note changed, scoped writes are refused.
