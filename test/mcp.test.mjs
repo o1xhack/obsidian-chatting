@@ -698,3 +698,28 @@ test('Saving and restoring visible MCP rows enforces the shared text allowance',
     assert.match(history[0].toolResult.result,/Tool text truncated/);
   }
 });
+
+for (const provider of ['anthropic','openai']) for (const change of ['disable','remove','url','token']) {
+  test(`${provider}: MCP ${change} during rate-limit backoff applies to the retry`, async () => {
+    const config={...settings(provider),mcpServers:[{...SERVERS[0]}]};
+    const oldWindow=globalThis.window;
+    globalThis.window={setTimeout:resolve=>{
+      if(change==='remove')config.mcpServers=[];
+      else if(change==='disable')config.mcpServers[0].enabled=false;
+      else config.mcpServers[0][change]=change==='url'?'https://changed.example/mcp':'new-token';
+      resolve();return 1;
+    }};
+    try {
+      const requests=transport((_body,i)=>i===0?{status:429,json:{error:{message:'Wait',type:'rate_limit_error',code:'rate_limit_exceeded'}},headers:{'retry-after':'0'}}:response(provider,[text('Done')]));
+      const cb=callbacks();await new api.AgentLoop(vaultApp().app,config).run('Read',cb);
+      assert.deepEqual(cb.errors,[]);assert.equal(requests.length,2);
+      if(change==='disable'||change==='remove'){
+        if(provider==='anthropic')assert.equal(requests[1].mcp_servers,undefined);
+        else assert.equal(requests[1].tools.some(tool=>tool.type==='mcp'),false);
+      } else {
+        const server=provider==='anthropic'?requests[1].mcp_servers[0]:requests[1].tools.find(tool=>tool.type==='mcp');
+        assert.equal(change==='url'?(server.url??server.server_url):(server.authorization_token??server.authorization),change==='url'?'https://changed.example/mcp':'new-token');
+      }
+    } finally {globalThis.window=oldWindow;}
+  });
+}

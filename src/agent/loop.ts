@@ -245,7 +245,9 @@ export class AgentLoop {
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
     // Keep one provider/model/credential configuration for this entire turn.
-    const turnSettings = { ...this.settings, mcpServers: this.settings.mcpServers?.map(server => ({ ...server })) ?? [] };
+    // MCP revocation stays live even inside the dispatcher's retry wait.
+    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
 
     // Build context once per user turn and prepend to the user message;
     // the files the message links to come next, the message itself last.
@@ -326,10 +328,6 @@ export class AgentLoop {
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
-      // Revoking/changing a server applies to the next request, including
-      // another step in this turn. An already-sent remote call cannot be recalled.
-      turnSettings.mcpServers = this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
-
       callbacks.onThinking();
       if (isStopped()) return;
 
