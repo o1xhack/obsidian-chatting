@@ -399,7 +399,8 @@ export class ChatSettingTab extends PluginSettingTab {
       .addText((text) => {
         text.inputEl.type = "password";
         text.setPlaceholder("Token (optional)").setValue(server.token ?? "").onChange(async (value) => {
-          server.token = value.trim() || undefined;
+          // Empty is an explicit deletion; undefined means not loaded on this device.
+          server.token = value.trim();
           await save();
         });
       })
@@ -421,7 +422,7 @@ export class ChatSettingTab extends PluginSettingTab {
 
   private async addMcpServer(): Promise<void> {
     const s = this.plugin.settings;
-    s.mcpServers = [...s.mcpServers ?? [], { id: `mcp-${Date.now().toString(36)}`, name: "", url: "", enabled: true }];
+    s.mcpServers = [...s.mcpServers ?? [], { id: `mcp-${crypto.randomUUID()}`, name: "", url: "", enabled: false }];
     await this.plugin.saveSettings();
     this.refreshSettingsTab();
   }

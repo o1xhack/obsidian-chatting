@@ -1007,8 +1007,14 @@ function normalizeSettings(value: unknown): Partial<ChatSettings> {
   if (typeof value.skillsFolder === "string" && value.skillsFolder.trim()) settings.skillsFolder = value.skillsFolder.trim();
   if (Array.isArray(value.mcpServers)) {
     // Never a token from data.json (they live in SecretStorage).
+    const ids = new Set<string>();
     settings.mcpServers = value.mcpServers.filter(isRecord)
-      .filter((server) => typeof server.id === "string" && typeof server.name === "string" && typeof server.url === "string")
+      .filter((server) => {
+        if (typeof server.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(server.id) || ids.has(server.id) ||
+          typeof server.name !== "string" || typeof server.url !== "string") return false;
+        ids.add(server.id);
+        return true;
+      })
       .map((server) => ({ id: server.id as string, name: server.name as string, url: server.url as string, enabled: server.enabled === true }));
   }
   settings.modelCatalog = normalizeCatalogState(value.modelCatalog);

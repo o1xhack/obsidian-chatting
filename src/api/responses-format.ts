@@ -16,7 +16,7 @@ export function buildResponsesInput(
   const items: Record<string, unknown>[] = [];
   for (const message of withoutOldToolImages(messages)) {
     if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
-      items.push(...withoutGoneServerCalls(message.replay.items, servers));
+      items.push(...withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers));
       continue;
     }
     const content: Record<string, unknown>[] = [];
@@ -90,13 +90,15 @@ export function fromResponsesOutput(
   model?: string,
   identity?: string,
 ): UnifiedResponse {
+  const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
   if (data.status === "failed" || data.error) {
     const error = isRecord(data.error) ? data.error : {};
+    const remoteEffectsPossible = output.some(item => item.type === "mcp_call");
     // Status 0: the error came inside a response; its code decides on a retry.
-    throw new ProviderError(typeof error.message === "string" ? error.message : "Response failed.", 0,
-      typeof error.code === "string" ? error.code : undefined);
+    throw new ProviderError((typeof error.message === "string" ? error.message : "Response failed.") +
+      (remoteEffectsPossible ? " Remote MCP tools may already have run; check their results before retrying." : ""), 0,
+      typeof error.code === "string" ? error.code : undefined, undefined, remoteEffectsPossible);
   }
-  const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
   const content: ContentBlock[] = [];
   for (const item of output) {
     if (item.type === "message" && Array.isArray(item.content)) {

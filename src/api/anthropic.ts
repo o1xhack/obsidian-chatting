@@ -3,7 +3,7 @@ import { requestUrl } from "obsidian";
 import { serializeRequest } from "./request-budget";
 import { ProviderError, retryAfterMs } from "./errors";
 import { withoutOldToolImages } from "../agent/history";
-import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
+import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls, mcpServerIdentities } from "./mcp";
 import type {
   ChatSettings,
   McpServer,
@@ -46,6 +46,7 @@ export async function sendAnthropicMessage(
 ): Promise<UnifiedResponse> {
   const model = settings.model;
   const identity = await catalogIdentity("anthropic", settings.apiKey);
+  const servers = activeServers(settings).map(server => ({ ...server }));
   if (settings.modelCatalog) {
     cachedCatalog(settings.modelCatalog, "anthropic", identity);
   }
@@ -61,7 +62,7 @@ export async function sendAnthropicMessage(
         cache_control: { type: "ephemeral" },
       },
     ],
-    messages: withoutOldToolImages(messages).map(msg => toAnthropicMessage(msg, model, identity, activeServers(settings))),
+    messages: withoutOldToolImages(messages).map(msg => toAnthropicMessage(msg, model, identity, servers)),
   };
 
   // The thinking mode the model catalog reports (`/v1/models` capabilities);
@@ -109,7 +110,6 @@ export async function sendAnthropicMessage(
   }
 
   // Remote MCP servers, connected by Anthropic (`api/mcp.ts`).
-  const servers = activeServers(settings);
   if (servers.length) {
     const mcp = anthropicMcp(servers);
     body.mcp_servers = mcp.mcp_servers;
@@ -163,12 +163,12 @@ export async function sendAnthropicMessage(
     content,
     // Thinking signatures, redacted thinking, citations and server tool results
     // must be returned unchanged. UI content is deliberately separate.
-    replay: { provider: "anthropic", model, identity, items: data.content },
+    replay: { provider: "anthropic", model, identity, items: data.content, mcpServers: mcpServerIdentities(servers) },
     stopReason: normalizeStopReason(data.stop_reason),
     usage: data.usage
       ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
       : undefined,
-    ...withServerCalls(anthropicServerCalls(data.content)),
+    ...withServerCalls(anthropicServerCalls(data.content, messages.flatMap(message => message.replay?.provider === "anthropic" ? message.replay.items : []))),
   };
 }
 
@@ -239,7 +239,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[]): Record<string, unknown> {
   if (msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity)) {
-    const content = withoutGoneServerCalls(msg.replay.items, servers);
+    const content = withoutGoneServerCalls(msg.replay.items, servers, msg.replay.mcpServers);
     // Nothing but calls of servers that are gone: sent as text below.
     if (content.length) return { role: msg.role, content };
   }
@@ -281,7 +281,7 @@ function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string
     return { type: "text", text: block.text };
   }).filter((b) => !(b.type === "text" && !b.text));
 
-  return { role: msg.role, content: blocks };
+  return { role: msg.role, content: blocks.length ? blocks : [{ type: "text", text: "[Earlier MCP steps omitted: the server configuration changed.]" }] };
 }
 
 /**

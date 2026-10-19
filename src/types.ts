@@ -48,6 +48,8 @@ export interface ServerToolCall {
   input: Record<string, unknown>;
   result: string;
   isError: boolean;
+  /** The provider has not supplied a result yet (for example a paused turn). */
+  pending?: boolean;
 }
 
 /**
@@ -146,6 +148,8 @@ export interface ProviderReplay {
   model?: string;
   identity?: string;
   items: Record<string, unknown>[];
+  /** Hashed server identities; no credentials, used to reject stale MCP replay. */
+  mcpServers?: Record<string, string>;
 }
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────

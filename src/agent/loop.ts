@@ -232,7 +232,7 @@ export class AgentLoop {
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
     // Keep one provider/model/credential configuration for this entire turn.
-    const turnSettings = { ...this.settings };
+    const turnSettings = { ...this.settings, mcpServers: this.settings.mcpServers?.map(server => ({ ...server })) ?? [] };
 
     // Build context once per user turn and prepend to the user message;
     // the files the message links to come next, the message itself last.
@@ -313,6 +313,9 @@ export class AgentLoop {
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
+      // Revoking/changing a server applies to the next request, including
+      // another step in this turn. An already-sent remote call cannot be recalled.
+      turnSettings.mcpServers = this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
 
       callbacks.onThinking();
       if (isStopped()) return;
@@ -372,6 +375,7 @@ export class AgentLoop {
 
       // Tools the provider called on MCP servers: shown as steps, not run here.
       for (const call of response.serverCalls ?? []) {
+        if (call.pending) continue;
         callbacks.onToolCall(serverToolName(call), call.input);
         callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
       }
@@ -379,8 +383,18 @@ export class AgentLoop {
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {
         const text = response.content.filter(block => block.type === "text").map(block => block.text).join("");
+        if (response.serverCalls?.length) {
+          // Remote effects have already happened. Retain their receipts so a
+          // follow-up cannot lose them, while discarding partial local calls.
+          this.messages.push({
+            role: "assistant", content: response.content.filter(block => block.type !== "tool_use"),
+            replay: response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") },
+          });
+          this.messages = withoutLargeToolText(this.messages);
+        }
         if (text) callbacks.onResponse(text);
-        callbacks.onError("The response reached its token limit before completing. Please try a smaller request.");
+        callbacks.onError("The response reached its token limit before completing. Please try a smaller request." +
+          (response.serverCalls?.length ? " Remote MCP tools may already have run; check their results before retrying." : ""));
         return;
       }
 

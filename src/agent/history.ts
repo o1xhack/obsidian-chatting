@@ -50,8 +50,15 @@ export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): stri
 export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
   const replacement = new Map<ContentBlock, ContentBlock>();
+  const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
   for (let i = messages.length - 1; i >= 0; i--) {
-    const content = messages[i].content;
+    const message = messages[i];
+    if (message.replay) {
+      const bounded = withBoundedServerResults(message.replay.items, room);
+      room = bounded.room;
+      if (bounded.items !== message.replay.items) replays.set(message, { ...message.replay, items: bounded.items });
+    }
+    const content = message.content;
     if (typeof content === "string") continue;
     for (let j = content.length - 1; j >= 0; j--) {
       const block = content[j];
@@ -73,11 +80,6 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
       room = Math.max(0, room - clipped.length);
     }
   }
-  const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
-  for (const message of messages) {
-    const bounded = message.replay && withBoundedServerResults(message.replay.items);
-    if (bounded && bounded !== message.replay!.items) replays.set(message, { ...message.replay!, items: bounded });
-  }
   if (!replacement.size && !replays.size) return messages;
   return messages.map(message => {
     const replay = replays.get(message);
@@ -88,38 +90,51 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
   });
 }
 
-/**
- * MCP results the provider returned (Anthropic `mcp_tool_result`, OpenAI
- * `mcp_call.output`) stay in the replayed answer as sent, each clipped like
- * a tool result, so a large one isn't saved and sent again whole.
- */
-function withBoundedServerResults(items: Record<string, unknown>[]): Record<string, unknown>[] {
+/** Remote results share the local tools' text allowance, newest first. Binary
+ * MCP results are not attachments managed by our image budget: omit them from
+ * replay with a text marker instead of retaining unbounded base64 payloads. */
+function withBoundedServerResults(items: Record<string, unknown>[], room: number): { items: Record<string, unknown>[]; room: number } {
+  const bounded = [...items];
   let changed = false;
-  const bounded = items.map((item) => {
+  const take = (text: string, limit = MAX_TOOL_TEXT_CHARS) => {
+    const short = boundedToolText(text, Math.min(limit, room));
+    room = Math.max(0, room - short.length);
+    return short;
+  };
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
     if (item.type === "mcp_call" && typeof item.output === "string") {
-      const output = boundedToolText(item.output);
-      if (output === item.output) return item;
-      changed = true;
-      return { ...item, output };
+      const output = take(item.output);
+      if (output !== item.output) { bounded[i] = { ...item, output }; changed = true; }
     }
-    if (item.type === "mcp_tool_result" && Array.isArray(item.content)) {
-      let clipped = false;
-      const content = (item.content as unknown[]).map((part) => {
-        if (typeof part !== "object" || part === null) return part;
-        const text = (part as { text?: unknown }).text;
-        if (typeof text !== "string") return part;
-        const short = boundedToolText(text);
-        if (short === text) return part;
-        clipped = true;
-        return { ...part, text: short };
-      });
-      if (!clipped) return item;
-      changed = true;
-      return { ...item, content };
+    if (item.type === "mcp_tool_result") {
+      if (typeof item.content === "string") {
+        const content = take(item.content);
+        if (content !== item.content) { bounded[i] = { ...item, content }; changed = true; }
+      } else if (Array.isArray(item.content)) {
+        let remaining = MAX_TOOL_TEXT_CHARS;
+        const content: Record<string, unknown>[] = [];
+        let clipped = false;
+        for (const part of item.content as unknown[]) {
+          if (remaining <= 0) { clipped = true; break; }
+          if (typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string") {
+            const block = part as { type: string; text: string };
+            const text = take(block.text, remaining);
+            remaining = Math.max(0, remaining - text.length);
+            content.push(text === block.text ? block : { ...block, text });
+            clipped ||= text !== block.text;
+          } else {
+            const text = take("[Non-text MCP result omitted from chat history.]", remaining);
+            remaining = Math.max(0, remaining - text.length);
+            content.push({ type: "text", text });
+            clipped = true;
+          }
+        }
+        if (clipped) { bounded[i] = { ...item, content }; changed = true; }
+      }
     }
-    return item;
-  });
-  return changed ? bounded : items;
+  }
+  return { items: changed ? bounded : items, room };
 }
 
 /** Last-resort payload preflight recovery. Keep text, tool pairing and all

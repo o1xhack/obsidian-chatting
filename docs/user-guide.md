@@ -78,7 +78,11 @@ Every chat knows the names and descriptions of your skills; when a task matches 
 
 With an Anthropic or OpenAI API key, the assistant can use the tools of remote MCP servers (Linear, GitHub and others that offer one). Add a server under **Settings → MCP servers**: a name (letters, digits, `-`, `_`), its public https address and, if it needs one, a token. The provider connects to the servers that are on and calls their tools as the assistant decides; each call shows as a step ("Used create_issue on linear").
 
-The tools run without asking, so add only servers you trust. Tokens are kept in SecretStorage, never in `data.json`, and go to the provider with each request. Local servers and the ChatGPT account aren't supported: the provider has to reach the server, and the ChatGPT account's route offers no MCP. When you switch a server off or remove it, its earlier calls are no longer sent back to the provider.
+New servers start off. Configure the address and optional token, then switch on only servers you trust: their tools run without asking for each call. The assistant can send context from your conversation to those tools. Tokens are kept in SecretStorage on this device, never in `data.json`, and go to the provider with each request. Use the token field for credentials, not the address. Local servers and the ChatGPT account aren't supported: the provider has to reach the server, and the ChatGPT account's route offers no MCP.
+
+Switching a server off, removing it, or changing its address or authorization removes its native calls and cached tool lists from subsequent requests. Your conversation text remains. A request already sent to the provider may finish its remote tools even after Stop; the chat's Undo covers vault changes only, not changes made by MCP tools. If an answer is cut short, check reported remote results before retrying a write.
+
+Remote tool text shares the chat's existing result-size budget. Non-text MCP results are omitted from saved/replayed history with a note; this release does not add MCP image or file attachment support.
 
 ## 🛠️ 22 vault-native tools
 

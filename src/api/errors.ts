@@ -10,6 +10,8 @@ export class ProviderError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly retryAfterMs?: number,
+    /** A server-side tool may already have changed external state. */
+    readonly remoteEffectsPossible = false,
   ) {
     super(message);
     this.name = "ProviderError";
