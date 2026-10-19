@@ -87,6 +87,7 @@ export default class ChatPlugin extends Plugin {
   private chatHistoryLoaded = false;
   private chatSaveFailed = false;
   private conversationOpenVersion = 0;
+  private pendingChatRenames = new Set<ConversationRecord>();
   /** The chat-state write in progress, and the one queued after it. */
   private chatStateWrite: Promise<void> | null = null;
   private nextChatStateWrite: Promise<void> | null = null;
@@ -474,6 +475,7 @@ export default class ChatPlugin extends Plugin {
     const name = title.replace(/\s+/g, " ").trim();
     // The automatic title comes from the first message: its file is read first.
     if (!name && !await this.loadConversation(conversation)) return;
+    this.pendingChatRenames.add(conversation);
     conversation.customTitle = name !== "";
     conversation.title = name || conversation.automaticTitle || conversationTitle(conversation.chatHistory);
     await this.saveChatHistory();
@@ -483,6 +485,7 @@ export default class ChatPlugin extends Plugin {
   async deleteConversation(id: string): Promise<void> {
     const deleted = this.conversations.find((conversation) => conversation.id === id);
     if (!deleted) return;
+    this.pendingChatRenames.delete(deleted);
     this.dropAgent(id);
     this.deletedChats.add(id);
     this.conversations = this.conversations.filter((conversation) => conversation !== deleted);
@@ -672,7 +675,8 @@ export default class ChatPlugin extends Plugin {
         version: CHAT_STATE_VERSION,
         savedAt,
         activeConversationId: this.activeConversationId,
-        conversations: kept.map(indexEntry),
+        conversations: kept.map(conversation => ({ ...indexEntry(conversation),
+          metadataSavedAt: !conversation.unloaded || this.pendingChatRenames.has(conversation) ? savedAt : conversation.metadataSavedAt ?? 0 })),
       };
       const { adapter } = this.app.vault;
       if (changed.length || gone.length) await this.ensureFolder(this.chatsDir);
@@ -695,6 +699,14 @@ export default class ChatPlugin extends Plugin {
       }
       const json = JSON.stringify(index);
       await adapter.write(this.nextChatStatePath, json);
+      for (const [position, conversation] of kept.entries()) {
+        const entry = index.conversations[position];
+        if (conversation.title === entry.title && conversation.customTitle === entry.customTitle &&
+            conversation.automaticTitle === entry.automaticTitle && conversation.titleSourceTurnId === entry.titleSourceTurnId) {
+          conversation.metadataSavedAt = entry.metadataSavedAt;
+          this.pendingChatRenames.delete(conversation);
+        }
+      }
       await adapter.write(this.chatStatePath, json);
       for (const id of gone) {
         for (const path of [this.chatPath(id, ".next"), this.chatPath(id)]) await adapter.remove(path).catch(() => {});
@@ -811,11 +823,17 @@ export default class ChatPlugin extends Plugin {
     // Deleted meanwhile, or read by another call meanwhile.
     if (!this.conversations.includes(conversation)) return false;
     if (!conversation.unloaded) return true;
-    // The index holds the title (a rename of a chat not read yet changed only it).
-    const { title, customTitle, automaticTitle, titleSourceTurnId, updatedAt } = conversation;
-    Object.assign(conversation, saved, { chatHistory: restoreImages(saved.chatHistory, saved.agentMessages) });
-    Object.assign(conversation, { title, customTitle, updatedAt: Math.max(updatedAt, conversation.updatedAt) },
-      automaticTitle !== undefined ? { automaticTitle } : {}, titleSourceTurnId !== undefined ? { titleSourceTurnId } : {});
+    // A file may have landed before its index during a crash. Preserve its
+    // newer title/source; an explicit later index rename still wins. Unread
+    // entries carry their own metadata revision through unrelated index saves.
+    const { title, customTitle, automaticTitle, titleSourceTurnId, updatedAt, metadataSavedAt = 0 } = conversation;
+    const keepIndexTitle = this.pendingChatRenames.has(conversation) || metadataSavedAt >= (file.savedAt ?? 0);
+    delete conversation.automaticTitle;
+    delete conversation.titleSourceTurnId;
+    Object.assign(conversation, saved, { chatHistory: restoreImages(saved.chatHistory, saved.agentMessages),
+      updatedAt: Math.max(updatedAt, saved.updatedAt), metadataSavedAt: keepIndexTitle ? metadataSavedAt : file.savedAt ?? 0 });
+    if (keepIndexTitle) Object.assign(conversation, { title, customTitle },
+      !customTitle && automaticTitle !== undefined ? { automaticTitle } : {}, !customTitle && titleSourceTurnId !== undefined ? { titleSourceTurnId } : {});
     delete conversation.unloaded;
     this.savedChats.set(conversation.id, textDigest(JSON.stringify(savedConversation({ ...saved }))));
     this.savedMessages.set(conversation.id, [...conversation.agentMessages]);
@@ -1305,7 +1323,7 @@ function isIndexEntry(entry: unknown): boolean {
   if ("titleSourceTurnId" in entry && typeof entry.titleSourceTurnId !== "string" && entry.titleSourceTurnId !== null) return false;
   if ("customTitle" in entry && typeof entry.customTitle !== "boolean") return false;
   const number = (field: unknown) => typeof field === "number" && Number.isFinite(field) && field >= 0;
-  return ["createdAt", "updatedAt", "size"].every((field) => !(field in entry) || number(entry[field]));
+  return ["createdAt", "updatedAt", "size", "metadataSavedAt"].every((field) => !(field in entry) || number(entry[field]));
 }
 
 /**

@@ -52,6 +52,8 @@ export interface ConversationRecord {
   pendingTurn?: PendingTurn;
   /** Context of the last request, tokens used and estimated cost (the ring in the chat header). */
   usage?: ConversationUsage;
+  /** Revision of title metadata in the index; carried unchanged for unread chats. */
+  metadataSavedAt?: number;
   /** Size of its saved file in bytes (in the index). */
   size?: number;
   /**
@@ -62,10 +64,10 @@ export interface ConversationRecord {
 }
 
 /** A conversation in the index (`chat-state.json`, version 4). */
-export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size">;
+export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size" | "metadataSavedAt">;
 
 /** A conversation as saved in its file: without the index-only fields. */
-export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded">;
+export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded" | "metadataSavedAt">;
 
 /** The turn a conversation was running. */
 export interface PendingTurn {
@@ -152,7 +154,7 @@ export function migrateChatState(value: unknown): ChatState | null {
   }
   const items = arrayOf<unknown>(state.conversations)
     .filter((item): item is StateRecord => isRecord(item) && typeof item.id === "string");
-  const conversations = version >= 4 ? items.map(indexedConversation) : items.map(savedRecord);
+  const conversations = version >= 4 ? items.map(item => indexedConversation({ ...item, metadataSavedAt: item.metadataSavedAt ?? state.savedAt ?? 0 })) : items.map(savedRecord);
 
   if (conversations.length === 0) conversations.push(newConversation());
   const active = conversations.find((conversation) => conversation.id === state.activeConversationId)
@@ -174,6 +176,7 @@ function indexedConversation(item: StateRecord): ConversationRecord {
     chatHistory: [],
     agentMessages: [],
     ...(typeof size === "number" && Number.isFinite(size) && size >= 0 ? { size } : {}),
+    ...(typeof item.metadataSavedAt === "number" ? { metadataSavedAt: item.metadataSavedAt } : {}),
     unloaded: true,
   };
 }
@@ -236,10 +239,10 @@ export function chatFileText(conversation: string, savedAt: number): string {
 export const DELETED_CHAT_FILE = `{"version":${CHAT_STATE_VERSION},"deleted":true}`;
 
 /** A conversation's index entry. */
-export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size }: ConversationRecord): ConversationEntry {
+export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size, metadataSavedAt }: ConversationRecord): ConversationEntry {
   return {
     id, title, ...(automaticTitle !== undefined ? { automaticTitle } : {}), ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}),
-    customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}),
+    customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}), ...(metadataSavedAt !== undefined ? { metadataSavedAt } : {}),
   };
 }
 
@@ -295,13 +298,22 @@ export function newestFirst(conversations: ConversationRecord[]): ConversationRe
  * history from its last compaction on, image and file data only in the API
  * history.
  */
-export function savedConversation({ size: _size, unloaded: _unloaded, ...conversation }: ConversationRecord): SavedConversation {
+export function savedConversation({ size: _size, unloaded: _unloaded, metadataSavedAt: _metadataSavedAt, ...conversation }: ConversationRecord): SavedConversation {
   const titled: ConversationRecord = { ...conversation };
   updateConversationTitle(titled);
   return {
-    ...titled,
+    // Stable top-level order also makes cache digests independent of whether
+    // the record came from an index entry or a whole chat file.
+    id: titled.id, title: titled.title,
+    ...(titled.automaticTitle !== undefined ? { automaticTitle: titled.automaticTitle } : {}),
+    ...(titled.titleSourceTurnId !== undefined ? { titleSourceTurnId: titled.titleSourceTurnId } : {}),
+    customTitle: titled.customTitle, createdAt: titled.createdAt, updatedAt: titled.updatedAt,
     chatHistory: withoutImageData(conversation.chatHistory),
     agentMessages: withoutLargeToolText(withoutOldToolImages(fromLastCompaction(conversation.agentMessages))),
+    ...(titled.notes ? { notes: titled.notes } : {}),
+    ...(titled.pendingMessages ? { pendingMessages: titled.pendingMessages } : {}),
+    ...(titled.pendingTurn ? { pendingTurn: titled.pendingTurn } : {}),
+    ...(titled.usage ? { usage: titled.usage } : {}),
   };
 }
 

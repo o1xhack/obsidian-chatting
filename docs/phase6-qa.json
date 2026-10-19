@@ -13,8 +13,8 @@
     "chatStateVersion": 4
   },
   "automated": {
-    "tests": 691,
-    "passed": 691,
+    "tests": 694,
+    "passed": 694,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -61,6 +61,9 @@
       "migration-chat-present-chat-mvfw4yve-i36mxu",
       "migration-visible-chat-mvfw4yve-i36mxu",
       "migration-api-chat-mvfw4yve-i36mxu",
+      "migration-chat-present-chat-mvfwny57-go9ppz",
+      "migration-visible-chat-mvfwny57-go9ppz",
+      "migration-api-chat-mvfwny57-go9ppz",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -91,7 +94,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "368afadfc59455797b1c80146c4c3c7705073f872c1cf2fb4bd5094e0990a873",
+    "mainSha256": "b7b3379b3b3a4eb42210d145d70a12ec9b4ae116c0bf8d94345e621ae00b4e4a",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -111,7 +114,7 @@
       "real-usage-counted"
     ],
     "toolCount": 0,
-    "conversationId": "chat-mvfwny57-go9ppz",
+    "conversationId": "chat-mvfwybf8-1wi09z",
     "passed": true
   },
   "reloadChatGPT": {
@@ -198,10 +201,18 @@
       "changed": 0
     }
   },
-  "reviewFix": {
-    "priority": "P2",
-    "issue": "Repeated opaque compactions discarded the earliest raw context before a provider/model/account change.",
-    "resolution": "Keep the prefix until a readable summary exists; process oversized transcripts as ordered rolling summaries, preserving history on failure.",
-    "regressions": 6
-  }
+  "reviewFixes": [
+    {
+      "priority": "P2",
+      "issue": "Repeated opaque compactions discarded the earliest raw context before a provider/model/account change.",
+      "resolution": "Keep the prefix until a readable summary exists; process oversized transcripts as ordered rolling summaries, preserving history on failure.",
+      "regressions": 6
+    },
+    {
+      "priority": "P2",
+      "issue": "A stale index could overwrite newer per-chat title metadata after an interrupted save.",
+      "resolution": "Persist per-entry metadata revisions through unrelated index saves, prefer newer file metadata, and retain later custom names without restoring stale automatic-title provenance.",
+      "regressions": 3
+    }
+  ]
 }

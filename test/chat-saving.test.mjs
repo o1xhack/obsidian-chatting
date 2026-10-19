@@ -422,7 +422,7 @@ test('A chat file and its copy load like chat-state.json: the newer whole one', 
 });
 
 test('The index is checked like a whole saved chat: a malformed entry recovers the readable copy', async () => {
-  for (const entry of [{ title: 42 }, { customTitle: 'yes' }, { size: -1 }, { updatedAt: 'now' }]) {
+  for (const entry of [{ title: 42 }, { customTitle: 'yes' }, { size: -1 }, { updatedAt: 'now' }, { metadataSavedAt: 'bad' }]) {
     const { adapter } = chatFiles();
     adapter.stored.set(STATE, index(2000, entry));
     adapter.stored.set(NEXT, index(1000));
@@ -542,4 +542,51 @@ test('A remote checkpoint reports failed writes, and recovers after storage work
   adapter.write = write;
   await plugin.checkpointChatHistory();
   assert.equal(JSON.parse(adapter.stored.get(STATE)).version, 4);
+});
+
+for (const unread of [false, true]) test(`A newer chat-file title survives a stale index${unread ? ' carried through unrelated saves before opening' : ''}`, async () => {
+  const { adapter } = chatFiles();
+  const newFile = JSON.parse(chatFile('Edited first question', 2000));
+  Object.assign(newFile.conversation, { automaticTitle: 'Edited first question', titleSourceTurnId: 't1' });
+  const oldEntry = { id: 'c1', title: 'Old first question', automaticTitle: 'Old first question', titleSourceTurnId: 'old-turn', customTitle: false, createdAt: 1, updatedAt: 1 };
+  const other = JSON.parse(chatFile('Other chat', 1000));other.conversation.id = 'c2';
+  adapter.stored.set(STATE, JSON.stringify({ version: 4, savedAt: 1000, activeConversationId: unread ? 'c2' : 'c1', conversations: [oldEntry, { ...oldEntry, id: 'c2', title: 'Other chat', titleSourceTurnId: 't1' }] }));
+  adapter.stored.set(`${DIR}/chats/c1.json`, JSON.stringify(newFile));
+  adapter.stored.set(`${DIR}/chats/c2.json`, JSON.stringify(other));
+  let plugin = pluginOn(adapter);
+  await plugin.loadChatHistory();
+  if (unread) {
+    await plugin.saveChatHistory();
+    assert.equal(JSON.parse(adapter.stored.get(STATE)).conversations.find(c => c.id === 'c1').metadataSavedAt, 1000);
+    plugin = pluginOn(adapter);await plugin.loadChatHistory();
+    await plugin.openConversation('c1');
+  }
+  assert.equal(plugin.activeConversation.title, 'Edited first question');
+  assert.equal(plugin.activeConversation.titleSourceTurnId, 't1');
+  await plugin.saveChatHistory();
+  const again = pluginOn(adapter);await again.loadChatHistory();
+  assert.equal(again.activeConversation.title, 'Edited first question');
+  assert.equal(again.activeConversation.titleSourceTurnId, 't1');
+});
+
+test('A later custom rename wins a newer chat file without restoring stale automatic-title provenance', async () => {
+  const { adapter } = chatFiles();
+  const first = JSON.parse(chatFile('Edited question', 2000));
+  Object.assign(first.conversation, { automaticTitle: 'Edited question', titleSourceTurnId: 't1' });
+  const old = { id: 'c1', title: 'Old question', automaticTitle: 'Old question', titleSourceTurnId: 'missing-old-turn', customTitle: false, createdAt: 1, updatedAt: 1 };
+  adapter.stored.set(STATE, JSON.stringify({ version: 4, savedAt: 1000, activeConversationId: 'c2', conversations: [old, { ...old, id: 'c2' }] }));
+  adapter.stored.set(`${DIR}/chats/c1.json`, JSON.stringify(first));
+  const second = JSON.parse(chatFile('Other', 1000));second.conversation.id = 'c2';adapter.stored.set(`${DIR}/chats/c2.json`, JSON.stringify(second));
+  const plugin = pluginOn(adapter);await plugin.loadChatHistory();
+  await plugin.renameConversation('c1', 'My name');
+  await plugin.openConversation('c1');
+  assert.equal(plugin.activeConversation.title, 'My name');
+  assert.equal(plugin.activeConversation.automaticTitle, 'Edited question');
+  assert.equal(plugin.activeConversation.titleSourceTurnId, 't1');
+  await plugin.renameConversation('c1', '');
+  assert.equal(plugin.activeConversation.title, 'Edited question');
+  await plugin.saveChatHistory();
+  const again = pluginOn(adapter);await again.loadChatHistory();
+  assert.equal(again.activeConversation.title, 'Edited question');
+  assert.equal(again.activeConversation.titleSourceTurnId, 't1');
 });

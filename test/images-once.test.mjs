@@ -145,7 +145,7 @@ test('A version 3 chat is taken as it is; the index gives conversations to read 
   assert.deepEqual(v3.conversations[0].chatHistory, chatHistory);
   // The index (version 4): each conversation's histories wait in its own file.
   const index = api.chatState.migrateChatState({ version: api.chatState.CHAT_STATE_VERSION, activeConversationId: 'c1', conversations: [{ id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, size: 9 }] });
-  assert.deepEqual(index.conversations[0], { id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory: [], agentMessages: [], size: 9, unloaded: true });
+  assert.deepEqual(index.conversations[0], { id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory: [], agentMessages: [], size: 9, metadataSavedAt: 0, unloaded: true });
   assert.equal(api.chatState.migrateChatState({ version: 0, chatHistory: [] }), null);
   assert.equal(api.chatState.migrateChatState([]), null);
 });
