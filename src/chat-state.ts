@@ -43,6 +43,17 @@ export interface ConversationRecord {
    * run when the chat is shown again (optional, so no new format version).
    */
   pendingMessages?: string[];
+  /**
+   * Set while a turn runs (saved with it when the app goes to the
+   * background); still there at the next start, the turn was cut off.
+   */
+  pendingTurn?: PendingTurn;
+}
+
+/** The turn a conversation was running. */
+export interface PendingTurn {
+  turnId: string;
+  startedAt: number;
 }
 
 /** `chat-state.json` as this version writes it. */
@@ -106,6 +117,11 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
         : item.titleSourceTurnId === null || automaticTitle !== derived ? null : first?.turnId;
       const notes = arrayOf<unknown>(item.notes).filter((note): note is string => typeof note === "string");
       const pendingMessages = arrayOf<unknown>(item.pendingMessages).filter((text): text is string => typeof text === "string");
+      // Optional, so no new format version: an older plugin just drops it.
+      const pending = item.pendingTurn;
+      const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
+        ? { turnId: pending.turnId, startedAt: pending.startedAt }
+        : undefined;
       return {
         id: item.id as string,
         title: customTitle ? item.title as string : automaticTitle,
@@ -118,6 +134,7 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
         agentMessages: withoutLargeToolText(withoutOldToolImages(trimHistory(arrayOf<UnifiedMessage>(item.agentMessages), MAX_CONVERSATION_LENGTH))),
         ...(notes.length ? { notes } : {}),
         ...(pendingMessages.length ? { pendingMessages } : {}),
+        ...(pendingTurn ? { pendingTurn } : {}),
       };
     });
   if (conversations.length === 0) conversations.push(newConversation());

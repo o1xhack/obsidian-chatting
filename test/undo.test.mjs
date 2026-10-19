@@ -208,7 +208,7 @@ function fakeChat() {
     showThinking() {}, hideThinking() {}, cancelAskUser() {},
     restoreDraft(text, selection, images, files) { chat.draft = { text, selection, images, files }; },
     setComposerLocked(value) { chat.composerLocked = value; },
-    setInputEnabled() {}, setBusy(value) { chat.busy = value; }, folded: [], foldTurn(turnId) { chat.folded.push(turnId); }, updateConversations() {}, setQueued() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
+    setInputEnabled() {}, setBusy(value) { chat.busy = value; }, folded: [], foldTurn(turnId) { chat.folded.push(turnId); }, updateConversations() {}, setContinue() {}, setQueued() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
     setSelection() {}, getSelection: () => null,
   };
   return chat;
