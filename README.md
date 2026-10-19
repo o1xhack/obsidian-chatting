@@ -46,6 +46,8 @@ Ask in ordinary language. The assistant chooses the tools, reads the relevant ma
 
 Search by content, tags or properties; inspect incoming, outgoing and unlinked mentions; read and edit Canvas cards and connections; inspect vault images and load web pages as text.
 
+With an Anthropic or OpenAI API key you can add remote MCP servers in the settings. The provider connects to them, the assistant uses their tools, and each call shows as a step in the chat.
+
 ### Give each task the right context
 
 Start with the active note, or type `@` / `[[` to include specific vault files. Attach images, PDFs, Word, Excel, PowerPoint and text files from the composer or clipboard. Canvas files can be shared as an outline or inspected visually by the assistant.
@@ -144,6 +146,7 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 - **Credentials use Obsidian SecretStorage.** API keys and ChatGPT sign-in credentials are kept out of the plugin's `data.json`; connect each device separately.
 - **Chat history stays in your vault's plugin folder.** Named conversations are stored in `chat-state.json`. The plugin has no chat-sync service; whether these files travel to another device depends on your sync setup. Attachment data is bounded, and older attachments can remain as name-only chips.
 - **Changes happen in your vault.** Selection restrictions apply to direct edits of the selected note. Undo needs live snapshots; use your normal backups or version history for longer-term recovery.
+- **MCP servers start off; enabled servers act without asking for each call.** The provider can share conversation context with their tools. Add only servers you trust; tokens stay in this device's SecretStorage. Stop cannot recall a remote request, and vault Undo does not undo external MCP changes.
 - **Web pages and attachments are external input.** Web-page reading uses your device's network, including addresses it can reach locally. Treat instructions hidden in pages or files as untrusted. Large attachments and requests are limited to protect device memory and request size.
 
 For attachment limits, provider-specific PDF/Office handling, the complete tool list, settings and recovery details, see the **[user guide](docs/user-guide.md)**. Recorded validation scope is in the [desktop and iPhone QA notes](docs/phase1-review.md).

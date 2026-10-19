@@ -245,7 +245,7 @@ test('The setting: on by default, kept in data.json, in both settings paths; the
   const drawn = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderFollowEdits: setting => drawn.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderFollowEdits: setting => drawn.push(setting) });
   tab.display();
   assert.equal(drawn.length, 1);
 

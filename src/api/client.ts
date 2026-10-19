@@ -61,6 +61,7 @@ export async function sendMessage(
 
 function isRateLimit(e: unknown): e is ProviderError {
   if (!(e instanceof ProviderError)) return false;
+  if (e.remoteEffectsPossible) return false;
   if (e.code !== undefined && USAGE_LIMIT_CODES.includes(e.code)) return false;
   return RETRY_STATUSES.includes(e.status) || (e.code !== undefined && RETRY_CODES.includes(e.code));
 }

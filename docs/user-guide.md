@@ -74,6 +74,16 @@ Every chat knows the names and descriptions of your skills; when a task matches 
 
 **Settings → Skills** sets the folder, lists your skills (each opens its `SKILL.md`) and starts a new one from a template with **New skill**. A skill without a description is listed, but the AI can't tell when to use it.
 
+## 🔌 MCP servers
+
+With an Anthropic or OpenAI API key, the assistant can use the tools of remote MCP servers (Linear, GitHub and others that offer one). Add a server under **Settings → MCP servers**: a name (letters, digits, `-`, `_`), its public https address and, if it needs one, a token. The provider connects to the servers that are on and calls their tools as the assistant decides; each call shows as a step ("Used create_issue on linear").
+
+New servers start off. Configure the address and optional token, then switch on only servers you trust: their tools run without asking for each call. The assistant can send context from your conversation to those tools. Tokens are kept in SecretStorage on this device, never in `data.json`, and go to the provider with each request. Use the token field for credentials, not the address. Local servers aren't supported because the provider has to reach them. This plugin's ChatGPT account integration does not implement remote MCP yet; this does not mean subscription accounts cannot use MCP in other clients.
+
+Switching a server off, removing it, or changing its address or authorization removes its native calls and cached tool lists from subsequent requests. Your conversation text remains. A request already sent to the provider may finish its remote tools even after Stop; the chat's Undo covers vault changes only, not changes made by MCP tools. If an answer is cut short, check reported remote results before retrying a write.
+
+Remote tool text shares the chat's existing result-size budget. Non-text MCP results are omitted from saved/replayed history with a note; this release does not add MCP image or file attachment support.
+
 ## 🛠️ 22 vault-native tools
 
 | Group | Tools | What they do |
@@ -119,6 +129,7 @@ Below **Model**, **Thinking level** offers *Default* plus the levels the model l
 - **Follow the AI's edits** — on by default (see [Follow the AI's edits](#-follow-the-ais-edits)); the eye button in the chat header switches it too.
 - **Vault instructions** — opens the vault's `AGENTS.md`, or creates it (see [Your instructions in AGENTS.md](#-your-instructions-in-agentsmd)).
 - **Skills** — the folder with your skills (`Skills` by default), the skills in it and **New skill** (see [Skills](#-skills)).
+- **MCP servers** — remote MCP servers for Anthropic and OpenAI: a name, a public https address, an optional token and on/off each (see [MCP servers](#-mcp-servers)).
 - **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
 
 While an answer is being generated, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.

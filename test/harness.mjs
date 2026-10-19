@@ -13,7 +13,7 @@ export const bundled = await build({
     export * from './src/api/model-catalog';
     export { sendMessage } from './src/api/client';
     export { AgentLoop } from './src/agent/loop';
-    export { trimHistory, withoutLargeToolText, MAX_TOOL_TEXT_CHARS } from './src/agent/history';
+    export { trimHistory, withoutLargeToolText, withoutLargeVisibleToolText, MAX_TOOL_TEXT_CHARS } from './src/agent/history';
     export { sendAnthropicMessage } from './src/api/anthropic';
     export { sendOpenAIMessage, clearOpenAIState } from './src/api/openai';
     export { sendChatGPTOAuthMessage, setChatGPTOAuthService } from './src/api/chatgpt-oauth';

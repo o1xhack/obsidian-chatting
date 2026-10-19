@@ -12,6 +12,7 @@ import type {
 
 import { withoutOldToolImages } from "../agent/history";
 import { buildResponsesInput, fromResponsesOutput } from "./responses-format";
+import { activeServers, openaiMcpTools, mcpServerIdentities } from "./mcp";
 
 const DEFAULT_OPENAI_URL = "https://api.openai.com";
 
@@ -21,6 +22,7 @@ interface ConversationState {
   apiKey: string;
   messages: UnifiedMessage[];
   replay: ProviderReplay | undefined;
+  mcpConfig: string;
 }
 
 // Connection tests and other conversations must never replace this chat's cursor.
@@ -46,18 +48,22 @@ export async function sendOpenAIMessage(
   const model = settings.model;
 
   const identity = await catalogIdentity("openai", settings.apiKey);
+  // Snapshot before awaiting transport: UI edits must not change the cursor's
+  // configuration. This stays in memory only, including authorization tokens.
+  const servers = activeServers(settings).map(server => ({ ...server }));
+  const mcpConfig = JSON.stringify(servers);
   const previous = conversations.get(messages);
   const prepared = withoutOldToolImages(messages);
   // Omitted images also have to leave the server-side context. A response
   // cursor still retains them, so replay whenever the full history is pruned.
   const imagesPruned = prepared.some((message, index) => message !== messages[index]);
-  const canChain = !imagesPruned && previous?.model === model && previous.apiKey === settings.apiKey &&
+  const canChain = !imagesPruned && previous?.model === model && previous.apiKey === settings.apiKey && previous.mcpConfig === mcpConfig &&
     previous.messages.length < messages.length &&
     previous.messages.every((message, index) => message === messages[index]) &&
     messages[previous.messages.length]?.role === "assistant" &&
     messages[previous.messages.length]?.replay === previous.replay;
   // Rebuilt/restored histories include native response items and tool pairs.
-  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : prepared, "openai", model, identity);
+  const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : prepared, "openai", model, identity, servers);
 
   const body: Record<string, unknown> = {
     model,
@@ -87,6 +93,8 @@ export async function sendOpenAIMessage(
   if (settings.enableWebSearch) {
     apiTools.push({ type: "web_search" });
   }
+  // Remote MCP servers, connected by OpenAI (`api/mcp.ts`).
+  apiTools.push(...openaiMcpTools(servers));
 
   if (apiTools.length > 0) {
     body.tools = apiTools;
@@ -129,9 +137,19 @@ export async function sendOpenAIMessage(
 
   const data = asRecord(response.json as unknown);
 
-  const result = fromResponsesOutput(data, "openai", model, identity);
+  let result: UnifiedResponse;
+  try {
+    result = fromResponsesOutput(data, "openai", model, identity);
+  } catch (error) {
+    conversations.delete(messages);
+    if (error instanceof ProviderError && error.partialResponse?.replay) {
+      error.partialResponse.replay.mcpServers = mcpServerIdentities(servers);
+    }
+    throw error;
+  }
+  if (result.replay) result.replay.mcpServers = mcpServerIdentities(servers);
   if (typeof data.id === "string") {
-    conversations.set(messages, { responseId: data.id, model, apiKey: settings.apiKey, messages: [...messages], replay: result.replay });
+    conversations.set(messages, { responseId: data.id, model, apiKey: settings.apiKey, messages: [...messages], replay: result.replay, mcpConfig });
   } else {
     conversations.delete(messages);
   }

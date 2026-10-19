@@ -1,7 +1,8 @@
-import type { ContentBlock, FileAttachment, ImageAttachment, Provider, UnifiedMessage, UnifiedResponse } from "../types";
+import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, UnifiedMessage, UnifiedResponse } from "../types";
 import { ProviderError } from "./errors";
 import { withoutOldToolImages } from "../agent/history";
 import { fileAsText, isSentAsFile } from "../files/attachments";
+import { openaiServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 
 /** Encode both fresh input and restored history without losing tool pairs. */
 export function buildResponsesInput(
@@ -9,12 +10,15 @@ export function buildResponsesInput(
   provider: Extract<Provider, "openai" | "chatgpt-oauth">,
   model?: string,
   identity?: string,
+  /** The MCP servers of this request; calls of others aren't replayed. */
+  servers: McpServer[] = [],
 ): Record<string, unknown>[] {
   const items: Record<string, unknown>[] = [];
   for (const message of withoutOldToolImages(messages)) {
     if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
-      items.push(...message.replay.items);
-      continue;
+      const replay = withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers);
+      if (replay.length) { items.push(...replay); continue; }
+      // Portable receipts still explain external changes after revocation.
     }
     const content: Record<string, unknown>[] = [];
     const flush = () => {
@@ -87,13 +91,8 @@ export function fromResponsesOutput(
   model?: string,
   identity?: string,
 ): UnifiedResponse {
-  if (data.status === "failed" || data.error) {
-    const error = isRecord(data.error) ? data.error : {};
-    // Status 0: the error came inside a response; its code decides on a retry.
-    throw new ProviderError(typeof error.message === "string" ? error.message : "Response failed.", 0,
-      typeof error.code === "string" ? error.code : undefined);
-  }
   const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
+  const failed = data.status === "failed" || !!data.error;
   const content: ContentBlock[] = [];
   for (const item of output) {
     if (item.type === "message" && Array.isArray(item.content)) {
@@ -104,7 +103,7 @@ export function fromResponsesOutput(
           content.push({ type: "text", text: part.refusal });
         }
       }
-    } else if (item.type === "function_call" && data.status !== "incomplete") {
+    } else if (item.type === "function_call" && data.status !== "incomplete" && !failed) {
       if (typeof item.call_id !== "string" || typeof item.name !== "string") {
         throw new Error("Response contained an invalid tool call.");
       }
@@ -120,12 +119,24 @@ export function fromResponsesOutput(
     }
   }
   const usage = isRecord(data.usage) ? data.usage : undefined;
-  return {
+  const result: UnifiedResponse = {
     content,
     replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
     usage: usage ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) } : undefined,
+    // Tools OpenAI called on MCP servers; their items stay in the replay as sent.
+    ...withServerCalls(openaiServerCalls(output)),
   };
+  if (failed) {
+    const error = isRecord(data.error) ? data.error : {};
+    const remoteEffectsPossible = !!result.serverCalls?.length;
+    // Keep receipts even though the error still ends the turn. The dispatcher
+    // must not repeat a request that may have changed an external service.
+    throw new ProviderError((typeof error.message === "string" ? error.message : "Response failed.") +
+      (remoteEffectsPossible ? " Remote MCP tools may already have run; check their results before retrying." : ""), 0,
+      typeof error.code === "string" ? error.code : undefined, undefined, remoteEffectsPossible, remoteEffectsPossible ? result : undefined);
+  }
+  return result;
 }
 
 /**

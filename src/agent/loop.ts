@@ -9,17 +9,21 @@ import type {
   ToolResult,
   MentionContext,
   FileAttachment,
+  UnifiedResponse,
+  ServerToolCall,
 } from "../types";
+import { ProviderError } from "../api/errors";
 import { sendMessage } from "../api/client";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, MAX_CONVERSATION_LENGTH } from "./history";
+import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./history";
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
@@ -32,6 +36,16 @@ import { RequestBudgetError } from "../api/request-budget";
  * round up: a long turn can keep a few more messages.
  */
 const KEEP_RECENT = 60;
+
+function displayServerCalls(calls: ServerToolCall[], callbacks: AgentCallbacks): void {
+  const rows = withoutLargeVisibleToolText(calls.filter(call => !call.pending).map(call => ({
+    name: serverToolName(call), input: call.input, toolResult: { result: call.result, isError: call.isError },
+  })));
+  for (const row of rows) {
+    callbacks.onToolCall(row.name, row.input);
+    callbacks.onToolResult(row.name, row.toolResult);
+  }
+}
 
 /**
  * What the chat view shows and saves for a tool result: the text and a
@@ -231,7 +245,9 @@ export class AgentLoop {
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
     // Keep one provider/model/credential configuration for this entire turn.
-    const turnSettings = { ...this.settings };
+    // MCP revocation stays live even inside the dispatcher's retry wait.
+    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
 
     // Build context once per user turn and prepend to the user message;
     // the files the message links to come next, the message itself last.
@@ -312,7 +328,6 @@ export class AgentLoop {
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
-
       callbacks.onThinking();
       if (isStopped()) return;
 
@@ -342,6 +357,11 @@ export class AgentLoop {
         }
         if (!response) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (e instanceof ProviderError && e.partialResponse) {
+            this.keepRemoteReceipts(e.partialResponse, callbacks);
+            const partialText = e.partialResponse.content.filter(block => block.type === "text").map(block => block.text).join("");
+            if (partialText) callbacks.onResponse(partialText);
+          }
           debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
           if (i === 0 && e instanceof RequestBudgetError) {
             // Nothing reached the provider or tools. Undo local pruning and
@@ -364,15 +384,25 @@ export class AgentLoop {
           block.type === "text" ? { type: "text", text: block.text }
           : block.type === "tool_use" ? { type: "tool_use", name: block.name, input: block.input }
           : { type: block.type }),
+        ...(response.serverCalls ? { serverCalls: response.serverCalls } : {}),
       });
 
       if (isStopped()) return;
 
+      // Tools the provider called on MCP servers: shown as steps, not run here.
+      displayServerCalls(response.serverCalls ?? [], callbacks);
+
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {
         const text = response.content.filter(block => block.type === "text").map(block => block.text).join("");
+        if (response.serverCalls?.length) {
+          // Remote effects have already happened. Retain their receipts so a
+          // follow-up cannot lose them, while discarding partial local calls.
+          this.keepRemoteReceipts(response);
+        }
         if (text) callbacks.onResponse(text);
-        callbacks.onError("The response reached its token limit before completing. Please try a smaller request.");
+        callbacks.onError("The response reached its token limit before completing. Please try a smaller request." +
+          (response.serverCalls?.length ? " Remote MCP tools may already have run; check their results before retrying." : ""));
         return;
       }
 
@@ -399,6 +429,8 @@ export class AgentLoop {
 
       // Append assistant message to history
       this.messages.push({ role: "assistant", content: response.content, replay: response.replay });
+      // Results of MCP calls stay in the replay: bounded like tool text.
+      if (response.serverCalls?.length) this.messages = withoutLargeToolText(this.messages);
 
       // If no tool calls, we're done
       if (toolCalls.length === 0) {
@@ -473,6 +505,28 @@ export class AgentLoop {
     callbacks.onError(
       `Reached maximum iterations (${maxIterations}). The task may be too complex for a single conversation turn.`
     );
+  }
+
+  /** Keep completed server operations even when the surrounding response failed. */
+  private keepRemoteReceipts(response: UnifiedResponse, callbacks?: AgentCallbacks): void {
+    const calls = (response.serverCalls ?? []).filter(call => !call.pending);
+    if (callbacks) displayServerCalls(calls, callbacks);
+    const content = response.content.filter(block => block.type !== "tool_use");
+    // Keep the receipt in both representations: even a partial native replay
+    // must retain it after revoking one of its servers.
+    const receipt = calls.length ? boundedToolText(calls.map(call =>
+      `Remote MCP receipt (${call.server}/${call.tool}, ${call.isError ? "error" : "completed"}): ${boundedToolText(call.result, 1000)}`,
+    ).join("\n"), 8000) : "";
+    if (receipt) content.push({ type: "text", text: receipt });
+    const replay = response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") };
+    if (replay && receipt) replay.items.push(replay.provider === "anthropic"
+      ? { type: "text", text: receipt }
+      : { type: "message", role: "assistant", content: [{ type: "output_text", text: receipt, annotations: [] }] });
+    this.messages.push({
+      role: "assistant", content,
+      replay,
+    });
+    this.messages = withoutLargeToolText(this.messages);
   }
 
   /** Bound stored tool pixels as well as outgoing requests; user attachments stay. */

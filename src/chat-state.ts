@@ -6,7 +6,7 @@
  */
 import { historySelection } from "./selection-history";
 import type { ChatHistoryEntry, FileAttachment, ImageAttachment, UnifiedMessage } from "./types";
-import { assignLegacyTurnIds, trimHistory, withoutOldToolImages, withoutLargeToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./agent/history";
+import { assignLegacyTurnIds, trimHistory, withoutOldToolImages, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./agent/history";
 
 /** Current format version of `chat-state.json`. */
 export const CHAT_STATE_VERSION = 3;
@@ -91,7 +91,7 @@ export function migrateChatState(value: unknown): Pick<ChatState, "activeConvers
   const conversations = arrayOf<unknown>(state.conversations)
     .filter((item): item is StateRecord => isRecord(item) && typeof item.id === "string")
     .map((item): ConversationRecord => {
-      const chatHistory = arrayOf<ChatHistoryEntry>(item.chatHistory).map(compactSelection);
+      const chatHistory = withoutLargeVisibleToolText(arrayOf<ChatHistoryEntry>(item.chatHistory).map(compactSelection));
       const customTitle = item.customTitle === true && typeof item.title === "string";
       const derived = conversationTitle(chatHistory);
       const automaticTitle = typeof item.automaticTitle === "string" && item.automaticTitle.trim() ? item.automaticTitle
@@ -183,7 +183,7 @@ export function savedConversation(conversation: ConversationRecord): Conversatio
  * history).
  */
 export function withoutImageData(entries: ChatHistoryEntry[]): ChatHistoryEntry[] {
-  return entries.map((entry) => {
+  return withoutLargeVisibleToolText(entries.map((entry) => {
     const compact = compactSelection(entry);
     if (!entry.images?.length && !entry.attachedFiles?.length) return compact;
     const saved = { ...compact };
@@ -192,7 +192,7 @@ export function withoutImageData(entries: ChatHistoryEntry[]): ChatHistoryEntry[
       saved.attachedFiles = entry.attachedFiles.map(({ id, fileName, mediaType, sizeBytes }) => ({ id, fileName, mediaType, sizeBytes, data: "" }));
     }
     return saved;
-  });
+  }));
 }
 
 /**

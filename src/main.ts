@@ -658,6 +658,8 @@ export default class ChatPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const saved = normalizeSettings(await this.loadData());
     this.settings = { ...DEFAULT_SETTINGS, ...saved };
+    // Not the default's array, which edits would change.
+    this.settings.mcpServers = [...this.settings.mcpServers];
 
     // Fall back to default model if saved model is empty
     if (!this.settings.model) {
@@ -679,15 +681,26 @@ export default class ChatPlugin extends Plugin {
 
     // Load API key for the current provider from SecretStorage
     this.settings.apiKey = this.loadApiKey(this.settings.provider);
+    // MCP servers' tokens, likewise
+    for (const server of this.settings.mcpServers) {
+      const token = this.readSecret(mcpSecretKey(server.id));
+      if (token) server.token = token;
+    }
     setDebugLogging(this.settings.debugLog);
   }
 
   async saveSettings(): Promise<void> {
     // Store API key in SecretStorage keyed by provider
     this.saveApiKey(this.settings.provider, this.settings.apiKey || "");
+    const servers = this.settings.mcpServers ?? [];
+    // Only tokens this device has (loaded or typed): a token that didn't load,
+    // or a server synced from another device, isn't overwritten with "".
+    for (const server of servers) {
+      if (server.token !== undefined) this.writeSecret(mcpSecretKey(server.id), server.token);
+    }
 
-    // Save all other settings to data.json (syncs), but strip the API key
-    const toSave = { ...this.settings, apiKey: "" };
+    // Save all other settings to data.json (syncs), but strip the API key and MCP tokens
+    const toSave = { ...this.settings, apiKey: "", mcpServers: servers.map(({ token: _token, ...server }) => server) };
     await this.saveData(toSave);
     setDebugLogging(this.settings.debugLog);
 
@@ -747,6 +760,29 @@ export default class ChatPlugin extends Plugin {
       );
     } catch {
       return "";
+    }
+  }
+
+  /** Remove an MCP server and its token. */
+  async removeMcpServer(id: string): Promise<void> {
+    this.writeSecret(mcpSecretKey(id), "");
+    this.settings.mcpServers = this.settings.mcpServers.filter((server) => server.id !== id);
+    await this.saveSettings();
+  }
+
+  private readSecret(key: string): string {
+    try {
+      return this.app.secretStorage.getSecret(key) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  private writeSecret(key: string, value: string): void {
+    try {
+      this.app.secretStorage.setSecret(key, value);
+    } catch {
+      // SecretStorage not available
     }
   }
 
@@ -969,8 +1005,25 @@ function normalizeSettings(value: unknown): Partial<ChatSettings> {
   if (typeof value.followEdits === "boolean") settings.followEdits = value.followEdits;
   if (typeof value.debugLog === "boolean") settings.debugLog = value.debugLog;
   if (typeof value.skillsFolder === "string" && value.skillsFolder.trim()) settings.skillsFolder = value.skillsFolder.trim();
+  if (Array.isArray(value.mcpServers)) {
+    // Never a token from data.json (they live in SecretStorage).
+    const ids = new Set<string>();
+    settings.mcpServers = value.mcpServers.filter(isRecord)
+      .filter((server) => {
+        if (typeof server.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(server.id) || ids.has(server.id) ||
+          typeof server.name !== "string" || typeof server.url !== "string") return false;
+        ids.add(server.id);
+        return true;
+      })
+      .map((server) => ({ id: server.id as string, name: server.name as string, url: server.url as string, enabled: server.enabled === true }));
+  }
   settings.modelCatalog = normalizeCatalogState(value.modelCatalog);
   return settings;
+}
+
+/** SecretStorage key of an MCP server's token. */
+function mcpSecretKey(id: string): string {
+  return `${PLUGIN_ID}-mcp-${id}`;
 }
 
 function isProvider(value: unknown): value is ChatSettings["provider"] {
