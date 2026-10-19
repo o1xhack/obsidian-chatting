@@ -655,6 +655,14 @@ test('Opening an old chat keeps its attachments: chats unchanged since read are 
   const files = old.agentMessages.flatMap(m => typeof m.content === 'string' ? [] : m.content).filter(b => b.type === 'file');
   assert.equal(files.length, 1);
   assert.equal(files[0].file.data.length, payload.length);
+  const recent = plugin.conversations.find(c => c.id === records[1].id);
+  assert.equal(recent.unloaded, true, 'idle saved attachment payload is evicted, not stripped');
+  const beforeDisk = new Map([...plugin.app.vault.adapter.stored].filter(([path]) => /chats\/[^/]+\.json$/.test(path)));
+  await view.openConversation(recent.id);
+  await plugin.saveChatHistory();
+  assert.equal(old.unloaded, true);
+  assert.equal(recent.agentMessages[0].content[0].file.data.length, payload.length);
+  for (const [path, data] of beforeDisk) assert.equal(plugin.app.vault.adapter.stored.get(path), data, 'opening kept disk file unchanged');
 });
 
 test('Edit and regenerate work within the conversation they belong to', async () => {

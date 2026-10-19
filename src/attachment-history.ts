@@ -29,6 +29,27 @@ export function retainedAttachmentBytes(item: ImageAttachment | FileAttachment):
   return bytes + stringBytes(item.id) + stringBytes(item.fileName) + stringBytes(item.mediaType) + 128;
 }
 
+/** Count payloads as the shared retention pass does, including legacy UI-only data. */
+export function conversationAttachmentBytes(conversation: ConversationRecord): number {
+  let bytes = 0;
+  const ids = new Set<string>();
+  const count = (item: ImageAttachment | FileAttachment) => { ids.add(item.id); bytes += retainedAttachmentBytes(item); };
+  for (const message of conversation.agentMessages) {
+    if (typeof message.content === "string") continue;
+    for (const block of message.content) {
+      if (block.image) count(block.image);
+      if (block.file) count(block.file);
+      for (const item of [...block.images ?? [], ...block.files ?? []]) count(item);
+    }
+  }
+  for (const entry of conversation.chatHistory) {
+    for (const item of [...entry.images ?? [], ...entry.attachedFiles ?? []]) {
+      if (!ids.has(item.id) && (item.data || ("text" in item && item.text))) count(item);
+    }
+  }
+  return bytes;
+}
+
 /** Mutates retained history in place to preserve entry identities and in-flight
  * tool-result arrays. Only attachment payloads expire, never conversation text.
  */

@@ -16,7 +16,7 @@ import { ObsidianChatView, VIEW_TYPE_CHAT } from "./ui/chat-view";
 import { closeFollowTab, closeLeftoverFollowTab } from "./ui/show-in-view";
 import { AgentLoop } from "./agent/loop";
 import type { ChangeLog } from "./tools/undo";
-import { boundConversationAttachments } from "./attachment-history";
+import { boundConversationAttachments, conversationAttachmentBytes, MAX_HISTORY_ATTACHMENT_BYTES } from "./attachment-history";
 import {
   CHAT_STATE_VERSION,
   chatFileText,
@@ -463,7 +463,6 @@ export default class ChatPlugin extends Plugin {
       return false;
     }
     if (version !== this.conversationOpenVersion || !this.conversations.includes(next)) return false;
-    this.storeActiveMessages();
     this.activate(next);
     return true;
   }
@@ -549,6 +548,27 @@ export default class ChatPlugin extends Plugin {
     const unchanged = new Set(this.conversations
       .filter((conversation) => sameMessages(conversation.agentMessages, this.savedMessages.get(conversation.id)))
       .map((conversation) => conversation.id));
+    // Reading saved chats must not accumulate unbounded attachment payloads.
+    // Unload only exact saved snapshots; unsaved rows, notes and pending turns
+    // must stay in memory until their next successful write.
+    const bytes = new Map(this.conversations.map(c => [c, conversationAttachmentBytes(c)]));
+    let total = [...bytes.values()].reduce((sum, size) => sum + size, 0);
+    for (const conversation of [...this.conversations].sort((a, b) => a.updatedAt - b.updatedAt)) {
+      if (total <= MAX_HISTORY_ATTACHMENT_BYTES) break;
+      const size = bytes.get(conversation) ?? 0;
+      if (!size || conversation.id === this.activeConversationId || conversation.unloaded ||
+          !unchanged.has(conversation.id) || this.agents.get(conversation.id)?.isRunning() ||
+          this.savedChats.get(conversation.id) !== textDigest(JSON.stringify(savedConversation(conversation)))) continue;
+      this.agents.delete(conversation.id);
+      this.savedMessages.delete(conversation.id);
+      conversation.chatHistory = [];
+      conversation.agentMessages = [];
+      conversation.unloaded = true;
+      total -= size;
+    }
+    // Running or unsaved chats cannot be unloaded; apply the hard shared
+    // budget to their payloads instead, invalidating cursors below.
+    if (total > MAX_HISTORY_ATTACHMENT_BYTES) unchanged.clear();
     const bounded = boundConversationAttachments(this.conversations, this.activeConversationId, undefined, unchanged);
     for (const id of bounded.changed) this.agents.get(id)?.invalidateHistoryCursor();
     if (bounded.changed.has(this.activeConversationId)) this.getChatView()?.refreshAttachmentData();
