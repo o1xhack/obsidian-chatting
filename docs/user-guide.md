@@ -50,7 +50,7 @@ Click the pencil under a message you sent to change it: the chat continues from 
 
 ## 💬 Chats
 
-The chat header shows the current chat's title, taken from your first message. **New chat** (the pen icon) starts a new one; so do the *New chat* command and the ribbon icon's right-click menu, and *Chat about this note* and *Send selection to chat* always start a new chat. The clock icon opens your chats, most recent first: open one to go on with it, rename it with the pencil, or delete it (you confirm first). **Clear** (the trash icon) empties only the current chat. The chat you had open is open again after a restart. Starting a new chat, switching, or deleting the current chat stops an answer that is still running; what it showed so far stays in its chat. Each chat sends only its own messages to the provider.
+The chat header shows the current chat's title, taken from your first message. **New chat** (the pen icon) starts a new one; so do the *New chat* command and the ribbon icon's right-click menu, and *Chat about this note* and *Send selection to chat* always start a new chat. The clock icon opens your chats, most recent first: open one to go on with it, rename it with the pencil, or delete it (you confirm first). **Clear** (the trash icon) empties only the current chat. The chat you had open is open again after a restart. An answer keeps running when you start a new chat or switch to another: the list shows *Answering…*, a notice says when it is ready or has a question for you, and going back shows it as far as it got. A message still reading its linked files, or an edit not yet answered, goes back to the input instead. Deleting a chat stops its answer. Each chat sends only its own messages to the provider.
 
 ## 👀 Follow the AI's edits
 
@@ -230,7 +230,7 @@ Only what the agent needs for the current turn. When you ask a question, the age
 <details>
 <summary><b>Does it really work on mobile?</b></summary>
 
-Yes — that's the design constraint everything else is built around. Requests go through Obsidian's `requestUrl()` (mobile WebViews enforce CORS). On desktop, ChatGPT sign-in opens your browser and returns through a local callback. On iOS and Android, choose **Copy code and open login page**, paste the one-time code on the official page, approve, then return to Obsidian. Mobile uses device authorization and never loads the desktop callback server. If device-code login is unavailable, enable it in ChatGPT security settings or ask your workspace admin.
+Yes — that's the design constraint everything else is built around. Requests go through Obsidian's `requestUrl()` (mobile WebViews enforce CORS), except the chat answers, which stream: on desktop through Node's `https`, on mobile through `fetch` where the provider allows it, else through `requestUrl()` all at once. On desktop, ChatGPT sign-in opens your browser and returns through a local callback. On iOS and Android, choose **Copy code and open login page**, paste the one-time code on the official page, approve, then return to Obsidian. Mobile uses device authorization and never loads the desktop callback server. If device-code login is unavailable, enable it in ChatGPT security settings or ask your workspace admin.
 
 </details>
 
@@ -269,3 +269,7 @@ Yes. Word, Excel and PowerPoint files are ZIP archives, and the plugin unpacks t
 
 </details>
 
+
+### Interrupted remote requests
+
+If a request with enabled MCP servers loses its response, it is not automatically posted again through a different transport. External tools may already have run. After an app restart, that interrupted request shows a warning instead of Continue; check the remote service before sending another message. Other pending turns can use Continue while their original user turn is retained. Continued selections keep their original fingerprint; if the note changed, scoped writes are refused.

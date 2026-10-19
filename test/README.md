@@ -8,8 +8,11 @@ npm test
 
 Runs every `test/*.test.mjs` file (`scripts/test.mjs`). `test/harness.mjs`
 bundles the production modules (provider adapters, agent loop, plugin) with
-a fake Obsidian API, an in-memory vault and mocked `requestUrl`; test files
-import what they need from it. No credentials or live API calls are needed.
+a fake Obsidian API, an in-memory vault and mocked `requestUrl`, which
+answers chat requests as Server-Sent Events (`fetch` fails like a CORS
+block unless a test sets `globalThis.__fetch`, so requests fall back to
+it); test files import what they need from it. No credentials or live API
+calls are needed.
 Tests cover assistant output encoding, native thinking/reasoning/search
 replay, read → create/edit flows, parallel tools, cancellation, history
 restoration, Anthropic `pause_turn` and thinking configuration, OpenAI
@@ -21,6 +24,7 @@ and insert positions, `set_properties` input checks, `read_file` and
 fake Svelte component: the API history cap (80 messages saved, cut to 60
 past 80) and OpenAI chaining past it, tool card inputs and `ask_user`
 questions and answers after a reload, Stop and Clear while `ask_user` waits,
+a streamed answer growing in one message and kept on Stop,
 Copy transcript with the chat panel closed, commands waiting for the view,
 and Clear during a turn. `settings-tab.test.mjs` checks that a closed
 settings tab is not redrawn. Providers: rate-limit retries by HTTP status,
@@ -79,8 +83,10 @@ folder's with the first tool result touching it (outer first, not repeated,
 again after a cut, the active note counts) and the *Vault instructions*
 settings row in both settings paths. `conversations.test.mjs`: the version 3
 format of `chat-state.json` and its one-time migration, new chat, switching,
-renaming and deleting through the chat view, OpenAI chaining and stopped
-turns per conversation, and the commands that start a new chat.
+renaming and deleting through the chat view, OpenAI chaining per
+conversation, turns that go on in the background (a question waiting for
+the return, the notices, deleting the chat stops its turn, messages added
+after the last step), and the commands that start a new chat.
 `follow-edits.test.mjs`: following the AI's edits (the changed range or
 cards, the reused follow tab and Obsidian's match state, canvas cards
 selected and centered, the follow tab closed on unload and at the next
@@ -105,6 +111,21 @@ both settings paths). `mcp.test.mjs`: MCP servers (Anthropic's
 on and valid; the provider's calls shown as steps, failed ones too, and
 replayed as sent; none for the ChatGPT account; tokens only in
 SecretStorage; the *MCP servers* settings in both settings paths).
+`streaming.test.mjs`: streamed answers (the SSE parser at any chunk
+boundary; each provider's answer rebuilt from its stream equal to the
+unstreamed one, the Codex route with its endpoint and headers; the
+`requestUrl()` fallback and when `fetch` is skipped; Stop; the rate-limit
+retry only before text is shown; a cut-off stream sent again, at most
+twice). `stream-desktop.test.mjs`: desktop streams through Node's `https`
+(errors, Stop); on mobile a blocked `fetch` switches only that URL.
+`background.test.mjs`: back from the background (the lifecycle hints;
+leaving saves; a request that failed or stalled in the background sent
+again at most twice, "Resuming…"; no `requestUrl()` fallback for a
+`fetch` failing in the background; the mobile stall watch, none on
+desktop; Continue after Obsidian was ended mid-turn and what dismisses it).
+`typed-steering.test.mjs`: typing while an answer runs (queued, taken in
+with the next step or run as the next turn; Stop and Clear drop it;
+trimming never starts at tool results with an added message).
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without

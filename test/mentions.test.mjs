@@ -153,11 +153,12 @@ function fakeChat() {
     shown: [],
     restoreDraft(text, selection, images, files) { chat.draft = { text, selection, images, files }; },
     addUserMessage(value, images = []) { chat.shown.push({ type: 'user', text: value, images }); },
-    addAssistantMessage(value) { chat.shown.push({ type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ type: 'assistant', text: value }); return chat.shown.length - 1; },
+    updateAssistantMessage(id, value) { chat.shown[id].text = value; }, removeMessage(id) { chat.shown.splice(id, 1); },
     addToolCall() { return 0; }, updateToolResult() {},
     addError(value) { chat.shown.push({ type: 'error', text: value }); },
     showThinking() {}, hideThinking() {},
-    setInputEnabled() {}, setBusy() {}, foldTurn() {}, focus() {}, cancelAskUser() {}, setTitle() {},
+    setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {}, focus() {}, cancelAskUser() {}, setTitle() {},
   };
   return chat;
 }

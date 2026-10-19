@@ -203,7 +203,7 @@ test('OpenAI: restored legacy history retains function call/output pairs', async
 
 test('ChatGPT: incomplete SSE is rejected instead of executing finished tool items', async () => {
   transport(() => sse([{ type: 'response.output_item.done', output_index: 0, item: nativeCall('write', 'create_file', { path: 'Never.md' }) }]));
-  await assert.rejects(api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Create' }], [], 'System'), /without a completed response/);
+  await assert.rejects(api.sendChatGPTOAuthMessage(settings('chatgpt-oauth'), [{ role: 'user', content: 'Create' }], [], 'System'), /ended before the answer was complete/);
 });
 
 test('History trimming retains complete user turns rather than orphan tool results', () => {

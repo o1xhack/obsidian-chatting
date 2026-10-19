@@ -1,4 +1,4 @@
-import { App } from "obsidian";
+import { App, Platform } from "obsidian";
 import type {
   ChatSettings,
   UnifiedMessage,
@@ -12,8 +12,9 @@ import type {
   UnifiedResponse,
   ServerToolCall,
 } from "../types";
-import { ProviderError } from "../api/errors";
 import { sendMessage } from "../api/client";
+import { ProviderError, StreamCutError } from "../api/errors";
+import { isBuffered, lastChunkAt } from "../api/stream";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
 import { serverToolName } from "../api/mcp";
@@ -27,6 +28,7 @@ import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImag
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
+import { appLifecycle } from "../platform/lifecycle";
 
 /**
  * The API history: saving keeps the last 80 messages. Before a turn, a
@@ -46,6 +48,72 @@ function displayServerCalls(calls: ServerToolCall[], callbacks: AgentCallbacks):
     callbacks.onToolResult(row.name, row.toolResult);
   }
 }
+/** Sending a request again (a cut-off stream, back from the background); tests shorten the wait. */
+export const RESUME = {
+  /** Requests sent again per turn at most; after that the error shows. */
+  perTurn: 2,
+  /**
+   * Back in the foreground, an open request is given up after this long
+   * (ms) without data, counted from the return or its last data.
+   */
+  stallMs: 30_000,
+  /**
+   * The same for a request through `requestUrl()`, which delivers its data
+   * only at the end: a long answer may still be on its way, a request the
+   * phone cut off never answers.
+   */
+  bufferedStallMs: 120_000,
+};
+
+/**
+ * An error that may not come again: the network, an abort (the stall
+ * watch), a cut stream, an error inside a started response, a timeout, a
+ * rate limit or a server error. Not a request refused as too large or a
+ * provider's other 4xx answers (a key, a quota, a bad request).
+ */
+function transient(e: unknown): boolean {
+  if (e instanceof RequestBudgetError) return false;
+  if (!(e instanceof ProviderError)) return true;
+  if (["insufficient_quota", "usage_limit_reached", "usage_not_included"].includes(e.code ?? "")) return false;
+  if (e.remoteEffectsPossible) return false;
+  return e.status === 0 || e.status === 408 || e.status === 429 || e.status >= 500;
+}
+
+/**
+ * Mobile: each time the app comes back while `request` is open, give it up
+ * (abort) if no data arrives for `RESUME.stallMs`. A phone suspends the app
+ * in the background, and a request open then may hang. A desktop window
+ * keeps its requests running in the background, so it isn't watched.
+ * Returns the function that stops watching.
+ */
+function watchForStall(request: AbortController): () => void {
+  let timer = 0;
+  let backAt = 0;
+  const stopTimer = () => {
+    if (timer) window.clearTimeout(timer);
+    timer = 0;
+  };
+  const check = () => {
+    const limit = isBuffered(request.signal) ? RESUME.bufferedStallMs : RESUME.stallMs;
+    const quietMs = Date.now() - Math.max(backAt, lastChunkAt(request.signal) ?? 0);
+    if (quietMs >= limit) request.abort();
+    else timer = window.setTimeout(check, limit - quietMs);
+  };
+  const offVisible = appLifecycle.onVisible(() => {
+    if (!Platform.isMobileApp) return;
+    backAt = Date.now();
+    stopTimer();
+    timer = window.setTimeout(check, RESUME.stallMs);
+  });
+  const offHidden = appLifecycle.onHidden(stopTimer);
+  return () => {
+    offVisible();
+    offHidden();
+    stopTimer();
+  };
+}
+
+
 
 /**
  * What the chat view shows and saves for a tool result: the text and a
@@ -79,6 +147,18 @@ export class AgentLoop {
   private settings: ChatSettings;
   /** Counts runs and stops; a run whose number is no longer current is stopped. */
   private runVersion = 0;
+  /**
+   * Cancels the open HTTP request (streamed answers). One per request, so a
+   * request that stalled in the background can be given up without
+   * stopping the turn.
+   */
+  private request: AbortController | null = null;
+  /** The run whose loop is working now (0: none); `steer()` adds to it. */
+  private loopVersion = 0;
+  /** Messages the user added while the loop works; sent with its next request (`steer`). */
+  private steered: string[] = [];
+  /** Turns holding this loop (`hold()`). */
+  private holds = 0;
   /** The vault root's AGENTS.md as the last turn read it (in the system prompt). */
   private vaultInstructions: string | null = null;
   /** The skills part of the system prompt, read with the instructions. */
@@ -92,6 +172,26 @@ export class AgentLoop {
   /** Abort a running loop (e.g. user navigates away) */
   abort(): void {
     this.runVersion++;
+    this.steered = [];
+    this.request?.abort();
+  }
+
+  /**
+   * Add a message to the running turn, as the chat apps let you steer a
+   * running task: it goes with the loop's next request, after the current
+   * step. False when no loop is working (start a turn instead). What
+   * arrives after the last step is returned by `takeSteered()`.
+   */
+  steer(text: string): boolean {
+    if (!this.loopVersion || this.loopVersion !== this.runVersion) return false;
+    this.steered.push(text);
+    debugLog(this.app, "STEER", { text });
+    return true;
+  }
+
+  /** Added messages the finished turn didn't get to; they need a turn of their own. */
+  takeSteered(): string[] {
+    return this.steered.splice(0);
   }
 
   /** Stop a running turn and clear the history. */
@@ -146,9 +246,43 @@ export class AgentLoop {
     }
   }
 
+  /**
+   * Marks a turn as running from before it starts to after it ends (the
+   * chat view holds it): the plugin keeps a running conversation's loop
+   * when the user switches away. Returns the release.
+   */
+  hold(): () => void {
+    this.holds++;
+    let released = false;
+    return () => {
+      if (!released) this.holds--;
+      released = true;
+    };
+  }
+
+  isRunning(): boolean {
+    return this.holds > 0;
+  }
+
   /** Nothing in the API history yet. */
   isEmpty(): boolean {
     return this.messages.length === 0;
+  }
+
+  /** The history ends in a user message or tool results: the model hasn't answered them. */
+  /**
+   * The history ends in a user message or tool results, waiting for an
+   * answer; with `turnId`, the last turn there must be that one (a turn
+   * whose message never reached the history isn't continued as another).
+   */
+  owesAnswer(turnId?: string): boolean {
+    if (this.messages.at(-1)?.role !== "user") return false;
+    if (turnId === undefined) return true;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const id = this.messages[i].turnId;
+      if (this.messages[i].role === "user" && id) return id === turnId;
+    }
+    return false;
   }
 
   /** Export the full conversation as a readable markdown transcript */
@@ -305,12 +439,6 @@ export class AgentLoop {
     // Prune if conversation is too long
     this.pruneHistory();
 
-    // System prompt is static (cache-friendly): the built-in one, the
-    // vault's skills and its AGENTS.md, which rarely change. Read once per turn.
-    this.vaultInstructions = await rootInstructions(this.app);
-    this.skills = skillsPrompt(findSkills(this.app, turnSettings.skillsFolder));
-    const systemPrompt = buildSystemPrompt(this.vaultInstructions, this.skills);
-
     debugLog(this.app, "USER_MESSAGE", {
       userMessage,
       // As the model gets it: the context lines first.
@@ -323,47 +451,115 @@ export class AgentLoop {
       fileNames: files.map((file) => file.fileName),
     });
 
+    await this.loop(version, callbacks, turnSettings, scope, beforeTurn);
+  }
+
+  /**
+   * Continue the turn the history ends in, cut off before the model
+   * answered (Obsidian was ended in the background): the loop runs on the
+   * history as it is, without a new user message. Tool results already
+   * there are sent, not run again. The view supplies the original saved
+   * selection; its fingerprint still refuses writes after the note changed.
+   */
+  async continueTurn(callbacks: AgentCallbacks, selection?: SelectionScope): Promise<void> {
+    const version = ++this.runVersion;
+    if (!this.owesAnswer()) return;
+    debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
+    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+    await this.loop(version, callbacks, { ...this.settings, get mcpServers() { return currentServers(); } }, selection ? { ...selection } : undefined);
+  }
+
+  /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
+  private async loop(
+    version: number,
+    callbacks: AgentCallbacks,
+    turnSettings: ChatSettings,
+    scope: SelectionScope | undefined,
+    beforeTurn?: UnifiedMessage[]
+  ): Promise<void> {
+    this.loopVersion = version;
+    try {
+      await this.steps(version, callbacks, turnSettings, scope, beforeTurn);
+    } finally {
+      if (this.loopVersion === version) this.loopVersion = 0;
+    }
+  }
+
+  /** `beforeTurn`: the history before a new user turn, restored if its first request is refused as too large. */
+  private async steps(
+    version: number,
+    callbacks: AgentCallbacks,
+    turnSettings: ChatSettings,
+    scope: SelectionScope | undefined,
+    beforeTurn?: UnifiedMessage[]
+  ): Promise<void> {
+    const isStopped = () => version !== this.runVersion;
+    const onTextDelta = (text: string) => {
+      if (!isStopped()) callbacks.onTextDelta?.(text);
+    };
+    // System prompt is static (cache-friendly): the built-in one, the
+    // vault's skills and its AGENTS.md, which rarely change. Read once per turn.
+    this.vaultInstructions = await rootInstructions(this.app);
+    this.skills = skillsPrompt(findSkills(this.app, turnSettings.skillsFolder));
+    const systemPrompt = buildSystemPrompt(this.vaultInstructions, this.skills);
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
+    let resends = 0;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
       callbacks.onThinking();
       if (isStopped()) return;
 
-      let response;
-      try {
-        response = await sendMessage(
-          turnSettings,
-          this.messages,
-          TOOL_DEFINITIONS,
-          systemPrompt,
-          isStopped
-        );
-      } catch (caughtError) {
-        let e = caughtError;
-        if (isStopped()) return;
-        if (i > 0 && e instanceof RequestBudgetError) {
-          const reduced = withoutLargeToolText(withoutToolAttachments(this.messages));
-          if (reduced !== this.messages) {
-            this.messages = reduced;
-            clearOpenAIState();
-            clearChatGPTOAuthState();
-            try {
-              response = await sendMessage(turnSettings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped);
-            } catch (retryError) { e = retryError; }
-            if (isStopped()) return;
-          }
-        }
-        if (!response) {
+      let response: UnifiedResponse | undefined;
+      while (!response) {
+        const startedAt = Date.now();
+        try {
+          response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
+        } catch (e) {
+          if (isStopped()) return;
           const msg = e instanceof Error ? e.message : String(e);
           if (e instanceof ProviderError && e.partialResponse) {
             this.keepRemoteReceipts(e.partialResponse, callbacks);
             const partialText = e.partialResponse.content.filter(block => block.type === "text").map(block => block.text).join("");
             if (partialText) callbacks.onResponse(partialText);
           }
+          // The stream was cut off (a dropped connection, no provider error),
+          // or the request failed or was given up while Obsidian was in the
+          // background: send the same request again, once Obsidian is
+          // visible. The history holds every completed step, so nothing runs twice.
+          // Not after a tool on an MCP server started (it may have changed
+          // something), and not an error that would only come again (a request
+          // refused as too large, or a provider's 4xx answer other than 408/429).
+          const background = transient(e) && appLifecycle.hiddenSince(startedAt);
+          const cut = e instanceof StreamCutError && !e.sideEffects;
+          if (resends < RESUME.perTurn && (cut || background) && !(e instanceof StreamCutError && e.sideEffects) &&
+              !(e instanceof ProviderError && e.remoteEffectsPossible)) {
+
+            resends++;
+            debugLog(this.app, "API_RESEND", { error: msg, resend: resends, background });
+            await appLifecycle.whenVisible();
+            if (isStopped()) return;
+            // The failed attempt's streamed text goes; the answer streams anew.
+            if (background) callbacks.onResuming?.();
+            else callbacks.onThinking();
+            if (isStopped()) return;
+            continue;
+          }
+          // A later request grown over the size limit by tool attachments:
+          // drop them (and oversized tool text) once and send again.
+          if (i > 0 && e instanceof RequestBudgetError) {
+            const reduced = withoutLargeToolText(withoutToolAttachments(this.messages));
+            if (reduced !== this.messages) {
+              this.messages = reduced;
+              clearOpenAIState();
+              clearChatGPTOAuthState();
+              continue;
+            }
+
+          }
           debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
-          if (i === 0 && e instanceof RequestBudgetError) {
+          if (i === 0 && e instanceof RequestBudgetError && beforeTurn) {
             // Nothing reached the provider or tools. Undo local pruning and
             // the pending user turn so its attachments cannot poison retries.
             this.messages = beforeTurn;
@@ -499,6 +695,12 @@ export class AgentLoop {
       }
 
       if (isStopped()) return;
+      // What the user added meanwhile goes with the next request, after the
+      // results; without another request (the last step) it runs next instead.
+      if (i + 1 < maxIterations) for (const text of this.steered.splice(0)) {
+        resultBlocks.push({ type: "text", text: `[The user added while you were working:] ${text}` });
+        callbacks.onSteered?.(text);
+      }
     }
 
     // If we get here, we hit the iteration limit
@@ -514,9 +716,13 @@ export class AgentLoop {
     const content = response.content.filter(block => block.type !== "tool_use");
     // Keep the receipt in both representations: even a partial native replay
     // must retain it after revoking one of its servers.
-    const receipt = calls.length ? boundedToolText(calls.map(call =>
+    const receipts = calls.map(call =>
       `Remote MCP receipt (${call.server}/${call.tool}, ${call.isError ? "error" : "completed"}): ${boundedToolText(call.result, 1000)}`,
-    ).join("\n"), 8000) : "";
+    );
+    if (callbacks) for (const call of response.serverCalls ?? []) if (call.pending) {
+      receipts.push(`Remote MCP operation (${call.server}/${call.tool}): started, outcome unknown. Check the external service before repeating it.`);
+    }
+    const receipt = boundedToolText(receipts.join("\n"), 8000);
     if (receipt) content.push({ type: "text", text: receipt });
     const replay = response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") };
     if (replay && receipt) replay.items.push(replay.provider === "anthropic"
@@ -533,6 +739,35 @@ export class AgentLoop {
   private pruneToolImages(): void {
     const pruned = withoutOldToolImages(this.messages);
     if (pruned.some((message, index) => message !== this.messages[index])) this.messages = pruned;
+  }
+
+  /** One request with its own abort controller, watched for a stall after the background. */
+  private async send(
+    settings: ChatSettings,
+    systemPrompt: string,
+    isStopped: () => boolean,
+    onTextDelta: (text: string) => void,
+    onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>,
+  ): Promise<UnifiedResponse> {
+    const request = new AbortController();
+    this.request = request;
+    const unwatch = watchForStall(request);
+    let remoteStarted = false;
+    try {
+      return await sendMessage(settings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped,
+        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; } });
+    } catch (e) {
+      // Aborted, but not by Stop: the watch gave it up.
+      if (e instanceof ProviderError && e.remoteEffectsPossible) throw e;
+      if (remoteStarted && !(e instanceof ProviderError && e.partialResponse)) throw new StreamCutError("Provider", true);
+      if (request.signal.aborted && !isStopped()) {
+        throw new Error("No answer arrived after Obsidian came back from the background. Please try again.");
+      }
+      throw e;
+    } finally {
+      unwatch();
+      if (this.request === request) this.request = null;
+    }
   }
 
   /** Drop oldest messages when conversation gets too long, keeping recent context */

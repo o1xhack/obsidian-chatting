@@ -163,9 +163,9 @@ test('Sending /name from the chat: the skill goes to the model before the messag
   const view = new api.ObsidianChatView({}, plugin);
   const shown = [];
   view.chatContainer = {
-    addUserMessage(value) { shown.push(value); }, addAssistantMessage() {}, addToolCall() { return 0; }, updateToolResult() {},
-    addError(value) { shown.push(value); }, showThinking() {}, hideThinking() {},
-    setInputEnabled() {}, setBusy() {}, foldTurn() {}, focus() {}, cancelAskUser() {}, setTitle() {},
+    addUserMessage(value) { shown.push(value); }, addAssistantMessage() { return 0; }, updateAssistantMessage() {}, removeMessage() {},
+    addToolCall() { return 0; }, updateToolResult() {}, addError(value) { shown.push(value); }, showThinking() {}, hideThinking() {},
+    setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {}, focus() {}, cancelAskUser() {}, setTitle() {},
   };
   const requests = transport(() => response('anthropic', [text('ok')]));
   await view.handleUserMessage('/meeting-notes for the call', null);

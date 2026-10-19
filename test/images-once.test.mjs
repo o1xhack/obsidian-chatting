@@ -17,12 +17,14 @@ function fakeChat() {
   const chat = {
     shown: [],
     addUserMessage(value, images = [], turnId, selection) { chat.shown.push({ id: nextId++, type: 'user', text: value, images, turnId, selection }); },
-    addAssistantMessage(value) { chat.shown.push({ id: nextId++, type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
+    updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
+    removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
     cutMessages(turnId) { const index = chat.shown.findIndex(m => m.type === 'user' && m.turnId === turnId); if (index >= 0) chat.shown.splice(index); },
     addToolCall(name) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name }); return nextId++; },
     updateToolResult() {},
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
-    showThinking() {}, hideThinking() {}, setInputEnabled() {}, setBusy() {}, foldTurn() {},
+    showThinking() {}, hideThinking() {}, setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {},
     clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {}, setSelection() {}, getSelection: () => null,
   };
   return chat;

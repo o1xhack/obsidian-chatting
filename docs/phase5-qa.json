@@ -1,0 +1,91 @@
+{
+  "version": "0.9.0",
+  "status": "candidate-validated-awaiting-final-review",
+  "scope": {
+    "pullRequests": [
+      40,
+      41,
+      42,
+      43
+    ],
+    "baseline": "e089e1f76e3748ae368e3263992870871c1df840",
+    "chatStateVersion": 3
+  },
+  "automated": {
+    "tests": 626,
+    "passed": 626,
+    "typescript": "pass",
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "build": "pass"
+  },
+  "desktop": {
+    "version": "0.9.0",
+    "scope": "native Mac Obsidian, production main.js, mounted Svelte UI; mocked provider transport",
+    "checks": [
+      "candidate-loaded",
+      "upgrade-visible-history",
+      "upgrade-api-history",
+      "upgrade-conversations",
+      "stream-visible-before-completion",
+      "composer-usable-during-answer",
+      "queue-chip-rendered",
+      "steering-in-next-provider-step",
+      "steered-answer-saved",
+      "background-does-not-switch-active-chat",
+      "background-output-not-in-foreground",
+      "background-answer-owned-by-origin",
+      "completed-background-answer-rendered-on-return",
+      "stop-aborts-request",
+      "stop-keeps-partial-text",
+      "mcp-stream-error-no-retry",
+      "mcp-stream-error-receipt-saved",
+      "mcp-receipt-step-rendered",
+      "continue-button-rendered",
+      "continue-without-duplicate-user-turn",
+      "continue-clears-pending-marker",
+      "restart-mcp-uncertainty-warning",
+      "restart-mcp-continue-disabled",
+      "native-375px-no-horizontal-overflow",
+      "real-chatgpt-login-preserved",
+      "synthetic-qa-original-history-preserved",
+      "protected-files-unchanged"
+    ],
+    "mainSha256": "48c7447ea1d85a4da9e429f4eb3cd39a48db9acf611bd34f669c5c9d192e445b",
+    "protectedFiles": {
+      "checked": 1809,
+      "changed": 0
+    }
+  },
+  "liveChatGPT": {
+    "version": "0.9.0",
+    "model": "gpt-6.1-sol",
+    "provider": "chatgpt-oauth",
+    "scope": "real ChatGPT subscription, native desktop production streaming and background conversation; no tools",
+    "streamingDeltas": 1,
+    "backgroundCompleted": true,
+    "crossChatLeak": false,
+    "toolCount": 0,
+    "foregroundCompleted": true,
+    "passed": true
+  },
+  "limitations": [
+    "No live Anthropic/OpenAI API-key credentials; simulated provider transport",
+    "No physical mobile suspension test; iPhone Air excluded by owner"
+  ],
+  "gates": {
+    "sourceOfTruth": "https://github.com/o1xhack/obsidian-chatting/pull/53",
+    "note": "This file records candidate QA; current-head review, CI, Preview and post-release acceptance are tracked in the integration PR."
+  },
+  "liveChatGPTReload": {
+    "version": "0.9.0",
+    "model": "gpt-6.1-sol",
+    "loginRetained": true,
+    "backgroundHistoryRetained": true,
+    "reloadReply": true,
+    "passed": true
+  },
+  "reviewFixes": [
+    "Each adapter attempt snapshots MCP configuration and checkpoints uncertainty before its POST, including rate-limit backoff retries."
+  ]
+}

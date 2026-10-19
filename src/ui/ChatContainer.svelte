@@ -39,6 +39,8 @@
     /** User messages of a turn (not `ask_user` answers): editable. Changes rows: their turn. */
     turnId?: string;
     selection?: SelectionScope;
+    /** Assistant messages: text still arriving (no actions yet). */
+    streaming?: boolean;
     errorKind?: "stopped";
     /** Changes rows: the files a turn changed, and whether it can be undone. */
     files?: string[];
@@ -77,13 +79,27 @@
     onUndo: (turnId: string) => void;
     /** The vault's skills, offered after `/`. */
     listSkills: () => Skill[];
+    /** Continue the turn that was cut off when Obsidian was ended. */
+    onContinue: () => void;
   }
 
   let {
     app, component, provider, model, onSend, onClear, onStop, onEdit, onRegenerate, onCopy,
     title, onNewChat, listConversations, onOpenConversation, onRenameConversation, onDeleteConversation,
-    onToggleFollow, onUndo, listSkills,
+    onToggleFollow, onUndo, listSkills, onContinue,
   }: Props = $props();
+
+  /** A turn was cut off when Obsidian was ended in the background: offer Continue. */
+  let canContinue = $state(false);
+
+  export function setContinue(show: boolean): void {
+    canContinue = show;
+  }
+
+  function continueTurn(): void {
+    canContinue = false;
+    onContinue();
+  }
 
   let displayModel = $state("");
   let displayTitle = $state("");
@@ -102,6 +118,11 @@
 
   function refreshConversations(): void {
     conversations = listConversations();
+  }
+
+  /** The open chats list again (a chat started or finished answering in the background). */
+  export function updateConversations(): void {
+    if (historyOpen) refreshConversations();
   }
 
   function toggleHistory(): void {
@@ -183,7 +204,6 @@
   let messages = $state<ChatMessage[]>([]);
   let inputText = $state("");
   let inputEnabled = $state(true);
-  let placeholder = $state("Ask anything...");
   let messagesEl: HTMLElement | undefined = $state();
   let textareaEl: HTMLTextAreaElement | undefined = $state();
   let fileInputEl: HTMLInputElement | undefined = $state();
@@ -236,13 +256,13 @@
   });
 
   // ─── Scrolling: stick to the bottom, like a chat ──────────────────────
-  // While the user is at the bottom, new messages keep the view there.
-  // Scrolling up stops that, so earlier messages can be read while a turn
-  // runs; back at the bottom it follows again. Sending a question always
-  // brings the view down. While scrolled up, a button jumps back to the
-  // bottom. Only scrolling up stops following: the browser also scrolls by
-  // itself (content above changing height, a shorter list), which mustn't
-  // leave the answer half hidden.
+  // While the user is at the bottom, new messages and a streaming answer
+  // keep the view there. Scrolling up stops that, so earlier messages can
+  // be read while a turn runs; back at the bottom it follows again. Sending
+  // a question always brings the view down. While scrolled up, a button
+  // jumps back to the bottom. Only scrolling up stops following: the
+  // browser also scrolls by itself (content above changing height, a
+  // shorter list), which mustn't leave the answer half hidden.
   /** Pixels from the bottom that still count as "at the bottom". */
   const BOTTOM_SLACK = 32;
   let messageListEl: HTMLElement | undefined = $state();
@@ -328,14 +348,53 @@
     void tick().then(autoGrow);
   }
 
-  export function addAssistantMessage(text: string): void {
-    messages.push({ id: nextId++, type: "assistant", text });
+  export function addAssistantMessage(text: string, streaming = false): number {
+    const id = nextId++;
+    messages.push({ id, type: "assistant", text, streaming });
+    return id;
+  }
+
+  // ─── Streamed answers: Markdown is re-rendered at most every 100 ms ────
+  const STREAM_RENDER_MS = 100;
+  const pendingText = new Map<number, string>();
+  let renderTimer: number | null = null;
+  onDestroy(() => {
+    if (renderTimer !== null) window.clearTimeout(renderTimer);
+  });
+
+  /** Replace an assistant message's text; `final` renders it at once and ends its streaming. */
+  export function updateAssistantMessage(id: number, text: string, final = false): void {
+    pendingText.set(id, text);
+    if (final) {
+      flushPendingText();
+      const msg = messages.find((m) => m.id === id);
+      if (msg) msg.streaming = false;
+    } else {
+      renderTimer ??= window.setTimeout(flushPendingText, STREAM_RENDER_MS);
+    }
+  }
+
+  function flushPendingText(): void {
+    if (renderTimer !== null) window.clearTimeout(renderTimer);
+    renderTimer = null;
+    for (const [id, text] of pendingText) {
+      const msg = messages.find((m) => m.id === id);
+      if (msg) msg.text = text;
+    }
+    pendingText.clear();
+  }
+
+  export function removeMessage(id: number): void {
+    pendingText.delete(id);
+    const idx = messages.findIndex((m) => m.id === id);
+    if (idx !== -1) messages.splice(idx, 1);
   }
 
   /** Remove the turn `turnId` and everything after it (edit, regenerate). */
   export function cutMessages(turnId: string): void {
     const idx = messages.findIndex((m) => m.type === "user" && m.turnId === turnId);
     if (idx === -1) return;
+    for (const msg of messages.slice(idx)) pendingText.delete(msg.id);
     messages.splice(idx);
     editingId = null;
   }
@@ -356,11 +415,11 @@
     }
   }
 
-  export function showThinking(): void {
-    // Only add if not already showing
-    if (!messages.some((m) => m.type === "thinking")) {
-      messages.push({ id: nextId++, type: "thinking" });
-    }
+  /** The thinking dots, with a short label such as "Resuming…" (none: just the dots). */
+  export function showThinking(label = ""): void {
+    const shown = messages.find((m) => m.type === "thinking");
+    if (shown) shown.text = label;
+    else messages.push({ id: nextId++, type: "thinking", text: label });
   }
 
   export function hideThinking(): void {
@@ -432,9 +491,13 @@
     if (file) void app.workspace.getLeaf(false).openFile(file);
   }
 
-  export function showAskUser(question: string): Promise<string> {
-    addAssistantMessage(question);
-    placeholder = "Type your answer...";
+  /**
+   * The next input answers an `ask_user` question. `question` is shown as
+   * the AI's message; without it the chat already shows it (back in the
+   * chat whose question waited).
+   */
+  export function showAskUser(question?: string): Promise<string> {
+    if (question !== undefined) addAssistantMessage(question);
     inputEnabled = true;
     textareaEl?.focus();
 
@@ -453,7 +516,6 @@
   export function setInputEnabled(enabled: boolean): void {
     if (!enabled) attachmentPreparation.cancel();
     inputEnabled = enabled;
-    placeholder = enabled ? "Ask anything..." : "Waiting for response...";
   }
 
   export function setBusy(value: boolean): void {
@@ -474,8 +536,16 @@
     }
   }
 
+  /** Messages sent while the answer runs, until the agent takes them in (or they run next). */
+  let queued = $state<string[]>([]);
+
+  export function setQueued(texts: string[]): void {
+    queued = texts;
+  }
+
   export function clearMessages(): void {
     attachmentPreparation.cancel();
+    pendingText.clear();
     messages = [];
     editingId = null;
     attachments = [];
@@ -553,6 +623,15 @@
 
     if (askUserResolve && (attachments.length > 0 || fileAttachments.length > 0)) {
       new Notice("Attachments are not supported when answering a tool question.");
+      return;
+    }
+    if (busy && !askUserResolve) {
+      // Added to the running turn (the view steers it); attachments and the
+      // selection stay for the next message.
+      if (!text) return;
+      inputText = "";
+      resetHeight();
+      onSend(text, null, [], []);
       return;
     }
 
@@ -1071,7 +1150,9 @@
                 aria-current={conversation.active ? "true" : undefined}
               >
                 <span class="ochatting-history-title">{conversation.title}</span>
-                <span class="ochatting-history-date">{formatDate(conversation.updatedAt)}</span>
+                <span class="ochatting-history-date">
+                  {#if conversation.running}<span class="ochatting-spinner ochatting-history-running" aria-hidden="true"></span>{/if}{conversation.running ? "Answering…" : formatDate(conversation.updatedAt)}
+                </span>
               </button>
               <button
                 class="ochatting-icon-btn"
@@ -1172,28 +1253,30 @@
           <div class="ochatting-msg ochatting-assistant-msg">
             <div class="ochatting-msg-content" use:markdown={msg.text ?? ""}></div>
           </div>
-          <div class="ochatting-msg-actions" class:ochatting-hover-actions={msg.id !== lastAnswerId}>
-            <button
-              class="ochatting-action-btn"
-              type="button"
-              onclick={() => onCopy(msg.text ?? "")}
-              aria-label="Copy answer"
-              title="Copy"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-            </button>
-            {#if msg.id === lastAnswerId && !busy && (!lastTurnId || editable(lastTurnId))}
+          {#if !msg.streaming}
+            <div class="ochatting-msg-actions" class:ochatting-hover-actions={msg.id !== lastAnswerId}>
               <button
                 class="ochatting-action-btn"
                 type="button"
-                onclick={onRegenerate}
-                aria-label="Regenerate answer"
-                title="Regenerate"
+                onclick={() => onCopy(msg.text ?? "")}
+                aria-label="Copy answer"
+                title="Copy"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"></path><polyline points="21 3 21 8 16 8"></polyline></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
               </button>
-            {/if}
-          </div>
+              {#if msg.id === lastAnswerId && !busy && (!lastTurnId || editable(lastTurnId))}
+                <button
+                  class="ochatting-action-btn"
+                  type="button"
+                  onclick={onRegenerate}
+                  aria-label="Regenerate answer"
+                  title="Regenerate"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"></path><polyline points="21 3 21 8 16 8"></polyline></svg>
+                </button>
+              {/if}
+            </div>
+          {/if}
         </div>
 
       {:else if msg.type === "tool-call" || msg.type === "tool-result"}
@@ -1296,6 +1379,7 @@
           <span class="ochatting-dot"></span>
           <span class="ochatting-dot"></span>
           <span class="ochatting-dot"></span>
+          {#if msg.text}<span class="ochatting-thinking-label" aria-live="polite">{msg.text}</span>{/if}
         </div>
       {/if}
     {/each}
@@ -1307,6 +1391,22 @@
       </button>
     {/if}
   </div>
+
+  {#if canContinue}
+    <div class="ochatting-continue-row" role="status">
+      <span>The last answer was interrupted.</span>
+      <button class="mod-cta" type="button" onclick={continueTurn}>Continue</button>
+    </div>
+  {/if}
+
+  {#if queued.length}
+    <!-- Sent while the answer runs; each moves into the chat when the agent takes it in -->
+    <div class="ochatting-queued" aria-live="polite">
+      {#each queued as text, i (i)}
+        <div class="ochatting-queued-item"><span class="ochatting-queued-label">Queued</span><span class="ochatting-queued-text">{text}</span></div>
+      {/each}
+    </div>
+  {/if}
 
   <!-- Selection pill -->
   {#if selection}
@@ -1398,7 +1498,7 @@
       class="ochatting-attach-btn"
       type="button"
       onclick={openImagePicker}
-      disabled={!inputEnabled || attachmentLoading || (attachments.length >= MAX_IMAGE_COUNT && fileAttachments.length >= MAX_FILE_COUNT)}
+      disabled={!inputEnabled || busy || attachmentLoading || (attachments.length >= MAX_IMAGE_COUNT && fileAttachments.length >= MAX_FILE_COUNT)}
       aria-label="Attach images or files"
       title="Attach images or files"
     >
@@ -1410,7 +1510,7 @@
       class:ochatting-input-scrollable={inputScrollable}
       bind:this={textareaEl}
       bind:value={inputText}
-      {placeholder}
+      placeholder={askUserResolve ? "Type your answer..." : busy ? "Add to the running task..." : "Ask anything..."}
       disabled={!inputEnabled}
       rows="1"
       enterkeyhint={enterSends ? "send" : "enter"}
@@ -1420,23 +1520,24 @@
       onclick={updateMention}
       onblur={closeMention}
     ></textarea>
-    {#if inputEnabled}
-      <button
-        class="ochatting-send-btn"
-        onclick={handleSend}
-        disabled={attachmentLoading || composerLocked}
-        aria-label="Send message"
-        title={composerLocked ? "Undo in progress..." : attachmentLoading ? "Preparing attachments..." : "Send message"}
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
-      </button>
-    {:else}
+    <!-- While a turn runs: Stop until there is text to add to it, then Send -->
+    {#if busy && !inputText.trim()}
       <button
         class="ochatting-send-btn ochatting-stop-btn"
         onclick={onStop}
         aria-label="Stop generation"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>
+      </button>
+    {:else}
+      <button
+        class="ochatting-send-btn"
+        onclick={handleSend}
+        disabled={attachmentLoading || composerLocked}
+        aria-label={busy && !askUserResolve ? "Add to the running task" : "Send message"}
+        title={composerLocked ? "Undo in progress..." : attachmentLoading ? "Preparing attachments..." : busy && !askUserResolve ? "Add to the running task" : "Send message"}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
       </button>
     {/if}
   </div>
@@ -1599,6 +1700,15 @@
   .ochatting-history-date {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
+  }
+
+  /* A chat whose answer runs in the background */
+  .ochatting-history-running {
+    width: 8px;
+    height: 8px;
+    margin-right: 4px;
+    border-width: 1.5px;
+    vertical-align: -1px;
   }
 
   .ochatting-history-rename {
@@ -1943,6 +2053,49 @@
     max-width: 90%;
   }
 
+  /* A turn cut off when Obsidian was ended: Continue */
+  .ochatting-continue-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--background-modifier-border);
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  /* Messages sent while the answer runs, until the agent takes them in */
+  .ochatting-queued {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 12px 0;
+    flex-shrink: 0;
+  }
+
+  .ochatting-queued-item {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    min-width: 0;
+  }
+
+  .ochatting-queued-label {
+    flex-shrink: 0;
+    font-weight: var(--font-semibold);
+    color: var(--text-faint);
+  }
+
+  .ochatting-queued-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .ochatting-stopped-note {
     align-self: flex-start;
     font-size: var(--font-ui-smaller);
@@ -2205,6 +2358,12 @@
     display: flex;
     gap: 4px;
     padding: 8px 12px;
+  }
+
+  .ochatting-thinking-label {
+    margin-left: 4px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
   }
 
   .ochatting-dot {

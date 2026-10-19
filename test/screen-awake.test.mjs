@@ -143,8 +143,8 @@ function chatSetup(provider) {
   const view = new api.ObsidianChatView({}, plugin);
   const ignore = () => {};
   view.chatContainer = {
-    addUserMessage: ignore, addAssistantMessage: ignore, addError: ignore, addToolCall: () => 0, updateToolResult: ignore,
-    showThinking: ignore, hideThinking: ignore, cancelAskUser: ignore, setInputEnabled: ignore, setBusy: ignore, foldTurn: ignore, focus: ignore, clearMessages: ignore, setTitle: ignore,
+    addUserMessage: ignore, addAssistantMessage: () => 0, updateAssistantMessage: ignore, removeMessage: ignore, addError: ignore, addToolCall: () => 0, updateToolResult: ignore,
+    showThinking: ignore, hideThinking: ignore, cancelAskUser: ignore, setInputEnabled: ignore, setBusy: ignore, foldTurn: ignore, updateConversations: ignore, setContinue: ignore, setQueued: ignore, focus: ignore, clearMessages: ignore, setTitle: ignore,
   };
   return { plugin, view };
 }

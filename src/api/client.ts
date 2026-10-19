@@ -1,8 +1,9 @@
-import type { ChatSettings, UnifiedMessage, UnifiedToolDef, UnifiedResponse } from "../types";
+import type { ChatSettings, UnifiedMessage, UnifiedToolDef, UnifiedResponse, StreamOptions } from "../types";
 import { sendAnthropicMessage } from "./anthropic";
 import { sendOpenAIMessage } from "./openai";
 import { sendChatGPTOAuthMessage } from "./chatgpt-oauth";
 import { ProviderError, retryAfterInMessage } from "./errors";
+import { activeServers } from "./mcp";
 
 /** HTTP statuses of a rate limit or an overload. */
 const RETRY_STATUSES = [429, 529];
@@ -27,7 +28,8 @@ const MAX_RETRY_DELAY_MS = 30_000;
  * Retries once on a rate limit or overload, decided by the HTTP status or
  * error code (not by the message text), after the wait the provider asks
  * for (`Retry-After`, else "try again in 11.054s" in the message). A usage
- * limit is not retried, nor a wait longer than 30 s.
+ * limit is not retried, nor a wait longer than 30 s, nor a request whose
+ * answer text is already on screen (a retry would show it twice).
  */
 export async function sendMessage(
   settings: ChatSettings,
@@ -35,22 +37,41 @@ export async function sendMessage(
   tools: UnifiedToolDef[],
   systemPrompt: string,
   shouldStop: () => boolean = () => false,
+  stream: StreamOptions = {},
 ): Promise<UnifiedResponse> {
-  const doSend = () => {
+  let shown = false;
+  const options: StreamOptions = {
+    signal: stream.signal,
+    onTextDelta: (text) => {
+      shown = true;
+      stream.onTextDelta?.(text);
+    },
+    // A provider-run tool (an MCP call) may have changed something: no retry either.
+    onServerTool: () => {
+      shown = true;
+      stream.onServerTool?.();
+    },
+  };
+  const doSend = async () => {
     if (shouldStop()) throw new Error("Request cancelled.");
-    if (settings.provider === "anthropic") {
-      return sendAnthropicMessage(settings, messages, tools, systemPrompt);
+    // Freeze exactly the server configuration whose uncertainty is saved.
+    // A backoff retry takes a fresh snapshot, including newly enabled servers.
+    const attempt = { ...settings, mcpServers: settings.mcpServers?.map(server => ({ ...server })) };
+    await stream.onRequestStarted?.(attempt.provider !== "chatgpt-oauth" && activeServers(attempt).length > 0);
+    if (shouldStop()) throw new Error("Request cancelled.");
+    if (attempt.provider === "anthropic") {
+      return sendAnthropicMessage(attempt, messages, tools, systemPrompt, options);
     }
-    if (settings.provider === "chatgpt-oauth") {
-      return sendChatGPTOAuthMessage(settings, messages, tools, systemPrompt, shouldStop);
+    if (attempt.provider === "chatgpt-oauth") {
+      return sendChatGPTOAuthMessage(attempt, messages, tools, systemPrompt, shouldStop, options);
     }
-    return sendOpenAIMessage(settings, messages, tools, systemPrompt);
+    return sendOpenAIMessage(attempt, messages, tools, systemPrompt, options);
   };
 
   try {
     return await doSend();
   } catch (e) {
-    if (!isRateLimit(e)) throw e;
+    if (!isRateLimit(e) || shown) throw e;
     const wait = e.retryAfterMs ?? retryAfterInMessage(e.message) ?? RETRY_DELAY_MS;
     // The user sees the error rather than a long silent wait.
     if (wait > MAX_RETRY_DELAY_MS) throw e;

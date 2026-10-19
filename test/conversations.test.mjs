@@ -1,9 +1,11 @@
 // Named conversations: the chat-state.json version 3 format and its
 // one-time migration, restoring the active conversation, titles, the caps
 // per conversation; new chat, switching, renaming and deleting through the
-// chat view, and that histories, OpenAI chaining and a stopped turn stay
-// within their conversation; the commands that start a new chat. Through
-// the real plugin and chat view with a fake Svelte component.
+// chat view, and that histories and OpenAI chaining stay within their
+// conversation; a turn that goes on in the background (its question waits
+// for the return, notices, deleting the chat stops it); the commands that
+// start a new chat. Through the real plugin and chat view with a fake
+// Svelte component.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 import { api, settings, text, call, response, transport, vaultApp } from './harness.mjs';
@@ -23,15 +25,17 @@ function fakeChat() {
     askUser: null,
     busy: false,
     addUserMessage(value, images = [], turnId) { chat.shown.push({ id: nextId++, type: 'user', text: value, images, turnId }); },
-    addAssistantMessage(value) { chat.shown.push({ id: nextId++, type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
+    updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
+    removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
     cutMessages(turnId) { const index = chat.shown.findIndex(m => m.type === 'user' && m.turnId === turnId); if (index >= 0) chat.shown.splice(index); },
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
     showThinking() {}, hideThinking() {},
-    showAskUser(question) { chat.addAssistantMessage(question); return new Promise(resolve => { chat.askUser = resolve; }); },
+    showAskUser(question) { if (question !== undefined) chat.addAssistantMessage(question); return new Promise(resolve => { chat.askUser = resolve; }); },
     cancelAskUser() { const resolve = chat.askUser; chat.askUser = null; resolve?.(''); },
-    setInputEnabled() {}, setBusy(value) { chat.busy = value; }, foldTurn() {},
+    setInputEnabled() {}, setBusy(value) { chat.busy = value; }, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {},
     clearMessages() { chat.shown = []; }, focus() {}, setModel() {},
     title: null, setTitle(value) { chat.title = value; },
     setSelection() {}, getSelection: () => null,
@@ -52,7 +56,9 @@ async function setup(provider, saved) {
   };
   const plugin = new api.ChatPlugin();
   plugin.app = app;
-  plugin.agent = new api.AgentLoop(app, settings(provider));
+  // New conversations' agent loops use the plugin's settings.
+  plugin.settings = { ...plugin.settings, ...settings(provider) };
+  plugin.agent = new api.AgentLoop(app, plugin.settings);
   await plugin.loadChatHistory();
   const view = new api.ObsidianChatView({}, plugin);
   const chat = fakeChat();
@@ -404,8 +410,8 @@ test('OpenAI: after a restart the open conversation replays in full once, then c
   assert.equal(requests[1].previous_response_id, 'resp_0');
 });
 
-for (const action of ['New chat', 'Switching', 'Deleting the chat']) {
-  test(`${action} stops a running turn; what it showed stays in its own conversation`, async () => {
+for (const action of ['New chat', 'Switching']) {
+  test(`${action}: the turn goes on; its question waits for the return and is answered there`, async () => {
     const { plugin, view, chat } = await setup('anthropic');
     answering('anthropic');
     await view.handleUserMessage('Other topic', null);
@@ -420,53 +426,158 @@ for (const action of ['New chat', 'Switching', 'Deleting the chat']) {
     while (!chat.askUser) await tick();
     const waiting = plugin.activeConversationId;
 
-    if (action === 'New chat') view.newChat();
-    else if (action === 'Switching') view.openConversation(other);
-    else view.deleteConversation(waiting);
+    if (action === 'New chat') view.newChat(); else view.openConversation(other);
     assert.equal(view.running, false);
     assert.equal(chat.busy, false);
-    // The input no longer answers the stopped turn's question.
+    // The input no longer answers the other chat's question.
     assert.equal(chat.askUser, null);
-    await asking;
     assert.equal(requests.length, 1);
-    assert.notEqual(plugin.activeConversationId, waiting);
 
     // The next message starts its own turn in the conversation shown now.
     await view.handleUserMessage('Next', null);
     assert.equal(requests.length, 2);
     assert.equal(userTurns(requests[1]).at(-1), 'Next');
     assert.equal(JSON.stringify(requests[1].messages).includes('Waiting question'), false);
+    const shownNow = plugin.activeConversationId;
 
-    const stopped = plugin.conversations.find(c => c.id === waiting);
-    if (action === 'Deleting the chat') {
-      assert.equal(stopped, undefined);
-      return;
-    }
-    // Back in the stopped conversation: its question is there, and its
-    // API history stays valid (the call has its cancelled result).
+    // Back: the turn still runs, its question is shown once and the input answers it.
     view.openConversation(waiting);
+    assert.equal(view.running, true);
+    assert.equal(chat.busy, true);
     assert.deepEqual(texts(chat.shown), ['Waiting question', 'Which note?']);
-    await view.handleUserMessage('Go on', null);
-    const sent = JSON.stringify(requests.at(-1).messages);
-    assert.ok(sent.includes('Tool execution cancelled before completion.'));
-    assert.deepEqual(userTurns(requests.at(-1)), ['Waiting question', 'Go on']);
+    assert.ok(chat.askUser);
+    chat.addUserMessage('Plan');
+    chat.askUser('Plan');
+    await asking;
+    assert.equal(view.running, false);
+    assert.deepEqual(texts(plugin.chatHistory), ['Waiting question', 'Which note?', 'Plan', 'B3']);
+    assert.ok(JSON.stringify(requests[2].messages).includes('Plan'));
+
+    view.openConversation(shownNow);
+    assert.deepEqual(texts(plugin.chatHistory).slice(-2), ['Next', 'B2']);
   });
 }
 
-test('A stopped request that answers after the switch adds nothing anywhere', async () => {
+test('A turn goes on in the background: the chat shown stays as it is, the list says Answering, the end lands in its chat with a notice', async () => {
   const { plugin, view, chat } = await setup('anthropic');
-  let answer;
-  transport(() => new Promise(resolve => { answer = resolve; }));
-  const running = view.handleUserMessage('Slow question', null);
-  while (!answer) await tick();
-  const slow = plugin.activeConversationId;
+  let finish;
+  const gate = new Promise(resolve => { finish = resolve; });
+  transport(async (body, index) => {
+    if (index === 0) {
+      await gate;
+      return response('anthropic', [text('Long answer')]);
+    }
+    return response('anthropic', [text(`B${index}`)], 'end_turn', index);
+  });
+  let listUpdates = 0;
+  chat.updateConversations = () => { listUpdates++; };
+  const running = view.handleUserMessage('Write a lot', null);
+  await tick();
+  const a = plugin.activeConversationId;
+  assert.equal(listUpdates, 1);
+
   view.newChat();
-  answer(response('anthropic', [text('Late answer')]));
+  await view.handleUserMessage('Quick one', null);
+  assert.deepEqual(texts(chat.shown), ['Quick one', 'B1']);
+  assert.deepEqual(view.turns.has(a), true);
+
+  finish();
   await running;
-  assert.deepEqual(chat.shown, []);
-  assert.deepEqual(plugin.chatHistory, []);
-  view.openConversation(slow);
-  assert.deepEqual(texts(chat.shown), ['Slow question']);
+  // Not shown here; it is in its own chat, and a notice says so.
+  assert.equal(globalThis.__notices.at(-1), 'Answer ready in "Write a lot".');
+  assert.equal(view.turns.has(a), false);
+  assert.deepEqual(texts(chat.shown), ['Quick one', 'B1']);
+  view.openConversation(a);
+  assert.deepEqual(texts(chat.shown), ['Write a lot', 'Long answer']);
+  assert.equal(view.running, false);
+});
+
+test('A question asked in the background says so in a notice', async () => {
+  const { plugin, view, chat } = await setup('anthropic');
+  let release;
+  transport((body, index) => index === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('ask', 'ask_user', { question: 'Which note?' })], 'tool_use')); })
+    : response('anthropic', [text('A2')], 'end_turn', index));
+  const asking = view.handleUserMessage('Ask me', null);
+  while (!release) await tick();
+  const a = plugin.activeConversationId;
+  view.newChat();
+  release();
+  while (!globalThis.__notices.length) await tick();
+  assert.deepEqual(globalThis.__notices, ['"Ask me" has a question for you.']);
+  assert.equal(chat.askUser, null);
+  view.openConversation(a);
+  chat.askUser('Plan');
+  await asking;
+  assert.deepEqual(texts(plugin.chatHistory), ['Ask me', 'Which note?', 'Plan', 'A2']);
+});
+
+for (const shown of [true, false]) {
+  test(`Deleting a chat stops its turn (${shown ? 'shown' : 'in the background'}); nothing of it lands anywhere`, async () => {
+    const { plugin, view, chat } = await setup('anthropic');
+    answering('anthropic');
+    await view.handleUserMessage('Other topic', null);
+    view.newChat();
+    await tick();
+
+    let answer;
+    const requests = transport(() => new Promise(resolve => { answer = resolve; }));
+    const running = view.handleUserMessage('Slow question', null);
+    while (!answer) await tick();
+    const slow = plugin.activeConversationId;
+    if (!shown) view.newChat();
+    view.deleteConversation(slow);
+    assert.equal(view.running, false);
+    assert.equal(view.turns.size, 0);
+    answer(response('anthropic', [text('Late answer')]));
+    await running;
+    assert.equal(requests.length, 1);
+    assert.equal(plugin.conversations.some(c => c.id === slow), false);
+    assert.equal(JSON.stringify(plugin.conversations).includes('Late answer'), false);
+    assert.equal(globalThis.__notices.some(n => n.startsWith('Answer ready')), false);
+  });
+}
+
+test('Typed into a turn after its last step while it runs in the background: runs when its chat is shown again', async () => {
+  const { plugin, view, chat } = await setup('anthropic');
+  let release;
+  const requests = transport((body, index) => index === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('First.')])); })
+    : response('anthropic', [text(`A${index + 1}`)], 'end_turn', index));
+  const first = view.handleUserMessage('First', null);
+  while (!release) await tick();
+  await view.handleUserMessage('Also this', null);
+  const a = plugin.activeConversationId;
+  view.newChat();
+  release();
+  await first;
+  assert.equal(requests.length, 1);
+  // Saved with its chat, not only in the view, until the chat is shown.
+  assert.deepEqual(plugin.conversations.find(c => c.id === a).pendingMessages, ['Also this']);
+  view.openConversation(a);
+  while (view.running || requests.length < 2) await tick();
+  assert.deepEqual(userTurns(requests[1]).at(-1), 'Also this');
+  assert.deepEqual(texts(plugin.chatHistory), ['First', 'First.', 'Also this', 'A2']);
+});
+
+test('Switching during an edit not yet answered: the original turn comes back, the edit and what was typed go back to the input, after the new chat is shown', async () => {
+  const { plugin, view, chat } = await setup('anthropic');
+  // The draft lives in the input: rendering a conversation clears what it holds besides the text.
+  chat.restoreDraft = (text, selection, images, files) => { chat.draft = { text, images, files }; };
+  chat.clearMessages = () => { chat.shown = []; chat.draft = undefined; };
+  let hold = false;
+  const requests = transport((body, index) => hold ? new Promise(() => {}) : response('anthropic', [text(`A${index + 1}`)], 'end_turn', index));
+  await view.handleUserMessage('Q1', null);
+  const a = plugin.activeConversationId;
+  hold = true;
+  const edit = view.editMessage(plugin.chatHistory[0].turnId, 'Q1 edited carefully');
+  while (requests.length < 2) await tick();
+  await view.handleUserMessage('queued follow-up', null);
+  view.newChat();
+  await edit;
+  assert.notEqual(plugin.activeConversationId, a);
+  assert.deepEqual(chat.draft?.text, 'Q1 edited carefully\n\nqueued follow-up');
+  assert.deepEqual(texts(plugin.conversations.find(c => c.id === a).chatHistory), ['Q1', 'A1']);
 });
 
 test('Edit and regenerate work within the conversation they belong to', async () => {

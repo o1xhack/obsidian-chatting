@@ -1,9 +1,9 @@
 // The chat view and the plugin's chat commands with a fake Svelte component:
-// the API history cap, what the chat history saves, Stop and Clear, Copy
-// transcript, and commands waiting for the view.
+// the API history cap, what the chat history saves, Stop and Clear, a
+// streamed answer, Copy transcript, and commands waiting for the view.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, settings, text, call, image, response, transport, vaultApp, callbacks } from './harness.mjs';
+import { api, settings, text, call, image, response, transport, vaultApp, callbacks, streamEvents, sseText } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -19,14 +19,16 @@ function fakeChat() {
     addUserMessage(value, images = [], turnId) { chat.shown.push({ id: nextId++, type: 'user', text: value, images, turnId }); },
     cutMessages(turnId) { const at = chat.shown.findIndex(row => row.turnId === turnId); if (at !== -1) chat.shown.splice(at); },
     restoreDraft(text, selection, images, files) { chat.draft = { text, selection, images, files }; },
-    addAssistantMessage(value) { chat.shown.push({ id: nextId++, type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
+    updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
+    removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
     showThinking() {}, hideThinking() {},
     showAskUser(question) { chat.addAssistantMessage(question); return new Promise(resolve => { chat.askUser = resolve; }); },
     cancelAskUser() { const resolve = chat.askUser; chat.askUser = null; resolve?.(''); },
-    setInputEnabled() {}, setBusy() {}, foldTurn() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
+    setInputEnabled() {}, setBusy() {}, foldTurn() {}, updateConversations() {}, setContinue() {}, setQueued() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
     setSelection() {}, getSelection: () => null,
   };
   return chat;
@@ -185,6 +187,48 @@ for (const action of ['Stop', 'Clear']) {
   });
 }
 
+test('A streamed answer grows in one message; Stop keeps what arrived, in the chat and its history', async () => {
+  api.resetStreamTransport();
+  const { plugin, view, chat } = await chatSetup('anthropic');
+  const events = streamEvents('anthropic', [text('Partial answer')]);
+  const open = events.slice(0, events.findIndex(event => event.type === 'content_block_stop'));
+  // The answer's first text arrives, then the stream stays open.
+  globalThis.__fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(sseText(open))); } }), { status: 200 });
+  try {
+    const turn = view.handleUserMessage('Q', null);
+    await until(() => chat.shown.some(m => m.type === 'assistant' && m.text === 'Partial answer'));
+    view.handleStop();
+    await turn;
+    const shown = [['user', 'Q'], ['assistant', 'Partial answer']];
+    assert.deepEqual(chat.shown.map(m => [m.type, m.text]), shown);
+    // Text on screen: no "Stopped." row.
+    assert.deepEqual(plugin.chatHistory.map(e => [e.type, e.text]), shown);
+  } finally {
+    delete globalThis.__fetch;
+  }
+});
+
+test('Regenerate, then Stop while the new answer streams: the streamed text stays, the old answer does not come back', async () => {
+  api.resetStreamTransport();
+  const { plugin, view, chat } = await chatSetup('anthropic');
+  answering('anthropic');
+  await view.handleUserMessage('Q', null);
+  // The first answer came through requestUrl (fetch looked blocked): fetch again now.
+  api.resetStreamTransport();
+  const events = streamEvents('anthropic', [text('New partial')]);
+  const open = events.slice(0, events.findIndex(event => event.type === 'content_block_stop'));
+  globalThis.__fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(sseText(open))); } }), { status: 200 });
+  try {
+    const turn = view.regenerate();
+    await until(() => chat.shown.some(m => m.type === 'assistant' && m.text === 'New partial'));
+    view.handleStop();
+    await turn;
+    assert.deepEqual(plugin.chatHistory.map(e => [e.type, e.text]), [['user', 'Q'], ['assistant', 'New partial']]);
+  } finally {
+    delete globalThis.__fetch;
+  }
+});
+
 test('Copy transcript: refused while the conversation is empty, else its Markdown, also with the chat panel closed', async () => {
   const { plugin, view } = await chatSetup('anthropic');
   answering('anthropic');
@@ -270,7 +314,8 @@ for (const action of ['Stop', 'Clear']) {
   test(`${action}: an old request completing does not unlock a newer running turn`, async () => {
     const { view, chat } = await chatSetup('anthropic');
     const pending = [];
-    chat.setInputEnabled = enabled => { chat.enabled = enabled; };
+    // The input stays usable while a turn runs (typing adds to it); busy is the lock.
+    chat.setBusy = busy => { chat.busy = busy; };
     transport(() => new Promise(resolve => pending.push(resolve)));
     const old = view.handleUserMessage('Old', null);
     await until(() => pending.length === 1);
@@ -280,11 +325,11 @@ for (const action of ['Stop', 'Clear']) {
     pending[0](response('anthropic', [text('late old answer')]));
     await old;
     assert.equal(view.running, true);
-    assert.equal(chat.enabled, false);
+    assert.equal(chat.busy, true);
     pending[1](response('anthropic', [text('new answer')]));
     await next;
     assert.equal(view.running, false);
-    assert.equal(chat.enabled, true);
+    assert.equal(chat.busy, false);
   });
 }
 

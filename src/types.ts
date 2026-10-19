@@ -174,6 +174,15 @@ export interface UnifiedResponse {
   serverCalls?: ServerToolCall[];
 }
 
+/** Per request: where streamed answer text goes, and how Stop cancels it. */
+export interface StreamOptions {
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>;
+  onTextDelta?: (text: string) => void;
+  /** The provider started a tool with possible effects (an MCP call): the request must not be sent again. */
+  onServerTool?: () => void;
+  signal?: AbortSignal;
+}
+
 // ─── Conversation Context ───────────────────────────────────────────────────
 
 export interface ConversationContext {
@@ -248,6 +257,8 @@ export interface ConversationSummary {
   updatedAt: number;
   /** The conversation shown now. */
   active: boolean;
+  /** A turn runs in it (also in the background). */
+  running?: boolean;
 }
 
 // ─── Tool Execution ─────────────────────────────────────────────────────────
@@ -281,7 +292,11 @@ export interface ViewTarget {
 // ─── Agent Loop Callbacks ───────────────────────────────────────────────────
 
 export interface AgentCallbacks {
+  /** Persist uncertainty before a request capable of external side effects. */
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>;
   onThinking: () => void;
+  /** Answer text as it streams in; `onResponse` later gives the whole text. */
+  onTextDelta?: (text: string) => void;
   onToolCall: (name: string, input: Record<string, unknown>) => void;
   onToolResult: (name: string, result: ToolResult) => void;
   onResponse: (text: string) => void;
@@ -289,6 +304,14 @@ export interface AgentCallbacks {
   onError: (error: string) => void;
   /** A first request rejected locally before transport; the UI can restore its unsent draft. */
   onPreflightRejected?: (error: string) => void;
+  /** A message the user added to the running turn (`AgentLoop.steer`) went out with its next step. */
+  onSteered?: (text: string) => void;
+  /**
+   * A request that failed or stalled in the background is sent again now
+   * that Obsidian is back; text streamed by the failed attempt is to be
+   * dropped.
+   */
+  onResuming?: () => void;
   /** Where the turn's tools record their vault changes (undo per answer). */
   changes?: ChangeLog;
 }

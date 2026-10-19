@@ -195,7 +195,9 @@ function fakeChat() {
   const chat = {
     shown: [],
     addUserMessage(value, images = [], turnId) { chat.shown.push({ id: nextId++, type: 'user', text: value, turnId }); },
-    addAssistantMessage(value) { chat.shown.push({ id: nextId++, type: 'assistant', text: value }); },
+    addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
+    updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
+    removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
     cutMessages(turnId) { const index = chat.shown.findIndex(m => m.type === 'user' && m.turnId === turnId); if (index >= 0) chat.shown.splice(index); },
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
@@ -206,7 +208,7 @@ function fakeChat() {
     showThinking() {}, hideThinking() {}, cancelAskUser() {},
     restoreDraft(text, selection, images, files) { chat.draft = { text, selection, images, files }; },
     setComposerLocked(value) { chat.composerLocked = value; },
-    setInputEnabled() {}, setBusy(value) { chat.busy = value; }, folded: [], foldTurn(turnId) { chat.folded.push(turnId); }, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
+    setInputEnabled() {}, setBusy(value) { chat.busy = value; }, folded: [], foldTurn(turnId) { chat.folded.push(turnId); }, updateConversations() {}, setContinue() {}, setQueued() {}, clearMessages() { chat.shown = []; }, focus() {}, setModel() {}, setTitle() {},
     setSelection() {}, getSelection: () => null,
   };
   return chat;
