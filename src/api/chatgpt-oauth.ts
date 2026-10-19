@@ -93,6 +93,12 @@ export function clearChatGPTOAuthState(): void {
   /* no-op: history lives entirely in AgentLoop.messages */
 }
 
+/** Account identity for deciding whether encrypted compaction can be replayed. */
+export async function chatgptReplayIdentity(): Promise<string | undefined> {
+  const credential = await oauthService?.getUsableCredential();
+  return credential ? catalogIdentity("chatgpt-oauth", credential.accountId || credential.accessToken) : undefined;
+}
+
 export async function sendChatGPTOAuthMessage(
   settings: ChatSettings,
   messages: UnifiedMessage[],

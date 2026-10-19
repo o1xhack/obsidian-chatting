@@ -98,6 +98,8 @@ export interface ChatState {
 
 /** A chat file (`chats/<id>.json`) as read. */
 export interface ChatFile {
+  /** A newer-format copy must win recovery without being parsed or overwritten. */
+  unsupported?: boolean;
   /** When it was written (ms); tells the newer of the two copies. */
   savedAt?: number;
   /** Written over a deleted chat's file that couldn't be removed. */

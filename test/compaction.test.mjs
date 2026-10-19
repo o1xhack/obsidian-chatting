@@ -290,3 +290,71 @@ test('ChatGPT: a refused context_management is dropped and the request sent agai
   assert.match(firstUserText(requests[3]), /^\[Summary of the earlier part of this conversation[\s\S]*Summary of Q1\./);
   assert.doesNotMatch(JSON.stringify(requests[3].input), /"Q1"|A1/);
 });
+
+test('Manual compaction blocks editing and sending, follows chat switches, and Stop cancels it', async () => {
+  const { plugin, view, chat } = await chatSetup('openai');
+  plugin.agent.importMessages([{ role: 'user', content: 'Remember the blue door', turnId: 't1' }]);
+  plugin.chatHistory.push({ type: 'user', text: 'Remember the blue door', turnId: 't1' });
+  let finish;
+  plugin.agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  let restored;
+  chat.restoreDraft = (...args) => { restored = args; };
+  const busy = [];
+  chat.setBusy = value => busy.push(value);
+  const original = plugin.activeConversationId;
+  const compacting = view.compactNow();
+  assert.equal(view.running, true);
+  await view.handleUserMessage('Keep this unsent', null);
+  assert.equal(restored[0], 'Keep this unsent');
+  await view.editMessage('t1', 'replace');
+  assert.equal(plugin.chatHistory[0].text, 'Remember the blue door');
+  view.newChat();
+  assert.equal(view.running, false);
+  await view.openConversation(original);
+  assert.equal(view.running, true);
+  view.handleStop();
+  assert.equal(view.running, false);
+  finish('Stale summary');
+  await compacting;
+  assert.equal(plugin.agent.exportMessages()[0].content, 'Remember the blue door');
+  assert.equal(busy.at(-1), false);
+});
+
+test('Readable summaries retain external action receipts from native MCP history', () => {
+  const value = api.summary.transcript([{ role: 'assistant', content: [], replay: { provider: 'openai', items: [
+    { type: 'mcp_call', id: 'm1', server_label: 'tasks', name: 'create_task', arguments: '{"title":"Already created"}', output: '{"id":"created-1"}' },
+  ] } }], 10000);
+  assert.match(value, /Remote action tasks\/create_task/);
+  assert.match(value, /completed/);
+  assert.match(value, /created-1/);
+});
+
+test('Changing an API key creates a portable summary before replaying encrypted history', async () => {
+  const original = settings('openai');
+  const requests = transport((body, index) => isSummaryRequest(body)
+    ? sse(streamEvents('openai', [text('Portable remembered fact: cobalt.')], 'end_turn', index))
+    : index === 1 ? compactedResponsesAnswer('openai', 'A2', index) : sse(streamEvents('openai', [text('A')], 'end_turn', index)));
+  const agent = new api.AgentLoop(vaultApp().app, original);
+  await agent.run('The fact is cobalt', callbacks());
+  await agent.run('Remember it', callbacks());
+  agent.settings = { ...original, apiKey: 'new-account-key' };
+  await agent.run('What was the fact?', callbacks());
+  assert.ok(isSummaryRequest(requests[2]));
+  assert.match(JSON.stringify(requests[3].input), /Portable remembered fact/);
+  assert.doesNotMatch(JSON.stringify(requests[3].input), /encrypted_content/);
+});
+
+test('A context overflow after an MCP action preserves its receipt and never summarizes or re-posts', async () => {
+  const requests = transport((body, index) => index === 0 ? sse(streamEvents('openai', [text('Earlier answer')], 'end_turn', index)) : sse([
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'mcp_call', id: 'm1', server_label: 'tasks', name: 'create', arguments: '{}', output: 'created-once' } },
+    { type: 'error', code: 'context_length_exceeded', message: 'maximum context length exceeded' },
+  ]));
+  const agent = new api.AgentLoop(vaultApp().app, settings('openai'));
+  await agent.run('Earlier turn', callbacks());
+  const cb = callbacks();
+  await agent.run('Create once', cb);
+  assert.equal(requests.length, 2);
+  assert.equal(requests.filter(isSummaryRequest).length, 0);
+  assert.match(JSON.stringify(agent.exportMessages()), /created-once/);
+  assert.ok(cb.errors.length);
+});

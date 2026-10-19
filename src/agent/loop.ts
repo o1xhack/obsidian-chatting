@@ -16,7 +16,7 @@ import { sendMessage } from "../api/client";
 import { ProviderError, StreamCutError } from "../api/errors";
 import { isBuffered, lastChunkAt } from "../api/stream";
 import { clearOpenAIState } from "../api/openai";
-import { chatgptCompacts, clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { chatgptCompacts, chatgptReplayIdentity, clearChatGPTOAuthState } from "../api/chatgpt-oauth";
 import { catalogModel, loadModelDetails, type ModelOption } from "../api/model-catalog";
 import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
@@ -32,6 +32,7 @@ import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
 import { appLifecycle } from "../platform/lifecycle";
 import { afterCompaction, compactThreshold, summaryMessage } from "./compaction";
+import { catalogIdentity } from "../api/model-catalog";
 import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryRequest } from "./summary";
 
 /** The turn ID of a summary message (it starts its own turn, with no visible entry). */
@@ -300,9 +301,17 @@ export class AgentLoop {
       const index = this.messages.map((message) => !!message.compaction).lastIndexOf(true);
       const marker = this.messages[index];
       const replay = marker?.replay;
-      const replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
+      let replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
+      if (replayable && replay?.identity && marker?.compaction && !marker.compaction.summary) {
+        const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() :
+          await catalogIdentity(settings.provider, settings.apiKey);
+        replayable = replay.identity === identity;
+        if (isStopped()) return;
+      }
       if (marker?.compaction && !marker.compaction.summary && !replayable && index > 0) {
-        marker.compaction = { summary: await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage) };
+        const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
+        if (isStopped()) return;
+        marker.compaction = { summary };
         debugLog(this.app, "COMPACTED", { reason: "provider switch" });
       }
       const option = catalogModel(settings.provider, settings.model);
@@ -642,7 +651,7 @@ export class AgentLoop {
           response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
         } catch (e) {
           if (isStopped()) return;
-          if (!overflowCompacted && isContextOverflow(e)) {
+          if (!overflowCompacted && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
             overflowCompacted = true;
             callbacks.onThinking();
             if (await this.compactForOverflow(turnSettings, callbacks, isStopped)) continue;

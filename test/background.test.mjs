@@ -611,3 +611,13 @@ for (const provider of ['anthropic', 'openai']) test(`${provider}: enabling MCP 
   assert.equal(restored.chat.continueShown, false);
   assert.ok(restored.chat.shown.some(row => /may have run remote MCP tools/.test(row.text)));
 });
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: failed durable MCP checkpoint prevents the provider POST`, async () => {
+  const { plugin, view } = await chatSetup(provider);
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  plugin.app.vault.adapter.write = async () => { throw new Error('disk full'); };
+  const requests = transport(() => response(provider, [text('Must never arrive')]));
+  await view.handleUserMessage('Create a remote item', null);
+  assert.equal(requests.length, 0);
+  assert.ok(plugin.chatHistory.some(row => row.type === 'error' && /checkpoint/.test(row.text)));
+});

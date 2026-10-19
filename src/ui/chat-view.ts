@@ -231,6 +231,7 @@ export class ObsidianChatView extends ItemView {
    * or replace it, and a stopped turn that ends late changes nothing.
    */
   private turns = new Map<string, RunningTurn>();
+  private compactions = new Map<string, { agent: AgentLoop }>();
   /** Resolves once onOpen() has mounted the chat UI, or failed to. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
@@ -256,7 +257,7 @@ export class ObsidianChatView extends ItemView {
 
   /** The shown conversation runs a turn. */
   get running(): boolean {
-    return !!this.turn;
+    return !!this.turn || this.compactions.has(this.plugin.activeConversationId);
   }
 
   /** The chat UI while it shows `turn`'s conversation (and `turn` still runs there). */
@@ -468,11 +469,13 @@ export class ObsidianChatView extends ItemView {
    */
   async compactNow(): Promise<void> {
     const chat = this.chatContainer;
-    if (!chat || this.running) return;
+    if (!chat || this.running || this.undoing) return;
     const conversation = this.plugin.activeConversation;
     const agent = this.plugin.agentFor(conversation);
     // Kept by the plugin if the user switches away meanwhile.
     const release = agent.hold();
+    const operation = { agent };
+    this.compactions.set(conversation.id, operation);
     chat.setBusy(true);
     chat.setInputEnabled(false);
     chat.showThinking("Summarizing…");
@@ -491,7 +494,9 @@ export class ObsidianChatView extends ItemView {
       new Notice(`Couldn't summarize the chat: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       release();
-      if (this.plugin.activeConversation === conversation) {
+      const current = this.compactions.get(conversation.id) === operation;
+      if (current) this.compactions.delete(conversation.id);
+      if (current && this.plugin.activeConversation === conversation && !this.running) {
         chat.hideThinking();
         this.renderHistory();
         chat.setBusy(false);
@@ -526,6 +531,8 @@ export class ObsidianChatView extends ItemView {
 
   async onClose(): Promise<void> {
     this.handleStop();
+    for (const { agent } of this.compactions.values()) agent.abort();
+    this.compactions.clear();
     // The turns in the background stop too: they show and save through this view.
     for (const turn of [...this.turns.values()]) this.stopTurn(turn);
     if (this.chatContainer) {
@@ -622,6 +629,8 @@ export class ObsidianChatView extends ItemView {
     if (this.undoing) return;
     const active = id === this.plugin.activeConversationId;
     // Its turn stops, shown or not.
+    this.compactions.get(id)?.agent.abort();
+    this.compactions.delete(id);
     const turn = this.turns.get(id);
     if (turn) this.stopTurn(turn);
     await this.plugin.deleteConversation(id);
@@ -640,8 +649,10 @@ export class ObsidianChatView extends ItemView {
     this.renderHistory();
     chat.setTitle(this.plugin.activeConversation.title);
     const turn = this.turn;
-    chat.setInputEnabled(true);
-    chat.setBusy(!!turn);
+    const compacting = this.compactions.has(this.plugin.activeConversationId);
+    chat.setInputEnabled(!compacting);
+    chat.setBusy(!!turn || compacting);
+    if (compacting) chat.showThinking("Summarizing…");
     chat.setQueued([...turn?.queued ?? []]);
     if (turn?.ask) this.askNow(turn);
     chat.focus();
@@ -662,7 +673,7 @@ export class ObsidianChatView extends ItemView {
    * original turn comes back.
    */
   async editMessage(turnId: string, text: string): Promise<void> {
-    if (this.undoing || !this.chatContainer) return;
+    if (this.undoing || !this.chatContainer || this.compactions.has(this.plugin.activeConversationId)) return;
     const running = this.turn;
     if (running) this.stopTurn(running);
     const history = this.plugin.chatHistory;
@@ -735,7 +746,7 @@ export class ObsidianChatView extends ItemView {
     rollback?: () => void
   ): Promise<void> {
     // An undo is running: the message waits in the input.
-    if (this.undoing) {
+    if (this.undoing || this.compactions.has(this.plugin.activeConversationId)) {
       this.chatContainer?.restoreDraft?.(text, selection, images, files);
       new Notice("Please wait for the current response to complete.");
       return;
@@ -875,7 +886,7 @@ export class ObsidianChatView extends ItemView {
         onRequestStarted: (remoteEffectsPossible) => {
           if (isCurrent() && conversation.pendingTurn) conversation.pendingTurn.remoteEffectsPossible = remoteEffectsPossible;
           // Flush the marker before an MCP-capable POST, including retries.
-          if (remoteEffectsPossible) return this.plugin.saveChatHistory();
+          if (remoteEffectsPossible) return this.plugin.checkpointChatHistory();
         },
         onPreflightRejected: (error) => {
           turn.started = false;
@@ -1257,6 +1268,10 @@ export class ObsidianChatView extends ItemView {
   }
 
   private handleStop(): void {
+    const id = this.plugin.activeConversationId;
+    this.compactions.get(id)?.agent.abort();
+    this.compactions.delete(id);
+    this.chatContainer?.hideThinking();
     const turn = this.turn;
     // Nothing of the answer is on screen yet: say that the turn was stopped.
     const silent = !!turn && !turn.answerShown;

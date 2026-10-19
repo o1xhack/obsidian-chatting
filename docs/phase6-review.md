@@ -1,0 +1,23 @@
+# Phase 6: long conversations and compaction (0.10.0)
+
+Scope: PR #44 `c5dd3c1` and #45 `5f568d5`, merged individually onto 0.9.0 (`44b6a36`) with author ancestry preserved. Voice PR #46 is excluded.
+
+## Behavior and integration fixes
+
+The header shows context usage, accumulated tokens and available API pricing. Subscription usage shows tokens, without claiming an API cost. Long chats compact at a configurable threshold using provider compaction where available, with a tool-free readable summary as fallback. Compact now keeps the full visible conversation while replacing the model's earlier context. Turns outside retained API context cannot be edited or regenerated. Folder instruction provenance is rediscovered after compaction. Summaries include completed remote MCP receipts; a context overflow after possible remote effects cannot trigger a summary and re-post.
+
+Saved chat format is version 4: chat-state.json contains the index, and chats/<id>.json contains each conversation. Changed chats and the index use a next copy before the primary; loading takes the newer whole copy. Full visible history is retained; the view starts at the last 20 turns and loads earlier pages. Files are loaded lazily and unchanged chat files are not rewritten merely by opening them. Existing attachment/text/request budgets remain enforced for new or changed payloads.
+
+Migration preserves the old whole-state file before any replacement. A backup failure blocks saves until restart. Downgrade migration preserves both raw per-chat copies before replacing them; a future-format copy is protected regardless of its timestamp. A lone next file recovers after an interrupted first save. Deletion markers carry timestamps so an interrupted deletion does not resurrect the old primary. Conversation IDs cannot collide with next/backup filenames. Asynchronous navigation discards stale open completions.
+
+Manual compaction belongs to its conversation, blocks edits and sends until finished, and supports Stop. Switching chats retains its busy state; stopped completion cannot replace history or clobber a later run. Account/key changes require a portable summary before reusing encrypted compaction. MCP-capable requests require a successful durable checkpoint before the provider POST; a storage failure prevents remote dispatch.
+
+## Validation
+
+684 automated tests cover the production modules, including migration failure/corruption/future-format recovery, interrupted deletion, lazy-open races, compaction Stop, account changes, remote receipts and failed durable MCP checkpoints. TypeScript, Svelte (zero errors/warnings) and production build pass.
+
+Native Mac Obsidian passed 60 checks against the production bundle and mounted Svelte UI: all nine existing chats retained identical visible and API histories during v3 to v4 migration, the backup exists, paging and manual compaction work, and streaming/background/Continue/MCP protections still hold. All 1,809 existing visible vault files stayed hash-unchanged. The connected ChatGPT subscription (gpt-6.1-sol) completed a real manual summary and recalled a test fact afterward; reloading retained login, compacted context and a further successful reply. No live tools ran. Evidence: [phase6-qa.json](phase6-qa.json).
+
+API-key provider calls and native threshold compaction responses are simulated. No physical mobile-device acceptance is claimed; iPhone Air is not operated. Exact-current-head Codex review, CI, Community preview, downloaded release assets and formal Community build verification are final release gates.
+
+References: [OpenAI compaction](https://developers.openai.com/api/docs/guides/compaction), [Anthropic threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold). The ChatGPT/Codex backend is a distinct endpoint; the live manual-summary test does not prove its threshold compaction behavior.

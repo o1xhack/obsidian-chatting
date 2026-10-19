@@ -1,0 +1,124 @@
+{
+  "version": "0.10.0",
+  "status": "candidate-validated-awaiting-final-review",
+  "scope": {
+    "pullRequests": [
+      44,
+      45
+    ],
+    "excludedPullRequests": [
+      46
+    ],
+    "baseline": "44b6a364c5fc074823eedffabccce438151143d9",
+    "chatStateVersion": 4
+  },
+  "automated": {
+    "tests": 684,
+    "passed": 684,
+    "typescript": "pass",
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "build": "pass"
+  },
+  "desktop": {
+    "version": "0.10.0",
+    "scope": "native Mac Obsidian, production main.js, mounted Svelte UI; mocked provider transport",
+    "checks": [
+      "candidate-loaded",
+      "upgrade-visible-history",
+      "upgrade-api-history",
+      "upgrade-conversations",
+      "migration-chat-present-chat-mvair8bi-wuit1j",
+      "migration-visible-chat-mvair8bi-wuit1j",
+      "migration-api-chat-mvair8bi-wuit1j",
+      "migration-chat-present-chat-mvair8k5-alwxd3",
+      "migration-visible-chat-mvair8k5-alwxd3",
+      "migration-api-chat-mvair8k5-alwxd3",
+      "migration-chat-present-chat-mvairf61-n5zkgt",
+      "migration-visible-chat-mvairf61-n5zkgt",
+      "migration-api-chat-mvairf61-n5zkgt",
+      "migration-chat-present-chat-mvais31v-kqrs9f",
+      "migration-visible-chat-mvais31v-kqrs9f",
+      "migration-api-chat-mvais31v-kqrs9f",
+      "migration-chat-present-chat-mvaisxxg-wwlz1i",
+      "migration-visible-chat-mvaisxxg-wwlz1i",
+      "migration-api-chat-mvaisxxg-wwlz1i",
+      "migration-chat-present-chat-mvblwe0n-6dzw3w",
+      "migration-visible-chat-mvblwe0n-6dzw3w",
+      "migration-api-chat-mvblwe0n-6dzw3w",
+      "migration-chat-present-chat-mvbmo954-btt9ae",
+      "migration-visible-chat-mvbmo954-btt9ae",
+      "migration-api-chat-mvbmo954-btt9ae",
+      "migration-chat-present-chat-mvfrilpz-cosixx",
+      "migration-visible-chat-mvfrilpz-cosixx",
+      "migration-api-chat-mvfrilpz-cosixx",
+      "migration-chat-present-chat-mvfrimzj-ixpz4j",
+      "migration-visible-chat-mvfrimzj-ixpz4j",
+      "migration-api-chat-mvfrimzj-ixpz4j",
+      "migration-index-v4",
+      "migration-v3-backup",
+      "stream-visible-before-completion",
+      "composer-usable-during-answer",
+      "queue-chip-rendered",
+      "steering-in-next-provider-step",
+      "steered-answer-saved",
+      "background-does-not-switch-active-chat",
+      "background-output-not-in-foreground",
+      "background-answer-owned-by-origin",
+      "completed-background-answer-rendered-on-return",
+      "stop-aborts-request",
+      "stop-keeps-partial-text",
+      "mcp-stream-error-no-retry",
+      "mcp-stream-error-receipt-saved",
+      "mcp-receipt-step-rendered",
+      "continue-button-rendered",
+      "continue-without-duplicate-user-turn",
+      "continue-clears-pending-marker",
+      "restart-mcp-uncertainty-warning",
+      "restart-mcp-continue-disabled",
+      "native-last-20-turns",
+      "native-load-earlier-turns",
+      "native-manual-compaction",
+      "native-compacted-note",
+      "native-375px-no-horizontal-overflow",
+      "real-chatgpt-login-preserved",
+      "synthetic-qa-original-history-preserved",
+      "protected-files-unchanged"
+    ],
+    "mainSha256": "0ed211539ad35a634bc0ce3970d6889fc2a187d12091ed7631d4e0edef879b89",
+    "protectedFiles": {
+      "checked": 1809,
+      "changed": 0
+    }
+  },
+  "liveChatGPT": {
+    "version": "0.10.0",
+    "provider": "chatgpt-oauth",
+    "model": "gpt-6.1-sol",
+    "scope": "real ChatGPT subscription, manual compaction and continuation, no tools",
+    "checks": [
+      "real-initial-reply",
+      "real-compaction-kept-fact",
+      "compacted-note-visible",
+      "real-followup-after-compaction",
+      "no-real-tools",
+      "real-usage-counted"
+    ],
+    "toolCount": 0,
+    "conversationId": "chat-mvfw4yve-i36mxu",
+    "passed": true
+  },
+  "reloadChatGPT": {
+    "version": "0.10.0",
+    "model": "gpt-6.1-sol",
+    "loginRetained": true,
+    "compactedContextRetained": true,
+    "reloadReply": true,
+    "passed": true
+  },
+  "limitations": [
+    "Anthropic/OpenAI API-key transport is simulated; no configured API keys.",
+    "Physical iPhone Air was not operated; narrow native desktop rendering is not mobile-device evidence.",
+    "Manual ChatGPT compaction was tested live; native threshold compaction uses simulated provider responses."
+  ]
+}

@@ -1028,3 +1028,28 @@ test('Retention during an in-flight chained response forces replay of the bounde
   assert.match(serialized, /older chat history/);
   assert.doesNotMatch(serialized, /"filename":"1.pdf"/);
 });
+
+test('An old lazy-open completion cannot replace a newer navigation choice', async () => {
+  const { plugin, view, app } = await setup('anthropic');
+  const files = app.vault.adapter;
+  answering('anthropic');
+  await view.handleUserMessage('Chat A', null);
+  const aid = plugin.activeConversationId;
+  view.newChat();
+  await view.handleUserMessage('Chat B', null);
+  const bid = plugin.activeConversationId;
+  await plugin.saveChatHistory();
+  const restored = await reload(files);
+  const read = files.read;
+  let finish;
+  files.read = path => path === chatPath(aid) ? new Promise(resolve => { finish = () => read(path).then(resolve); }) : read(path);
+  const earlier = restored.openConversation(aid);
+  for(let i=0;i<100&&!finish;i++) await tick();
+  assert.ok(finish);
+  restored.startNewConversation();
+  const current = restored.activeConversationId;
+  finish();
+  assert.equal(await earlier, false);
+  assert.equal(restored.activeConversationId, current);
+  assert.notEqual(current, bid);
+});

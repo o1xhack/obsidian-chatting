@@ -19,7 +19,6 @@ import type { ChangeLog } from "./tools/undo";
 import { boundConversationAttachments } from "./attachment-history";
 import {
   CHAT_STATE_VERSION,
-  DELETED_CHAT_FILE,
   chatFileText,
   conversationTitle,
   updateConversationTitle,
@@ -86,6 +85,8 @@ export default class ChatPlugin extends Plugin {
   readonly changeLogs = new WeakMap<ChatHistoryEntry, ChangeLog>();
   /** Set once the saved chat has been read; saves before that would overwrite it. */
   private chatHistoryLoaded = false;
+  private chatSaveFailed = false;
+  private conversationOpenVersion = 0;
   /** The chat-state write in progress, and the one queued after it. */
   private chatStateWrite: Promise<void> | null = null;
   private nextChatStateWrite: Promise<void> | null = null;
@@ -439,6 +440,7 @@ export default class ChatPlugin extends Plugin {
 
   /** Makes a new empty conversation active; an empty active one is kept instead. */
   startNewConversation(): void {
+    this.conversationOpenVersion++;
     this.storeActiveMessages();
     if (isEmptyConversation(this.activeConversation)) return;
     const conversation = newConversation();
@@ -451,6 +453,7 @@ export default class ChatPlugin extends Plugin {
    * be read leaves the list (false).
    */
   async openConversation(id: string): Promise<boolean> {
+    const version = ++this.conversationOpenVersion;
     const next = this.conversations.find((conversation) => conversation.id === id);
     if (!next || next.id === this.activeConversationId) return true;
     if (!await this.loadConversation(next)) {
@@ -459,6 +462,7 @@ export default class ChatPlugin extends Plugin {
       new Notice("This chat couldn't be read, so it was removed from the list.");
       return false;
     }
+    if (version !== this.conversationOpenVersion || !this.conversations.includes(next)) return false;
     this.storeActiveMessages();
     this.activate(next);
     return true;
@@ -577,6 +581,13 @@ export default class ChatPlugin extends Plugin {
     return this.nextChatStateWrite;
   }
 
+  /** Remote operations require a durable uncertainty marker before sending. */
+  async checkpointChatHistory(): Promise<void> {
+    if (!this.chatHistoryLoaded || this.unloaded) throw new Error("Chat storage isn't ready; remote tools were not sent.");
+    await this.saveChatHistory();
+    if (this.chatSaveFailed) throw new Error("Couldn't save the chat checkpoint; remote tools were not sent.");
+  }
+
   /** Publish the latest queued save immediately, including an unload save. */
   private trackChatStateWrite(write: Promise<void>): void {
     const app = this.app as ChatPersistenceApp;
@@ -654,8 +665,9 @@ export default class ChatPlugin extends Plugin {
       // A file the index no longer lists would come back on the next load
       // (`addUnlistedChats`): marked deleted before the index drops it.
       for (const id of gone) {
-        await adapter.write(this.chatPath(id, ".next"), DELETED_CHAT_FILE);
-        await adapter.write(this.chatPath(id), DELETED_CHAT_FILE);
+        const tombstone = JSON.stringify({ version: CHAT_STATE_VERSION, savedAt, deleted: true });
+        await adapter.write(this.chatPath(id, ".next"), tombstone);
+        await adapter.write(this.chatPath(id), tombstone);
         this.savedChats.delete(id);
         this.savedMessages.delete(id);
         // Forgotten only once marked: a failed write keeps it for the next save.
@@ -667,8 +679,9 @@ export default class ChatPlugin extends Plugin {
       for (const id of gone) {
         for (const path of [this.chatPath(id, ".next"), this.chatPath(id)]) await adapter.remove(path).catch(() => {});
       }
+      this.chatSaveFailed = false;
     } catch {
-      // Persistence is best-effort
+      this.chatSaveFailed = true;
     }
   }
 
@@ -694,8 +707,13 @@ export default class ChatPlugin extends Plugin {
       this.agents.clear();
       this.conversations = saved.conversations;
       if (saved.version < CHAT_STATE_VERSION) {
-        await this.keepOlderAside(state);
-        await this.adoptChatFiles();
+        try {
+          await this.keepOlderAside(state);
+          await this.adoptChatFiles();
+        } catch {
+          new Notice("Chat migration couldn't preserve the original files. They are left as they are, and chats won't be saved until Obsidian restarts.");
+          return;
+        }
       }
       await this.addUnlistedChats();
       // The open chat's file is read now, the others' when they are opened.
@@ -719,11 +737,11 @@ export default class ChatPlugin extends Plugin {
    * A chat saved whole in one file by an older version (or with an older
    * format) is replaced by the index with the next save: it is copied to
    * `chat-state.v<version>-<time>.json` first, like a newer one
-   * (`keepIfNewer`). Best effort: the chats go to their own files anyway.
+   * (`keepIfNewer`). Migration stops if preserving the original fails.
    */
   private async keepOlderAside(state: PersistedChatState): Promise<void> {
     const name = `chat-state.v${state.version ?? 1}-${Date.now()}.json`;
-    await this.app.vault.adapter.write(`${this.pluginDataDir}/${name}`, JSON.stringify(state)).catch(() => {});
+    await this.app.vault.adapter.write(`${this.pluginDataDir}/${name}`, JSON.stringify(state));
   }
 
   /**
@@ -738,13 +756,19 @@ export default class ChatPlugin extends Plugin {
     if (!await adapter.exists(this.chatsDir).catch(() => false)) return;
     for (const conversation of this.conversations) {
       const file = await this.readChatFile(conversation.id);
-      if (file?.conversation?.id !== conversation.id) continue;
-      if (conversation.chatHistory.length === 0 && conversation.agentMessages.length === 0) {
+      if (file?.unsupported) throw new Error("A chat was written by a newer version.");
+      if (file?.conversation?.id === conversation.id && conversation.chatHistory.length === 0 && conversation.agentMessages.length === 0) {
         conversation.unloaded = true;
         continue;
       }
-      const aside = this.chatPath(`${conversation.id}.v${CHAT_STATE_VERSION}-${Date.now()}`);
-      await adapter.read(this.chatPath(conversation.id)).then((text) => adapter.write(aside, text)).catch(() => {});
+      // Preserve both raw copies, including a truncated primary whose newer
+      // whole data lives only in .next. A backup failure blocks migration.
+      for (const copy of ["", ".next"] as const) {
+        const path = this.chatPath(conversation.id, copy);
+        if (!await adapter.exists(path)) continue;
+        const aside = this.chatPath(`${conversation.id}${copy}.v${CHAT_STATE_VERSION}-${Date.now()}`);
+        await adapter.write(aside, await adapter.read(path));
+      }
     }
   }
 
@@ -788,6 +812,9 @@ export default class ChatPlugin extends Plugin {
     const read = async (path: string): Promise<ChatFile | null | undefined> => {
       try {
         const value: unknown = JSON.parse(await this.app.vault.adapter.read(path));
+        if (isRecord(value) && typeof value.version === "number" && value.version > CHAT_STATE_VERSION) {
+          return { unsupported: true, ...(typeof value.savedAt === "number" && Number.isFinite(value.savedAt) ? { savedAt: value.savedAt } : {}) };
+        }
         return isChatFile(value) ? parseChatFile(value) : undefined;
       } catch {
         return undefined;
@@ -795,8 +822,11 @@ export default class ChatPlugin extends Plugin {
     };
     const main = await read(this.chatPath(id));
     const copy = await read(this.chatPath(id, ".next"));
-    const newerCopy = !!copy && (!main || (copy.savedAt ?? 0) > (main.savedAt ?? 0));
-    const saved = newerCopy ? copy : main;
+    // Unknown versions may change timestamp semantics too. Preserve either
+    // newer-format copy rather than replacing it from an older-format peer.
+    if (main?.unsupported) return main;
+    if (copy?.unsupported) return copy;
+    const saved = copy && (!main || (copy.savedAt ?? 0) > (main.savedAt ?? 0)) ? copy : main;
     if (saved) return saved;
     return main === undefined && copy === undefined ? undefined : null;
   }
@@ -811,9 +841,9 @@ export default class ChatPlugin extends Plugin {
       const listed = new Set(this.conversations.map((conversation) => conversation.id));
       const { files } = await this.app.vault.adapter.list(this.chatsDir);
       for (const path of files) {
-        const id = /([^/]+)\.json$/.exec(path)?.[1];
+        const id = /([^/]+?)(?:\.next)?\.json$/.exec(path)?.[1];
         // Copies (`.next`) and files kept aside (`.corrupt-`, `.v4-`) have a dot; chat IDs don't.
-        if (!id || id.includes(".") || listed.has(id)) continue;
+        if (!id || !CHAT_ID.test(id) || listed.has(id)) continue;
         const saved = (await this.readChatFile(id))?.conversation;
         if (!saved || saved.id !== id || isEmptyConversation(saved)) continue;
         this.conversations.push({ ...saved, chatHistory: restoreImages(saved.chatHistory, saved.agentMessages) });
@@ -1197,8 +1227,8 @@ interface PersistedChatState {
   conversations?: unknown;
 }
 
-/** A chat's ID: it names its file (`chats/<id>.json`), so letters, digits, `.`, `_` and `-` only. */
-const CHAT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+/** A chat's ID: it names its file (`chats/<id>.json`), so letters, digits, `_` and `-` only. */
+const CHAT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** The same messages, in the same order (a chat unchanged since it was read or saved). */
 function sameMessages(messages: UnifiedMessage[], saved: UnifiedMessage[] | undefined): boolean {
@@ -1272,7 +1302,7 @@ function isChatFile(value: unknown): boolean {
   if (value.deleted === true) return true;
   const conversation = value.conversation;
   return isRecord(conversation) && !Array.isArray(conversation) && typeof conversation.id === "string" &&
-    isSavedHistories(conversation, false);
+    CHAT_ID.test(conversation.id) && isSavedHistories(conversation, false);
 }
 
 /** A saved chat's `chatHistory` and `agentMessages`: at least one of them, each a list of valid entries. */

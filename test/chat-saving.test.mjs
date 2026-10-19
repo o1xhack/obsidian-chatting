@@ -452,3 +452,94 @@ test('An index kept aside as unreadable: the chat files there come back in the l
   assert.deepEqual(plugin.listConversations().map(c => c.title), ['Still here']);
   assert.deepEqual(texts(plugin), []);
 });
+
+test('Migration refuses to overwrite legacy history when its backup cannot be written', async () => {
+  const { adapter } = chatFiles();
+  const original = savedState('Keep original', 1000);
+  adapter.stored.set(STATE, original);
+  const write = adapter.write;
+  adapter.write = async (path, data) => {
+    if (/chat-state\.v\d+-/.test(path)) throw new Error('disk full');
+    return write(path, data);
+  };
+  const plugin = pluginOn(adapter);
+  await plugin.loadChatHistory();
+  await plugin.saveChatHistory();
+  assert.equal(adapter.stored.get(STATE), original);
+  assert.equal(plugin.chatHistoryLoaded, false);
+  await assert.rejects(plugin.checkpointChatHistory(), /storage isn't ready/);
+});
+
+test('Downgrade migration preserves both raw chat copies, and aborts on any backup failure', async () => {
+  for (const fail of [false, true]) {
+    const { adapter } = chatFiles();
+    const original = JSON.stringify({ version: 3, savedAt: 2000, activeConversationId: 'c1', conversations: [JSON.parse(chatFile('Legacy edit', 1)).conversation] });
+    adapter.stored.set(STATE, original);
+    adapter.stored.set(`${DIR}/chats/c1.json`, '{truncated');
+    const next = chatFile('Newer complete copy', 1000);
+    adapter.stored.set(`${DIR}/chats/c1.next.json`, next);
+    const write = adapter.write;
+    adapter.write = async (path, data) => {
+      if (fail && /c1\.next\.v4-/.test(path)) throw new Error('disk full');
+      return write(path, data);
+    };
+    const plugin = pluginOn(adapter);
+    await plugin.loadChatHistory();
+    await plugin.saveChatHistory();
+    if (fail) {
+      assert.equal(adapter.stored.get(STATE), original);
+      assert.equal(adapter.stored.get(`${DIR}/chats/c1.next.json`), next);
+    } else {
+      const backups = [...adapter.stored.entries()].filter(([path]) => /c1(?:\.next)?\.v4-/.test(path));
+      assert.equal(backups.length, 2);
+      assert.ok(backups.some(([, data]) => data === '{truncated'));
+      assert.ok(backups.some(([, data]) => data === next));
+    }
+  }
+});
+
+test('Either future-format chat copy is preserved regardless of its timestamp', async () => {
+  for (const futureMain of [false, true]) {
+    const { adapter } = chatFiles();
+    adapter.stored.set(STATE, index(1));
+    const future = JSON.stringify({ version: 999, savedAt: 1, secretFutureData: 'keep' });
+    adapter.stored.set(`${DIR}/chats/c1.json`, futureMain ? future : chatFile('Older format', 9999));
+    adapter.stored.set(`${DIR}/chats/c1.next.json`, futureMain ? chatFile('Older format', 9999) : future);
+    const plugin = pluginOn(adapter);
+    await plugin.loadChatHistory();
+    await plugin.saveChatHistory();
+    assert.equal(adapter.stored.get(`${DIR}/chats/c1${futureMain ? '' : '.next'}.json`), future);
+    assert.ok(!plugin.conversations.some(c => c.id === 'c1'));
+  }
+});
+
+test('A lone next copy recovers an unlisted conversation after an interrupted first save', async () => {
+  const { adapter } = chatFiles();
+  adapter.stored.set(`${DIR}/chats/c1.next.json`, chatFile('Recover next only', 1000));
+  const plugin = pluginOn(adapter);
+  await plugin.loadChatHistory();
+  assert.ok(plugin.listConversations().some(c => c.id === 'c1'));
+});
+
+test('A deletion interrupted after its next tombstone cannot resurrect the old primary', async () => {
+  const { adapter } = chatFiles();
+  adapter.stored.set(STATE, index(1000));
+  adapter.stored.set(`${DIR}/chats/c1.json`, chatFile('Deleted', 1000));
+  adapter.stored.set(`${DIR}/chats/c1.next.json`, JSON.stringify({ version: 4, savedAt: 2000, deleted: true }));
+  const plugin = pluginOn(adapter);
+  await plugin.loadChatHistory();
+  assert.ok(!plugin.conversations.some(c => c.id === 'c1'));
+});
+
+test('A remote checkpoint reports failed writes, and recovers after storage works again', async () => {
+  const { adapter } = chatFiles();
+  const plugin = pluginOn(adapter);
+  await plugin.loadChatHistory();
+  plugin.chatHistory.push({ type: 'user', text: 'before remote request', turnId: 't1' });
+  const write = adapter.write;
+  adapter.write = async () => { throw new Error('disk full'); };
+  await assert.rejects(plugin.checkpointChatHistory(), /Couldn't save/);
+  adapter.write = write;
+  await plugin.checkpointChatHistory();
+  assert.equal(JSON.parse(adapter.stored.get(STATE)).version, 4);
+});
