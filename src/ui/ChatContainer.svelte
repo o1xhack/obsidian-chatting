@@ -185,7 +185,6 @@
   let messages = $state<ChatMessage[]>([]);
   let inputText = $state("");
   let inputEnabled = $state(true);
-  let placeholder = $state("Ask anything...");
   let messagesEl: HTMLElement | undefined = $state();
   let textareaEl: HTMLTextAreaElement | undefined = $state();
   let fileInputEl: HTMLInputElement | undefined = $state();
@@ -475,7 +474,6 @@
 
   export function showAskUser(question: string): Promise<string> {
     addAssistantMessage(question);
-    placeholder = "Type your answer...";
     inputEnabled = true;
     textareaEl?.focus();
 
@@ -494,7 +492,6 @@
   export function setInputEnabled(enabled: boolean): void {
     if (!enabled) attachmentPreparation.cancel();
     inputEnabled = enabled;
-    placeholder = enabled ? "Ask anything..." : "Waiting for response...";
   }
 
   export function setBusy(value: boolean): void {
@@ -513,6 +510,13 @@
       message.images = entry.images;
       message.attached = entry.attachedFiles;
     }
+  }
+
+  /** Messages sent while the answer runs, until the agent takes them in (or they run next). */
+  let queued = $state<string[]>([]);
+
+  export function setQueued(texts: string[]): void {
+    queued = texts;
   }
 
   export function clearMessages(): void {
@@ -595,6 +599,15 @@
 
     if (askUserResolve && (attachments.length > 0 || fileAttachments.length > 0)) {
       new Notice("Attachments are not supported when answering a tool question.");
+      return;
+    }
+    if (busy && !askUserResolve) {
+      // Added to the running turn (the view steers it); attachments and the
+      // selection stay for the next message.
+      if (!text) return;
+      inputText = "";
+      resetHeight();
+      onSend(text, null, [], []);
       return;
     }
 
@@ -1352,6 +1365,15 @@
     {/if}
   </div>
 
+  {#if queued.length}
+    <!-- Sent while the answer runs; each moves into the chat when the agent takes it in -->
+    <div class="ochatting-queued" aria-live="polite">
+      {#each queued as text, i (i)}
+        <div class="ochatting-queued-item"><span class="ochatting-queued-label">Queued</span><span class="ochatting-queued-text">{text}</span></div>
+      {/each}
+    </div>
+  {/if}
+
   <!-- Selection pill -->
   {#if selection}
     <div class="ochatting-selection-pill">
@@ -1442,7 +1464,7 @@
       class="ochatting-attach-btn"
       type="button"
       onclick={openImagePicker}
-      disabled={!inputEnabled || attachmentLoading || (attachments.length >= MAX_IMAGE_COUNT && fileAttachments.length >= MAX_FILE_COUNT)}
+      disabled={!inputEnabled || busy || attachmentLoading || (attachments.length >= MAX_IMAGE_COUNT && fileAttachments.length >= MAX_FILE_COUNT)}
       aria-label="Attach images or files"
       title="Attach images or files"
     >
@@ -1454,7 +1476,7 @@
       class:ochatting-input-scrollable={inputScrollable}
       bind:this={textareaEl}
       bind:value={inputText}
-      {placeholder}
+      placeholder={askUserResolve ? "Type your answer..." : busy ? "Add to the running task..." : "Ask anything..."}
       disabled={!inputEnabled}
       rows="1"
       enterkeyhint={enterSends ? "send" : "enter"}
@@ -1464,23 +1486,24 @@
       onclick={updateMention}
       onblur={closeMention}
     ></textarea>
-    {#if inputEnabled}
-      <button
-        class="ochatting-send-btn"
-        onclick={handleSend}
-        disabled={attachmentLoading || composerLocked}
-        aria-label="Send message"
-        title={composerLocked ? "Undo in progress..." : attachmentLoading ? "Preparing attachments..." : "Send message"}
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
-      </button>
-    {:else}
+    <!-- While a turn runs: Stop until there is text to add to it, then Send -->
+    {#if busy && !inputText.trim()}
       <button
         class="ochatting-send-btn ochatting-stop-btn"
         onclick={onStop}
         aria-label="Stop generation"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>
+      </button>
+    {:else}
+      <button
+        class="ochatting-send-btn"
+        onclick={handleSend}
+        disabled={attachmentLoading || composerLocked}
+        aria-label={busy && !askUserResolve ? "Add to the running task" : "Send message"}
+        title={composerLocked ? "Undo in progress..." : attachmentLoading ? "Preparing attachments..." : busy && !askUserResolve ? "Add to the running task" : "Send message"}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
       </button>
     {/if}
   </div>
@@ -1985,6 +2008,36 @@
     border-left: 3px solid var(--text-error);
     font-size: var(--font-ui-smaller);
     max-width: 90%;
+  }
+
+  /* Messages sent while the answer runs, until the agent takes them in */
+  .ochatting-queued {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 12px 0;
+    flex-shrink: 0;
+  }
+
+  .ochatting-queued-item {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    min-width: 0;
+  }
+
+  .ochatting-queued-label {
+    flex-shrink: 0;
+    font-weight: var(--font-semibold);
+    color: var(--text-faint);
+  }
+
+  .ochatting-queued-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .ochatting-stopped-note {

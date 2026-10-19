@@ -86,6 +86,10 @@ export class AgentLoop {
   private runVersion = 0;
   /** Cancels the running turn's HTTP request (streamed answers). */
   private request: AbortController | null = null;
+  /** The run whose loop is working now (0: none); `steer()` adds to it. */
+  private loopVersion = 0;
+  /** Messages the user added while the loop works; sent with its next request (`steer`). */
+  private steered: string[] = [];
   /** The vault root's AGENTS.md as the last turn read it (in the system prompt). */
   private vaultInstructions: string | null = null;
   /** The skills part of the system prompt, read with the instructions. */
@@ -99,7 +103,26 @@ export class AgentLoop {
   /** Abort a running loop (e.g. user navigates away) */
   abort(): void {
     this.runVersion++;
+    this.steered = [];
     this.request?.abort();
+  }
+
+  /**
+   * Add a message to the running turn, as the chat apps let you steer a
+   * running task: it goes with the loop's next request, after the current
+   * step. False when no loop is working (start a turn instead). What
+   * arrives after the last step is returned by `takeSteered()`.
+   */
+  steer(text: string): boolean {
+    if (!this.loopVersion || this.loopVersion !== this.runVersion) return false;
+    this.steered.push(text);
+    debugLog(this.app, "STEER", { text });
+    return true;
+  }
+
+  /** Added messages the finished turn didn't get to; they need a turn of their own. */
+  takeSteered(): string[] {
+    return this.steered.splice(0);
   }
 
   /** Stop a running turn and clear the history. */
@@ -251,9 +274,6 @@ export class AgentLoop {
     const isStopped = () => version !== this.runVersion;
     const request = new AbortController();
     this.request = request;
-    const onTextDelta = (text: string) => {
-      if (!isStopped()) callbacks.onTextDelta?.(text);
-    };
     // This turn's selection: the tools change only that text of its note (a
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
@@ -318,12 +338,6 @@ export class AgentLoop {
     // Prune if conversation is too long
     this.pruneHistory();
 
-    // System prompt is static (cache-friendly): the built-in one, the
-    // vault's skills and its AGENTS.md, which rarely change. Read once per turn.
-    this.vaultInstructions = await rootInstructions(this.app);
-    this.skills = skillsPrompt(findSkills(this.app, turnSettings.skillsFolder));
-    const systemPrompt = buildSystemPrompt(this.vaultInstructions, this.skills);
-
     debugLog(this.app, "USER_MESSAGE", {
       userMessage,
       // As the model gets it: the context lines first.
@@ -336,6 +350,44 @@ export class AgentLoop {
       fileNames: files.map((file) => file.fileName),
     });
 
+    await this.loop(version, callbacks, turnSettings, scope, request.signal, beforeTurn);
+  }
+
+  /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
+  private async loop(
+    version: number,
+    callbacks: AgentCallbacks,
+    turnSettings: ChatSettings,
+    scope: SelectionScope | undefined,
+    signal: AbortSignal,
+    beforeTurn?: UnifiedMessage[]
+  ): Promise<void> {
+    this.loopVersion = version;
+    try {
+      await this.steps(version, callbacks, turnSettings, scope, signal, beforeTurn);
+    } finally {
+      if (this.loopVersion === version) this.loopVersion = 0;
+    }
+  }
+
+  /** `beforeTurn`: the history before a new user turn, restored if its first request is refused as too large. */
+  private async steps(
+    version: number,
+    callbacks: AgentCallbacks,
+    turnSettings: ChatSettings,
+    scope: SelectionScope | undefined,
+    signal: AbortSignal,
+    beforeTurn?: UnifiedMessage[]
+  ): Promise<void> {
+    const isStopped = () => version !== this.runVersion;
+    const onTextDelta = (text: string) => {
+      if (!isStopped()) callbacks.onTextDelta?.(text);
+    };
+    // System prompt is static (cache-friendly): the built-in one, the
+    // vault's skills and its AGENTS.md, which rarely change. Read once per turn.
+    this.vaultInstructions = await rootInstructions(this.app);
+    this.skills = skillsPrompt(findSkills(this.app, turnSettings.skillsFolder));
+    const systemPrompt = buildSystemPrompt(this.vaultInstructions, this.skills);
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
     let resends = 0;
@@ -354,7 +406,7 @@ export class AgentLoop {
             TOOL_DEFINITIONS,
             systemPrompt,
             isStopped,
-            { onTextDelta, signal: request.signal }
+            { onTextDelta, signal }
           );
         } catch (e) {
           if (isStopped()) return;
@@ -388,7 +440,7 @@ export class AgentLoop {
 
           }
           debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
-          if (i === 0 && e instanceof RequestBudgetError) {
+          if (i === 0 && e instanceof RequestBudgetError && beforeTurn) {
             // Nothing reached the provider or tools. Undo local pruning and
             // the pending user turn so its attachments cannot poison retries.
             this.messages = beforeTurn;
@@ -524,6 +576,12 @@ export class AgentLoop {
       }
 
       if (isStopped()) return;
+      // What the user added meanwhile goes with the next request, after the
+      // results; without another request (the last step) it runs next instead.
+      if (i + 1 < maxIterations) for (const text of this.steered.splice(0)) {
+        resultBlocks.push({ type: "text", text: `[The user added while you were working:] ${text}` });
+        callbacks.onSteered?.(text);
+      }
     }
 
     // If we get here, we hit the iteration limit
