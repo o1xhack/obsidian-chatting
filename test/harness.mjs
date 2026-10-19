@@ -49,6 +49,7 @@ export const bundled = await build({
     export * as attachmentHistory from './src/attachment-history';
     export { AttachmentPreparation } from './src/ui/attachment-preparation';
     export { buildSystemPrompt } from './src/agent/system-prompt';
+    export { streamSSE, createSSEParser, resetStreamTransport } from './src/api/stream';
   `, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
   plugins: [{ name: 'obsidian-test-transport', setup(build) {
@@ -93,8 +94,9 @@ export const bundled = await build({
         if (!match) return none;
         return { exists: true, frontmatter: content.slice(open[0].length, match.index), from: open[0].length, to: match.index, contentStart: close.lastIndex };
       }
-      // A desktop unless a test sets globalThis.__isPhone.
-      export const Platform = { get isDesktop() { return globalThis.__isMobile !== true; }, get isPhone() { return globalThis.__isPhone === true; } };
+      // A desktop unless a test sets globalThis.__isPhone. Streaming takes
+      // the mobile path (fetch) unless a test sets globalThis.__isDesktopApp.
+      export const Platform = { get isDesktop() { return globalThis.__isMobile !== true; }, get isPhone() { return globalThis.__isPhone === true; }, get isDesktopApp() { return globalThis.__isDesktopApp === true; } };
       // Tags dropped, paragraphs kept: enough to see which content got through.
       export const htmlToMarkdown = node => (typeof node === 'string' ? node : node.innerHTML).replace(/<\\/p>/g, '\\n\\n').replace(/<[^>]+>/g, '').trim();
       export const arrayBufferToBase64 = buffer => Buffer.from(buffer).toString('base64');
@@ -121,19 +123,69 @@ export const result = (id, content, is_error = false) => ({ type: 'tool_result',
 export const assistant = response => ({ role: 'assistant', content: response.content, replay: response.replay });
 export const responseMessage = value => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: value, annotations: [] }] });
 export const nativeCall = (id, name, input) => ({ type: 'function_call', call_id: id, name, arguments: JSON.stringify(input) });
+// A provider's streamed answer for these blocks, through requestUrl() (the
+// fake fetch below fails, so adapters fall back to it).
 export function response(provider, blocks, stop = 'end_turn', index = 0) {
-  if (provider === 'anthropic') return { status: 200, json: { content: blocks, stop_reason: stop } };
+  return sse(streamEvents(provider, blocks, stop, index));
+}
+// The non-streamed Responses API object for these blocks.
+export function responsesData(blocks, stop = 'end_turn', index = 0) {
   const output = blocks.map(block => block.type === 'text' ? responseMessage(block.text) : block.type === 'tool_use' ? nativeCall(block.id, block.name, block.input) : block);
-  const data = { id: `resp_${index}`, output, status: stop === 'max_tokens' ? 'incomplete' : 'completed' };
-  if (provider === 'openai') return { status: 200, json: data };
-  const events = output.map((item, output_index) => ({ type: 'response.output_item.done', item, output_index }));
-  events.push({ type: stop === 'max_tokens' ? 'response.incomplete' : 'response.completed', response: { ...data, output: [] } });
-  return sse(events);
+  return { id: `resp_${index}`, output, status: stop === 'max_tokens' ? 'incomplete' : 'completed' };
 }
+const halves = value => [value.slice(0, Math.ceil(value.length / 2)), value.slice(Math.ceil(value.length / 2))].filter(Boolean);
+// The SSE events a provider streams for these blocks (Anthropic Messages or Responses API).
+export function streamEvents(provider, blocks, stop = 'end_turn', index = 0) {
+  if (provider === 'anthropic') {
+    const events = [{ type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', content: [], stop_reason: null, usage: { input_tokens: 10, output_tokens: 1 } } }];
+    blocks.forEach((block, index) => {
+      const { text, thinking, signature, input, citations, ...rest } = block;
+      const delta = value => events.push({ type: 'content_block_delta', index, delta: value });
+      if (block.type === 'text') {
+        events.push({ type: 'content_block_start', index, content_block: { ...rest, text: '' } });
+        for (const citation of citations ?? []) delta({ type: 'citations_delta', citation });
+        for (const part of halves(text)) delta({ type: 'text_delta', text: part });
+      } else if (block.type === 'thinking') {
+        events.push({ type: 'content_block_start', index, content_block: { ...rest, thinking: '', signature: '' } });
+        for (const part of halves(thinking)) delta({ type: 'thinking_delta', thinking: part });
+        delta({ type: 'signature_delta', signature });
+      } else if (block.type === 'tool_use' || block.type === 'server_tool_use' || block.type === 'mcp_tool_use') {
+        events.push({ type: 'content_block_start', index, content_block: { ...rest, input: {} } });
+        for (const part of halves(JSON.stringify(input))) delta({ type: 'input_json_delta', partial_json: part });
+      } else {
+        events.push({ type: 'content_block_start', index, content_block: block });
+      }
+      events.push({ type: 'content_block_stop', index });
+    });
+    events.push({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 5 } }, { type: 'message_stop' });
+    return events;
+  }
+  const data = responsesData(blocks, stop, index);
+  const events = [{ type: 'response.created', response: { id: data.id, status: 'in_progress', output: [] } }];
+  data.output.forEach((item, output_index) => {
+    for (const part of item.type === 'message' ? item.content : []) {
+      if (part.type === 'output_text') for (const delta of halves(part.text)) events.push({ type: 'response.output_text.delta', output_index, delta });
+    }
+    events.push({ type: 'response.output_item.done', item, output_index });
+  });
+  // The ChatGPT route (store: false) sends the final response without output.
+  events.push({ type: stop === 'max_tokens' ? 'response.incomplete' : 'response.completed', response: provider === 'openai' ? data : { ...data, output: [] } });
+  return events;
+}
+export const sseText = events => events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
 export function sse(events) {
-  const body = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
-  return { status: 200, text: body, get json() { throw new SyntaxError('iOS lazy JSON getter'); } };
+  return { status: 200, text: sseText(events), get json() { throw new SyntaxError('iOS lazy JSON getter'); } };
 }
+// Obsidian's window. stream.ts calls window.fetch, which fails like a CORS
+// block unless a test sets __fetch. Local addresses keep Node's fetch: the
+// browser sign-in tests call their own callback server.
+globalThis.window ??= globalThis;
+const nodeFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  if (globalThis.__fetch) return globalThis.__fetch(url, init);
+  if (/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(String(url))) return nodeFetch(url, init);
+  throw new TypeError('Failed to fetch');
+};
 export function transport(handler) {
   const requests = [];
   globalThis.__providerRequest = async request => {

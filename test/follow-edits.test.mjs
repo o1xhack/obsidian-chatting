@@ -191,7 +191,7 @@ function chatView(followEdits) {
   const view = new api.ObsidianChatView({}, plugin);
   let nextId = 0;
   view.chatContainer = {
-    addUserMessage() {}, addAssistantMessage() {}, addError() {}, showThinking() {}, hideThinking() {},
+    addUserMessage() {}, addAssistantMessage: () => nextId++, updateAssistantMessage() {}, removeMessage() {}, addError() {}, showThinking() {}, hideThinking() {},
     addToolCall: () => nextId++, updateToolResult() {}, setInputEnabled() {}, setBusy() {}, foldTurn() {}, focus() {}, setTitle() {}, addChanges() {},
   };
   return { app, files, plugin, view };

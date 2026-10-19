@@ -1,8 +1,54 @@
-import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, UnifiedMessage, UnifiedResponse } from "../types";
-import { ProviderError } from "./errors";
+import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, StreamOptions, UnifiedMessage, UnifiedResponse } from "../types";
+import { ProviderError, StreamCutError } from "./errors";
+import { StreamDropped, streamSSE, type StreamResult } from "./stream";
+import { serializeRequest } from "./request-budget";
+import { isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
 import { fileAsText, isSentAsFile } from "../files/attachments";
 import { openaiServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
+
+/** A failure the stream reported (`error`, `response.failed`). */
+export interface ResponsesFailure {
+  message: string;
+  code?: string;
+}
+
+/** The adapter's errors for an HTTP error answer and for a failure inside the stream. */
+export interface ResponsesErrors {
+  http(response: StreamResult): Error;
+  stream(failure: ResponsesFailure): Error;
+}
+
+/**
+ * Sends a streamed Responses request (OpenAI, and the ChatGPT account's
+ * Codex route with its own headers); returns the completed response as the
+ * non-streamed API would. `name` names the provider in the error for a
+ * stream that ends too early.
+ */
+export async function sendResponsesRequest(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  stream: StreamOptions,
+  name: string,
+  errors: ResponsesErrors,
+): Promise<Record<string, unknown>> {
+  const collected = collectResponsesStream(stream.onTextDelta, stream.onServerTool);
+  // The final size check (`serializeRequest`) runs before anything is sent.
+  const requestBody = serializeRequest(body);
+  let response: StreamResult;
+  try {
+    response = await streamSSE(url, { headers, body: requestBody }, collected.onEvent, stream.signal);
+  } catch (error) {
+    if (error instanceof StreamDropped) throw new StreamCutError(name, collected.serverTool());
+    throw error;
+  }
+  if (response.status < 200 || response.status >= 300) throw errors.http(response);
+  const { data, failure } = collected.finish();
+  if (failure) throw errors.stream(failure);
+  if (!data) throw new StreamCutError(name, collected.serverTool());
+  return data;
+}
 
 /** Encode both fresh input and restored history without losing tool pairs. */
 export function buildResponsesInput(
@@ -152,10 +198,66 @@ export function withoutCitationMarkers(text: string): string {
   return text.replace(CITATION_MARKER, "").replace(CITATION_CHARACTERS, "");
 }
 
-function numberValue(value: unknown): number {
-  return typeof value === "number" ? value : 0;
+/**
+ * Collects a streamed Responses answer (`stream: true`). Text deltas go to
+ * `onTextDelta` as they arrive. The response is rebuilt from the
+ * `response.output_item.done` items (messages, tool calls, reasoning,
+ * search and MCP items alike), because `response.completed` may carry an
+ * empty `output` (always on the Codex route with `store: false`); the
+ * terminal event gives id, status and usage. `finish()` returns the same
+ * object the non-streamed API returns, or the failure the stream reported.
+ */
+function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTool?: () => void): {
+  onEvent: (event: Record<string, unknown>) => void;
+  finish: () => { data?: Record<string, unknown>; failure?: ResponsesFailure };
+  /** An MCP call started in this answer. */
+  serverTool: () => boolean;
+} {
+  let serverTool = false;
+  const items = new Map<string | number, Record<string, unknown>>();
+  let completed: Record<string, unknown> | undefined;
+  let failure: ResponsesFailure | undefined;
+  return {
+    onEvent: (event) => {
+      const type = event.type;
+      if ((type === "response.output_item.added" || type === "response.output_item.done") &&
+        isRecord(event.item) && event.item.type === "mcp_call" && !serverTool) {
+        serverTool = true;
+        onServerTool?.();
+      }
+      if (type === "response.output_text.delta") {
+        // The markers' characters go; their words are dropped from the whole text at the end.
+        if (typeof event.delta === "string" && event.delta) onTextDelta?.(event.delta.replace(CITATION_CHARACTERS, ""));
+      } else if (type === "response.output_item.done") {
+        if (isRecord(event.item)) {
+          const index = event.output_index;
+          const key = typeof index === "number" || typeof index === "string" ? index
+            : typeof event.item.id === "string" ? event.item.id : items.size;
+          items.set(key, event.item);
+        }
+      } else if (type === "response.completed") {
+        completed = isRecord(event.response) ? event.response : {};
+      } else if (type === "response.incomplete") {
+        completed = { ...(isRecord(event.response) ? event.response : {}), status: "incomplete" };
+      } else if (type === "response.failed") {
+        const error = isRecord(event.response) && isRecord(event.response.error) ? event.response.error : {};
+        failure = {
+          message: typeof error.message === "string" ? error.message : "Response failed.",
+          code: typeof error.code === "string" ? error.code : undefined,
+        };
+      } else if (type === "error" && typeof event.message === "string") {
+        failure = { message: event.message, code: typeof event.code === "string" ? event.code : undefined };
+      }
+    },
+    finish: () => {
+      if (failure) return { failure };
+      if (!completed) return {};
+      return { data: { ...completed, output: items.size > 0 ? Array.from(items.values()) : completed.output ?? [] } };
+    },
+    serverTool: () => serverTool,
+  };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function numberValue(value: unknown): number {
+  return typeof value === "number" ? value : 0;
 }

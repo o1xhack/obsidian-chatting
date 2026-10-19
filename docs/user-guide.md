@@ -230,7 +230,7 @@ Only what the agent needs for the current turn. When you ask a question, the age
 <details>
 <summary><b>Does it really work on mobile?</b></summary>
 
-Yes — that's the design constraint everything else is built around. Requests go through Obsidian's `requestUrl()` (mobile WebViews enforce CORS). On desktop, ChatGPT sign-in opens your browser and returns through a local callback. On iOS and Android, choose **Copy code and open login page**, paste the one-time code on the official page, approve, then return to Obsidian. Mobile uses device authorization and never loads the desktop callback server. If device-code login is unavailable, enable it in ChatGPT security settings or ask your workspace admin.
+Yes — that's the design constraint everything else is built around. Requests go through Obsidian's `requestUrl()` (mobile WebViews enforce CORS), except the chat answers, which stream: on desktop through Node's `https`, on mobile through `fetch` where the provider allows it, else through `requestUrl()` all at once. On desktop, ChatGPT sign-in opens your browser and returns through a local callback. On iOS and Android, choose **Copy code and open login page**, paste the one-time code on the official page, approve, then return to Obsidian. Mobile uses device authorization and never loads the desktop callback server. If device-code login is unavailable, enable it in ChatGPT security settings or ask your workspace admin.
 
 </details>
 
