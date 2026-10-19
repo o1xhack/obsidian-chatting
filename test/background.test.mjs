@@ -593,3 +593,26 @@ test('Restart after an in-flight MCP request preserves uncertainty and refuses C
   await restored.view.continueTurn();
   assert.equal(after.length, 0);
 });
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: enabling MCP during backoff checkpoints the retry before its POST`, async () => {
+  const { plugin, view, writes } = await chatSetup(provider);
+  let attempts = 0;
+  globalThis.__fetch = async (_url, init) => {
+    attempts++;
+    if (attempts === 1) {
+      plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', code: 'rate_limit_exceeded', message: 'Wait' } }), { status: 429, headers: { 'retry-after': '0' } });
+    }
+    assert.equal(writes.at(-1).conversations[0].pendingTurn.remoteEffectsPossible, true);
+    const request = JSON.parse(init.body);
+    assert.ok(provider === 'anthropic' ? request.mcp_servers?.length : request.tools.some(tool => tool.type === 'mcp'));
+    return new Promise(() => {});
+  };
+  void view.handleUserMessage('Create once', null);
+  await until(() => attempts === 2);
+  const saved = JSON.parse(JSON.stringify(writes.at(-1)));
+  const restored = await chatSetup(provider, saved);
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, false);
+  assert.ok(restored.chat.shown.some(row => /may have run remote MCP tools/.test(row.text)));
+});

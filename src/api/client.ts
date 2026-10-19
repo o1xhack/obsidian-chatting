@@ -3,6 +3,7 @@ import { sendAnthropicMessage } from "./anthropic";
 import { sendOpenAIMessage } from "./openai";
 import { sendChatGPTOAuthMessage } from "./chatgpt-oauth";
 import { ProviderError, retryAfterInMessage } from "./errors";
+import { activeServers } from "./mcp";
 
 /** HTTP statuses of a rate limit or an overload. */
 const RETRY_STATUSES = [429, 529];
@@ -51,15 +52,20 @@ export async function sendMessage(
       stream.onServerTool?.();
     },
   };
-  const doSend = () => {
+  const doSend = async () => {
     if (shouldStop()) throw new Error("Request cancelled.");
-    if (settings.provider === "anthropic") {
-      return sendAnthropicMessage(settings, messages, tools, systemPrompt, options);
+    // Freeze exactly the server configuration whose uncertainty is saved.
+    // A backoff retry takes a fresh snapshot, including newly enabled servers.
+    const attempt = { ...settings, mcpServers: settings.mcpServers?.map(server => ({ ...server })) };
+    await stream.onRequestStarted?.(attempt.provider !== "chatgpt-oauth" && activeServers(attempt).length > 0);
+    if (shouldStop()) throw new Error("Request cancelled.");
+    if (attempt.provider === "anthropic") {
+      return sendAnthropicMessage(attempt, messages, tools, systemPrompt, options);
     }
-    if (settings.provider === "chatgpt-oauth") {
-      return sendChatGPTOAuthMessage(settings, messages, tools, systemPrompt, shouldStop, options);
+    if (attempt.provider === "chatgpt-oauth") {
+      return sendChatGPTOAuthMessage(attempt, messages, tools, systemPrompt, shouldStop, options);
     }
-    return sendOpenAIMessage(settings, messages, tools, systemPrompt, options);
+    return sendOpenAIMessage(attempt, messages, tools, systemPrompt, options);
   };
 
   try {

@@ -168,27 +168,27 @@ export async function sendAnthropicMessage(
   }
 
   function toResponse(packet: Record<string, unknown>): UnifiedResponse {
-  const data = parseAnthropicResponse(packet);
-  const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
-  const sources = citedSources(data.content);
-  if (sources) {
-    // Right after the answer's text, before any tool call: in the history
-    // another provider gets, text after a call would split it from its result.
-    const firstCall = content.findIndex((b) => b.type === "tool_use");
-    content.splice(firstCall === -1 ? content.length : firstCall, 0, sources);
-  }
+    const data = parseAnthropicResponse(packet);
+    const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
+    const sources = citedSources(data.content);
+    if (sources) {
+      // Right after the answer's text, before any tool call: in the history
+      // another provider gets, text after a call would split it from its result.
+      const firstCall = content.findIndex((b) => b.type === "tool_use");
+      content.splice(firstCall === -1 ? content.length : firstCall, 0, sources);
+    }
 
-  return {
-    content,
-    // Thinking signatures, redacted thinking, citations and server tool results
-    // must be returned unchanged. UI content is deliberately separate.
-    replay: { provider: "anthropic", model, identity, items: data.content, mcpServers: mcpServerIdentities(servers) },
-    stopReason: normalizeStopReason(data.stop_reason),
-    usage: data.usage
-      ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
-      : undefined,
-    ...withServerCalls(anthropicServerCalls(data.content, messages.flatMap(message => message.replay?.provider === "anthropic" ? message.replay.items : []))),
-  };
+    return {
+      content,
+      // Thinking signatures, redacted thinking, citations and server tool results
+      // must be returned unchanged. UI content is deliberately separate.
+      replay: { provider: "anthropic", model, identity, items: data.content, mcpServers: mcpServerIdentities(servers) },
+      stopReason: normalizeStopReason(data.stop_reason),
+      usage: data.usage
+        ? { inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 }
+        : undefined,
+      ...withServerCalls(anthropicServerCalls(data.content, messages.flatMap(message => message.replay?.provider === "anthropic" ? message.replay.items : []))),
+    };
   }
 }
 

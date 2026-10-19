@@ -716,6 +716,8 @@ export class ObsidianChatView extends ItemView {
         changes,
         onRequestStarted: (remoteEffectsPossible) => {
           if (isCurrent() && conversation.pendingTurn) conversation.pendingTurn.remoteEffectsPossible = remoteEffectsPossible;
+          // Flush the marker before an MCP-capable POST, including retries.
+          if (remoteEffectsPossible) return this.plugin.saveChatHistory();
         },
         onPreflightRejected: (error) => {
           turn.started = false;

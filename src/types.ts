@@ -176,6 +176,7 @@ export interface UnifiedResponse {
 
 /** Per request: where streamed answer text goes, and how Stop cancels it. */
 export interface StreamOptions {
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>;
   onTextDelta?: (text: string) => void;
   /** The provider started a tool with possible effects (an MCP call): the request must not be sent again. */
   onServerTool?: () => void;
@@ -292,7 +293,7 @@ export interface ViewTarget {
 
 export interface AgentCallbacks {
   /** Persist uncertainty before a request capable of external side effects. */
-  onRequestStarted?: (remoteEffectsPossible: boolean) => void;
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>;
   onThinking: () => void;
   /** Answer text as it streams in; `onResponse` later gives the whole text. */
   onTextDelta?: (text: string) => void;

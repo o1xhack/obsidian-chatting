@@ -12,8 +12,8 @@
     "chatStateVersion": 3
   },
   "automated": {
-    "tests": 624,
-    "passed": 624,
+    "tests": 626,
+    "passed": 626,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -51,7 +51,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "95febdcaa800e625503c572f09b8a42e1128be24d5f189a2eb7372c25afb2038",
+    "mainSha256": "48c7447ea1d85a4da9e429f4eb3cd39a48db9acf611bd34f669c5c9d192e445b",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -74,10 +74,18 @@
     "No physical mobile suspension test; iPhone Air excluded by owner"
   ],
   "gates": {
-    "codexReview": "pending final head",
-    "communityPreview": "pending final head",
-    "postMergeCI": "pending",
-    "releaseAssets": "pending",
-    "formalCommunity": "pending"
-  }
+    "sourceOfTruth": "https://github.com/o1xhack/obsidian-chatting/pull/53",
+    "note": "This file records candidate QA; current-head review, CI, Preview and post-release acceptance are tracked in the integration PR."
+  },
+  "liveChatGPTReload": {
+    "version": "0.9.0",
+    "model": "gpt-6.1-sol",
+    "loginRetained": true,
+    "backgroundHistoryRetained": true,
+    "reloadReply": true,
+    "passed": true
+  },
+  "reviewFixes": [
+    "Each adapter attempt snapshots MCP configuration and checkpoints uncertainty before its POST, including rate-limit backoff retries."
+  ]
 }

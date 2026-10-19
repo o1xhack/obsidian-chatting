@@ -17,7 +17,7 @@ import { ProviderError, StreamCutError } from "../api/errors";
 import { isBuffered, lastChunkAt } from "../api/stream";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
-import { activeServers, serverToolName } from "../api/mcp";
+import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
@@ -747,16 +747,15 @@ export class AgentLoop {
     systemPrompt: string,
     isStopped: () => boolean,
     onTextDelta: (text: string) => void,
-    onRequestStarted?: (remoteEffectsPossible: boolean) => void,
+    onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>,
   ): Promise<UnifiedResponse> {
     const request = new AbortController();
     this.request = request;
     const unwatch = watchForStall(request);
     let remoteStarted = false;
     try {
-      onRequestStarted?.(settings.provider !== "chatgpt-oauth" && activeServers(settings).length > 0);
       return await sendMessage(settings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped,
-        { onTextDelta, signal: request.signal, onServerTool: () => { remoteStarted = true; } });
+        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; } });
     } catch (e) {
       // Aborted, but not by Stop: the watch gave it up.
       if (e instanceof ProviderError && e.remoteEffectsPossible) throw e;
