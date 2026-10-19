@@ -13,6 +13,7 @@
   import { foldPlan } from "./fold-turn";
   import type { ChangesState } from "./chat-view";
   import { AttachmentPreparation } from "./attachment-preparation";
+  import { withoutLargeVisibleToolText } from "../agent/history";
 
   const MAX_IMAGE_COUNT = 4;
   const MAX_FILE_COUNT = 4;
@@ -351,6 +352,7 @@
       msg.type = "tool-result";
       msg.toolName = name;
       msg.toolResult = result;
+      messages = withoutLargeVisibleToolText(messages);
     }
   }
 

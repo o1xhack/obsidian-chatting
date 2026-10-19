@@ -9,7 +9,7 @@ import { confirmUndo } from "./undo-confirm";
 import { ChangeLog } from "../tools/undo";
 import { screenAwake } from "../platform/screen-awake";
 import { historySelection } from "../selection-history";
-import { newTurnId } from "../agent/history";
+import { newTurnId, withoutLargeVisibleToolText } from "../agent/history";
 import { mentionContext, mentionedFiles } from "./mentions";
 import { attachmentBudgetError } from "../files/attachments";
 import { findSkills, invokedSkillsContext, type Skill } from "../agent/skills";
@@ -556,6 +556,8 @@ export class ObsidianChatView extends ItemView {
           const call = toolCalls.get(name);
           if (call) chat.updateToolResult(call.id, name, result);
           history.push({ type: "tool-result", toolName: name, toolInput: savedToolInput(call?.input ?? {}), toolResult: result });
+          const bounded = withoutLargeVisibleToolText(history);
+          if (bounded !== history) for (let i = 0; i < history.length; i++) history[i] = bounded[i];
           if (focus && !result.isError && this.plugin.settings.followEdits) this.follow(focus);
         },
         onResponse: (text) => {

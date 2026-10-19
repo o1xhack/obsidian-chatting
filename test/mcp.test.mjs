@@ -663,3 +663,38 @@ test('Large MCP catalogs are omitted for rediscovery, without truncating tool sc
   assert.match(JSON.stringify(requests[0].input), /MCP tool catalog omitted/);
   assert.equal(requests[0].tools.some(tool => tool.type === 'mcp'), true);
 });
+
+for (const failed of [false, true]) {
+  test(`A batch of MCP callbacks shares a newest-first result budget (failed response: ${failed})`, async () => {
+    const output=Array.from({length:10},(_,i)=>({type:'mcp_call',id:`c${i}`,server_label:'linear',name:`read${i}`,arguments:'{}',output:String(i).repeat(100000)}));
+    transport(()=>failed?{status:200,json:{status:'failed',error:{message:'Interrupted'},output}}:response('openai',output));
+    const results=[];
+    await new api.AgentLoop(vaultApp().app,{...settings('openai'),mcpServers:SERVERS}).run('Read',callbacks({onToolResult:(_name,result)=>results.push(result)}));
+    assert.equal(results.length,10);
+    assert.ok(results.reduce((n,result)=>n+result.result.length,0)<202000);
+    assert.match(results[0].result,/Tool text truncated/);
+    assert.equal(results.at(-1).result,'9'.repeat(100000));
+  });
+}
+
+test('Visible folded and local tool rows share the budget without dropping entries or identities', () => {
+  const row=(id)=>({id,toolResult:{result:String(id).repeat(100000),isError:false}});
+  const change={id:'undo',type:'changes'},rows=[{id:'fold',steps:[row(1),change,row(2)]},row(3),row(4)];
+  const bounded=api.withoutLargeVisibleToolText(rows);
+  assert.equal(bounded.length,3);
+  assert.equal(bounded[0].steps[1],change);
+  assert.match(bounded[0].steps[0].toolResult.result,/Tool text truncated/);
+  assert.equal(bounded[2],rows[2]);
+  assert.equal(api.withoutLargeVisibleToolText(bounded),bounded);
+});
+
+test('Saving and restoring visible MCP rows enforces the shared text allowance', () => {
+  const conversation={...api.chatState.newConversation(),chatHistory:Array.from({length:10},(_,i)=>({type:'tool-result',toolName:'mcp:linear:read',toolResult:{result:String(i).repeat(100000),isError:false}}))};
+  const saved=api.chatState.savedConversation(conversation);
+  const restored=api.chatState.migrateChatState({version:3,activeConversationId:conversation.id,conversations:[conversation]}).conversations[0];
+  for(const history of [saved.chatHistory,restored.chatHistory]){
+    assert.equal(history.length,10);
+    assert.ok(history.reduce((n,row)=>n+row.toolResult.result.length,0)<202000);
+    assert.match(history[0].toolResult.result,/Tool text truncated/);
+  }
+});

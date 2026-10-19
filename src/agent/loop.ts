@@ -10,6 +10,7 @@ import type {
   MentionContext,
   FileAttachment,
   UnifiedResponse,
+  ServerToolCall,
 } from "../types";
 import { ProviderError } from "../api/errors";
 import { sendMessage } from "../api/client";
@@ -22,7 +23,7 @@ import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./history";
+import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./history";
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
@@ -35,6 +36,16 @@ import { RequestBudgetError } from "../api/request-budget";
  * round up: a long turn can keep a few more messages.
  */
 const KEEP_RECENT = 60;
+
+function displayServerCalls(calls: ServerToolCall[], callbacks: AgentCallbacks): void {
+  const rows = withoutLargeVisibleToolText(calls.filter(call => !call.pending).map(call => ({
+    name: serverToolName(call), input: call.input, toolResult: { result: call.result, isError: call.isError },
+  })));
+  for (const row of rows) {
+    callbacks.onToolCall(row.name, row.input);
+    callbacks.onToolResult(row.name, row.toolResult);
+  }
+}
 
 /**
  * What the chat view shows and saves for a tool result: the text and a
@@ -381,11 +392,7 @@ export class AgentLoop {
       if (isStopped()) return;
 
       // Tools the provider called on MCP servers: shown as steps, not run here.
-      for (const call of response.serverCalls ?? []) {
-        if (call.pending) continue;
-        callbacks.onToolCall(serverToolName(call), call.input);
-        callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
-      }
+      displayServerCalls(response.serverCalls ?? [], callbacks);
 
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {
@@ -505,10 +512,7 @@ export class AgentLoop {
   /** Keep completed server operations even when the surrounding response failed. */
   private keepRemoteReceipts(response: UnifiedResponse, callbacks?: AgentCallbacks): void {
     const calls = (response.serverCalls ?? []).filter(call => !call.pending);
-    if (callbacks) for (const call of calls) {
-      callbacks.onToolCall(serverToolName(call), call.input);
-      callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
-    }
+    if (callbacks) displayServerCalls(calls, callbacks);
     const content = response.content.filter(block => block.type !== "tool_use");
     // Keep the receipt in both representations: even a partial native replay
     // must retain it after revoking one of its servers.

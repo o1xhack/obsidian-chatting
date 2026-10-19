@@ -1,4 +1,4 @@
-import type { ChatHistoryEntry, ContentBlock, UnifiedMessage } from "../types";
+import type { ChatHistoryEntry, ContentBlock, ToolResult, UnifiedMessage } from "../types";
 
 function startsUserTurn(message: UnifiedMessage): boolean {
   return message.role === "user" && (typeof message.content === "string" ||
@@ -42,6 +42,31 @@ export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): stri
   if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
   const prefix = new TextDecoder().decode(new TextEncoder().encode(text.slice(0, end)));
   return prefix + notice;
+}
+
+/** The same newest-first allowance for visible, saved and folded tool rows. */
+export function withoutLargeVisibleToolText<T extends { toolResult?: ToolResult; steps?: T[] }>(rows: T[]): T[] {
+  let room = TOTAL_TOOL_TEXT_CHARS;
+  const visit = (source: T[]): T[] => {
+    let changed = false;
+    const next = [...source];
+    for (let i = source.length - 1; i >= 0; i--) {
+      const row = source[i];
+      const steps = row.steps && visit(row.steps);
+      let toolResult = row.toolResult;
+      if (toolResult && typeof toolResult.result === "string") {
+        const result = boundedToolText(toolResult.result, Math.min(MAX_TOOL_TEXT_CHARS, room));
+        room = Math.max(0, room - result.length);
+        if (result !== toolResult.result) toolResult = { ...toolResult, result };
+      }
+      if (steps !== row.steps || toolResult !== row.toolResult) {
+        next[i] = { ...row, ...(steps ? { steps } : {}), ...(toolResult ? { toolResult } : {}) };
+        changed = true;
+      }
+    }
+    return changed ? next : source;
+  };
+  return visit(rows);
 }
 
 /** Bound text as well as binary tool payloads. A copied prefix releases the

@@ -1,7 +1,7 @@
 {
-  "productionMainSha256": "a7888b2ae3fbf88ebae4b7a9c61daeb83524c6dc2810e6694e83a49c6571cd03",
-  "automatedTests": 538,
-  "mcpRegressions": 49,
+  "productionMainSha256": "b06a873fa4754f9b95d58497b6644519397a00d345aa741fed409a4f3887e17d",
+  "automatedTests": 542,
+  "mcpRegressions": 53,
   "desktop": {
     "scope": "native desktop Obsidian, exact production bundle and mounted Svelte UI; provider transport mocked; no live-provider claim",
     "appVersion": "1.14.4",
@@ -33,10 +33,13 @@
       "native-revocation-keeps-receipt",
       "native-incomplete-no-completed-result",
       "native-incomplete-no-success-label",
+      "native-shared-mcp-callback-budget",
+      "native-shared-visible-history-budget",
+      "native-folded-tool-result-pruned",
       "protected-vault-files-unchanged"
     ],
     "version": "0.8.0",
-    "candidateSha256": "a7888b2ae3fbf88ebae4b7a9c61daeb83524c6dc2810e6694e83a49c6571cd03",
+    "candidateSha256": "b06a873fa4754f9b95d58497b6644519397a00d345aa741fed409a4f3887e17d",
     "narrowLayout": {
       "width": 375,
       "scrollWidth": 375,
@@ -87,7 +90,7 @@
     },
     "testedCommit": "d0c5bff9e93a16f1b4f61220940be45e3d298ccd",
     "isFinalCandidate": false,
-    "subsequentChanges": "Receipt retention after server revocation, catalog bounding, failed-status handling and settings-copy clarification were retested on desktop only. No final physical phone rerun."
+    "subsequentChanges": "Receipt retention after revocation, catalog/error/status and visible-history budgets, and settings-copy clarification were retested on desktop only. No final physical phone rerun."
   },
   "realChatGPT": {
     "initial": {
@@ -122,6 +125,6 @@
   "limitations": [
     "Anthropic/OpenAI MCP requests use mocked transport in regression/native tests; no live API-key MCP call was made.",
     "The physical phone verifies production settings controls and preservation; it does not exercise a real remote MCP server.",
-    "Physical iPhone checks cover candidate d0c5bff, before the final receipt/catalog/status fixes and settings-copy clarification; final bundle was retested on desktop."
+    "Physical iPhone checks cover candidate d0c5bff, before subsequent receipt/catalog/status and visible-history budget fixes, plus settings-copy clarification; final bundle was retested on desktop."
   ]
 }
