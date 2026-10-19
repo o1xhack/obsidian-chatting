@@ -100,7 +100,12 @@ files saved without their data, restored, and sent again on edit).
 `skills.test.mjs`: skills (finding them in the skills folder, the list in
 the system prompt before `AGENTS.md`, `use_skill`, `/name` in a message and
 the `/` list, and the *Skills* settings with folder, list and New skill in
-both settings paths). `fold-turn.test.mjs`: which rows of a finished turn
+both settings paths). `mcp.test.mjs`: MCP servers (Anthropic's
+`mcp_servers`, toolsets and beta header, OpenAI's `mcp` tools, only servers
+on and valid; the provider's calls shown as steps, failed ones too, and
+replayed as sent; none for the ChatGPT account; tokens only in
+SecretStorage; the *MCP servers* settings in both settings paths).
+`fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without
 changes). These tests do not establish live-service or physical-iOS

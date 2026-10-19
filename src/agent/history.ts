@@ -73,10 +73,53 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
       room = Math.max(0, room - clipped.length);
     }
   }
-  if (!replacement.size) return messages;
-  return messages.map(message => typeof message.content === "string" ? message : {
-    ...message, content: message.content.map(block => replacement.get(block) ?? block),
+  const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
+  for (const message of messages) {
+    const bounded = message.replay && withBoundedServerResults(message.replay.items);
+    if (bounded && bounded !== message.replay!.items) replays.set(message, { ...message.replay!, items: bounded });
+  }
+  if (!replacement.size && !replays.size) return messages;
+  return messages.map(message => {
+    const replay = replays.get(message);
+    const withReplay = replay ? { ...message, replay } : message;
+    return typeof withReplay.content === "string" || !replacement.size ? withReplay : {
+      ...withReplay, content: withReplay.content.map(block => replacement.get(block) ?? block),
+    };
   });
+}
+
+/**
+ * MCP results the provider returned (Anthropic `mcp_tool_result`, OpenAI
+ * `mcp_call.output`) stay in the replayed answer as sent, each clipped like
+ * a tool result, so a large one isn't saved and sent again whole.
+ */
+function withBoundedServerResults(items: Record<string, unknown>[]): Record<string, unknown>[] {
+  let changed = false;
+  const bounded = items.map((item) => {
+    if (item.type === "mcp_call" && typeof item.output === "string") {
+      const output = boundedToolText(item.output);
+      if (output === item.output) return item;
+      changed = true;
+      return { ...item, output };
+    }
+    if (item.type === "mcp_tool_result" && Array.isArray(item.content)) {
+      let clipped = false;
+      const content = (item.content as unknown[]).map((part) => {
+        if (typeof part !== "object" || part === null) return part;
+        const text = (part as { text?: unknown }).text;
+        if (typeof text !== "string") return part;
+        const short = boundedToolText(text);
+        if (short === text) return part;
+        clipped = true;
+        return { ...part, text: short };
+      });
+      if (!clipped) return item;
+      changed = true;
+      return { ...item, content };
+    }
+    return item;
+  });
+  return changed ? bounded : items;
 }
 
 /** Last-resort payload preflight recovery. Keep text, tool pairing and all
