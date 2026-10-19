@@ -1290,6 +1290,9 @@ export class ObsidianChatView extends ItemView {
 
   private handleClear(): void {
     if (this.undoing) return;
+    const id = this.plugin.activeConversationId;
+    this.compactions.get(id)?.agent.abort();
+    this.compactions.delete(id);
     const turn = this.turn;
     if (turn) {
       // Clear drops the turn: nothing comes back.

@@ -358,3 +358,19 @@ test('A context overflow after an MCP action preserves its receipt and never sum
   assert.match(JSON.stringify(agent.exportMessages()), /created-once/);
   assert.ok(cb.errors.length);
 });
+
+test('Clearing a manually compacting chat cancels it and unlocks the composer immediately', async () => {
+  const { plugin, view } = await chatSetup('openai');
+  plugin.agent.importMessages([{ role: 'user', content: 'Old chat', turnId: 't1' }]);
+  plugin.chatHistory.push({ type: 'user', text: 'Old chat', turnId: 't1' });
+  let finish;
+  plugin.agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  const pending = view.compactNow();
+  assert.equal(view.running, true);
+  view.clearConversation();
+  assert.equal(view.running, false);
+  finish('Must not return');
+  await pending;
+  assert.equal(plugin.agent.exportMessages().length, 0);
+  assert.equal(plugin.chatHistory.length, 0);
+});
