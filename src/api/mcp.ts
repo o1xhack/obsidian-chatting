@@ -63,7 +63,7 @@ export function anthropicMcp(servers: McpServer[]): { mcp_servers: Record<string
  * doesn't name (switched off or removed since): the provider would refuse
  * them, and without any server the MCP beta isn't even asked for.
  */
-export function withoutGoneServerCalls(items: Record<string, unknown>[], servers: McpServer[], recorded?: Record<string, string>): Record<string, unknown>[] {
+export function withoutGoneServerCalls(items: Record<string, unknown>[], servers: McpServer[], recorded?: Record<string, string>, retainedCallIds?: ReadonlySet<unknown>): Record<string, unknown>[] {
   const current = mcpServerIdentities(servers);
   const names = new Set(servers.filter(server => !recorded || recorded[server.name] === current[server.name]).map(server => server.name));
   // Determine removals first: result blocks need not follow their call in an
@@ -73,7 +73,7 @@ export function withoutGoneServerCalls(items: Record<string, unknown>[], servers
     if (item.type === "mcp_tool_use" && !names.has(item.server_name as string)) {
       return false;
     }
-    if (item.type === "mcp_tool_result") return !gone.has(item.tool_use_id);
+    if (item.type === "mcp_tool_result") return !gone.has(item.tool_use_id) && (!retainedCallIds || retainedCallIds.has(item.tool_use_id));
     if (item.type === "mcp_call" || item.type === "mcp_list_tools" || item.type === "mcp_approval_request") {
       return names.has(item.server_label as string);
     }

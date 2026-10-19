@@ -47,6 +47,13 @@ export async function sendAnthropicMessage(
   const model = settings.model;
   const identity = await catalogIdentity("anthropic", settings.apiKey);
   const servers = activeServers(settings).map(server => ({ ...server }));
+  const priorReplays = messages.filter(message => message.role === "assistant" && message.replay?.provider === "anthropic" &&
+    (!message.replay.model || message.replay.model === model) && (!message.replay.identity || message.replay.identity === identity))
+    .map(message => message.replay!);
+  // A paused server call and its eventual result can live in different
+  // assistant messages. Filter results against all retained calls, not one row.
+  const retainedCallIds = new Set(priorReplays.flatMap(replay => withoutGoneServerCalls(replay.items, servers, replay.mcpServers))
+    .filter(item => item.type === "mcp_tool_use").map(item => item.id));
   if (settings.modelCatalog) {
     cachedCatalog(settings.modelCatalog, "anthropic", identity);
   }
@@ -62,7 +69,7 @@ export async function sendAnthropicMessage(
         cache_control: { type: "ephemeral" },
       },
     ],
-    messages: withoutOldToolImages(messages).map(msg => toAnthropicMessage(msg, model, identity, servers)),
+    messages: withoutOldToolImages(messages).map(msg => toAnthropicMessage(msg, model, identity, servers, retainedCallIds)),
   };
 
   // The thinking mode the model catalog reports (`/v1/models` capabilities);
@@ -237,9 +244,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[]): Record<string, unknown> {
+function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[], retainedCallIds: ReadonlySet<unknown>): Record<string, unknown> {
   if (msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity)) {
-    const content = withoutGoneServerCalls(msg.replay.items, servers, msg.replay.mcpServers);
+    const content = withoutGoneServerCalls(msg.replay.items, servers, msg.replay.mcpServers, retainedCallIds);
     // Nothing but calls of servers that are gone: sent as text below.
     if (content.length) return { role: msg.role, content };
   }

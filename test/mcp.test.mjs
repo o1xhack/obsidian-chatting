@@ -478,3 +478,70 @@ test('Settings reject duplicate or unsafe server IDs before reading SecretStorag
   assert.equal(keys.filter(key => key === 'chatting-with-ai-mcp-a').length, 1);
   assert.equal(keys.some(key => key.includes('../')), false);
 });
+
+test('Adding a server works in a mobile WebView without randomUUID or SubtleCrypto', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const getRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto);
+  try {
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { getRandomValues } });
+    const { tab, plugin } = settingsTab([]);
+    await tab.addMcpServer();
+    assert.match(plugin.settings.mcpServers[0].id, /^mcp-[a-f0-9]{32}$/);
+  } finally { Object.defineProperty(globalThis, 'crypto', original); }
+});
+
+test('Disabling a server during a local tool step removes it from the next request of that turn', async () => {
+  const requests = transport((_body, index) => response('anthropic', index ? [text('Done')] : [
+    { type: 'tool_use', id: 'r1', name: 'read_document', input: { path: 'Untitled.md' } },
+  ], index ? 'end_turn' : 'tool_use', index));
+  const config = { ...settings('anthropic'), mcpServers: [{ ...SERVERS[0] }] };
+  await new api.AgentLoop(vaultApp().app, config).run('Read', callbacks({ onToolResult: () => { config.mcpServers = []; } }));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].mcp_servers.length, 1);
+  assert.equal(requests[1].mcp_servers, undefined);
+});
+
+for (const change of ['disable', 'remove', 'url', 'token']) {
+  test(`Anthropic ${change}: removes cross-message paused-call results together with their call`, async () => {
+    const requests = transport((_body, index) => response('anthropic', index === 0 ? [
+      { type: 'mcp_tool_use', id: 'm1', name: 'read', server_name: 'linear', input: {} },
+    ] : index === 1 ? [
+      { type: 'mcp_tool_result', tool_use_id: 'm1', content: [{ type: 'text', text: 'PAUSED-RESULT' }] }, text('Done'),
+    ] : [text('Next')], index === 0 ? 'pause_turn' : 'end_turn', index));
+    const config = { ...settings('anthropic'), mcpServers: [{ ...SERVERS[0] }] };
+    const loop = new api.AgentLoop(vaultApp().app, config);
+    await loop.run('Read', callbacks());
+    if (change === 'remove') config.mcpServers = [];
+    else if (change === 'disable') config.mcpServers[0].enabled = false;
+    else config.mcpServers[0][change] = change === 'url' ? 'https://new.example/mcp' : 'new-token';
+    await loop.run('Next', callbacks());
+    const sent = requests[2].messages.flatMap(message => message.content);
+    assert.equal(sent.some(item => item.type === 'mcp_tool_use' || item.type === 'mcp_tool_result'), false);
+    assert.equal(requests[2].messages.every(message => typeof message.content === 'string' || message.content.length > 0), true);
+  });
+}
+
+test('Failed OpenAI remote receipts are shown, persisted, replayed after restart and portable to another provider', async () => {
+  const requests = transport((_body, index) => index === 0 ? { status: 200, json: { status: 'failed', error: { code: 'rate_limit_exceeded', message: 'Try again in 0ms' }, output: [
+    { type: 'mcp_call', id: 'created-call', server_label: 'linear', name: 'create', arguments: '{"title":"Ticket"}', output: 'CREATED-99' },
+    { type: 'function_call', call_id: 'local', name: 'create_file', arguments: '{' },
+  ] } } : response('openai', [text('Confirmed')], 'end_turn', index));
+  const config = { ...settings('openai'), mcpServers: [{ ...SERVERS[0] }] };
+  const cb = callbacks({ onToolResult: (name, result) => cb.receipt = { name, result } });
+  const loop = new api.AgentLoop(vaultApp().app, config);
+  await loop.run('Create', cb);
+  assert.equal(requests.length, 1);
+  assert.equal(cb.receipt.name, 'mcp:linear:create');
+  assert.equal(cb.receipt.result.result, 'CREATED-99');
+  assert.match(cb.errors[0], /Remote MCP tools may already have run/);
+  const saved = JSON.parse(JSON.stringify(loop.exportMessages()));
+  assert.match(JSON.stringify(saved), /CREATED-99/);
+  assert.doesNotMatch(JSON.stringify(saved), /create_file|secret-token/);
+  const restored = new api.AgentLoop(vaultApp().app, config);
+  restored.importMessages(saved);
+  await restored.run('Confirm', callbacks());
+  assert.equal(requests[1].previous_response_id, undefined);
+  assert.equal(requests[1].input.find(item => item.type === 'mcp_call').output, 'CREATED-99');
+  const portable = api.buildResponsesInput(saved, 'chatgpt-oauth');
+  assert.match(JSON.stringify(portable), /CREATED-99/);
+});

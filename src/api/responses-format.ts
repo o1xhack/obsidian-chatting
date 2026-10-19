@@ -91,14 +91,7 @@ export function fromResponsesOutput(
   identity?: string,
 ): UnifiedResponse {
   const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
-  if (data.status === "failed" || data.error) {
-    const error = isRecord(data.error) ? data.error : {};
-    const remoteEffectsPossible = output.some(item => item.type === "mcp_call");
-    // Status 0: the error came inside a response; its code decides on a retry.
-    throw new ProviderError((typeof error.message === "string" ? error.message : "Response failed.") +
-      (remoteEffectsPossible ? " Remote MCP tools may already have run; check their results before retrying." : ""), 0,
-      typeof error.code === "string" ? error.code : undefined, undefined, remoteEffectsPossible);
-  }
+  const failed = data.status === "failed" || !!data.error;
   const content: ContentBlock[] = [];
   for (const item of output) {
     if (item.type === "message" && Array.isArray(item.content)) {
@@ -109,7 +102,7 @@ export function fromResponsesOutput(
           content.push({ type: "text", text: part.refusal });
         }
       }
-    } else if (item.type === "function_call" && data.status !== "incomplete") {
+    } else if (item.type === "function_call" && data.status !== "incomplete" && !failed) {
       if (typeof item.call_id !== "string" || typeof item.name !== "string") {
         throw new Error("Response contained an invalid tool call.");
       }
@@ -125,7 +118,7 @@ export function fromResponsesOutput(
     }
   }
   const usage = isRecord(data.usage) ? data.usage : undefined;
-  return {
+  const result: UnifiedResponse = {
     content,
     replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
@@ -133,6 +126,16 @@ export function fromResponsesOutput(
     // Tools OpenAI called on MCP servers; their items stay in the replay as sent.
     ...withServerCalls(openaiServerCalls(output)),
   };
+  if (failed) {
+    const error = isRecord(data.error) ? data.error : {};
+    const remoteEffectsPossible = !!result.serverCalls?.length;
+    // Keep receipts even though the error still ends the turn. The dispatcher
+    // must not repeat a request that may have changed an external service.
+    throw new ProviderError((typeof error.message === "string" ? error.message : "Response failed.") +
+      (remoteEffectsPossible ? " Remote MCP tools may already have run; check their results before retrying." : ""), 0,
+      typeof error.code === "string" ? error.code : undefined, undefined, remoteEffectsPossible, remoteEffectsPossible ? result : undefined);
+  }
+  return result;
 }
 
 /**

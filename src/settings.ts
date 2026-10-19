@@ -422,7 +422,10 @@ export class ChatSettingTab extends PluginSettingTab {
 
   private async addMcpServer(): Promise<void> {
     const s = this.plugin.settings;
-    s.mcpServers = [...s.mcpServers ?? [], { id: `mcp-${crypto.randomUUID()}`, name: "", url: "", enabled: false }];
+    // getRandomValues also works in mobile WebViews without secure-context
+    // APIs such as randomUUID/SubtleCrypto.
+    const id = `mcp-${Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    s.mcpServers = [...s.mcpServers ?? [], { id, name: "", url: "", enabled: false }];
     await this.plugin.saveSettings();
     this.refreshSettingsTab();
   }

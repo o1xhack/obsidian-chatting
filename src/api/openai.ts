@@ -137,7 +137,16 @@ export async function sendOpenAIMessage(
 
   const data = asRecord(response.json as unknown);
 
-  const result = fromResponsesOutput(data, "openai", model, identity);
+  let result: UnifiedResponse;
+  try {
+    result = fromResponsesOutput(data, "openai", model, identity);
+  } catch (error) {
+    conversations.delete(messages);
+    if (error instanceof ProviderError && error.partialResponse?.replay) {
+      error.partialResponse.replay.mcpServers = mcpServerIdentities(servers);
+    }
+    throw error;
+  }
   if (result.replay) result.replay.mcpServers = mcpServerIdentities(servers);
   if (typeof data.id === "string") {
     conversations.set(messages, { responseId: data.id, model, apiKey: settings.apiKey, messages: [...messages], replay: result.replay, mcpConfig });

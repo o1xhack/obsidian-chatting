@@ -9,7 +9,9 @@ import type {
   ToolResult,
   MentionContext,
   FileAttachment,
+  UnifiedResponse,
 } from "../types";
+import { ProviderError } from "../api/errors";
 import { sendMessage } from "../api/client";
 import { clearOpenAIState } from "../api/openai";
 import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
@@ -346,6 +348,11 @@ export class AgentLoop {
         }
         if (!response) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (e instanceof ProviderError && e.partialResponse) {
+            this.keepRemoteReceipts(e.partialResponse, callbacks);
+            const partialText = e.partialResponse.content.filter(block => block.type === "text").map(block => block.text).join("");
+            if (partialText) callbacks.onResponse(partialText);
+          }
           debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
           if (i === 0 && e instanceof RequestBudgetError) {
             // Nothing reached the provider or tools. Undo local pruning and
@@ -386,11 +393,7 @@ export class AgentLoop {
         if (response.serverCalls?.length) {
           // Remote effects have already happened. Retain their receipts so a
           // follow-up cannot lose them, while discarding partial local calls.
-          this.messages.push({
-            role: "assistant", content: response.content.filter(block => block.type !== "tool_use"),
-            replay: response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") },
-          });
-          this.messages = withoutLargeToolText(this.messages);
+          this.keepRemoteReceipts(response);
         }
         if (text) callbacks.onResponse(text);
         callbacks.onError("The response reached its token limit before completing. Please try a smaller request." +
@@ -497,6 +500,26 @@ export class AgentLoop {
     callbacks.onError(
       `Reached maximum iterations (${maxIterations}). The task may be too complex for a single conversation turn.`
     );
+  }
+
+  /** Keep completed server operations even when the surrounding response failed. */
+  private keepRemoteReceipts(response: UnifiedResponse, callbacks?: AgentCallbacks): void {
+    const calls = (response.serverCalls ?? []).filter(call => !call.pending);
+    if (callbacks) for (const call of calls) {
+      callbacks.onToolCall(serverToolName(call), call.input);
+      callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
+    }
+    const content = response.content.filter(block => block.type !== "tool_use");
+    // Portable text is only used if native replay is unavailable (for example
+    // after changing provider); it must still explain what already ran.
+    if (calls.length) content.push({ type: "text", text: boundedToolText(calls.map(call =>
+      `Remote MCP receipt (${call.server}/${call.tool}, ${call.isError ? "error" : "completed"}): ${boundedToolText(call.result, 1000)}`,
+    ).join("\n"), 8000) });
+    this.messages.push({
+      role: "assistant", content,
+      replay: response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") },
+    });
+    this.messages = withoutLargeToolText(this.messages);
   }
 
   /** Bound stored tool pixels as well as outgoing requests; user attachments stay. */

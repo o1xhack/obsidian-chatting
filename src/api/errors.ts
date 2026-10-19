@@ -1,3 +1,5 @@
+import type { UnifiedResponse } from "../types";
+
 /**
  * An error answer from a provider: the HTTP status (0 for an error inside a
  * response that had started), the provider's error code or type, and the
@@ -12,6 +14,8 @@ export class ProviderError extends Error {
     readonly retryAfterMs?: number,
     /** A server-side tool may already have changed external state. */
     readonly remoteEffectsPossible = false,
+    /** Receipts from remote operations already completed before the error. */
+    readonly partialResponse?: UnifiedResponse,
   ) {
     super(message);
     this.name = "ProviderError";
