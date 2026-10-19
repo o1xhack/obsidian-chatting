@@ -2,7 +2,7 @@
   import type { App, TFile } from "obsidian";
   import { Component as ObsidianComponent, MarkdownRenderer, Notice } from "obsidian";
   import { tick, onDestroy } from "svelte";
-  import type { ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary } from "../types";
+  import type { ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ChatErrorKind } from "../types";
   import { ACCEPTED_FILES, MAX_FILE_BYTES, fileAttachment, attachmentBudgetError } from "../files/attachments";
   import { formatBytes } from "../images";
   import { insertMention, mentionAt, mentionCandidates, type MentionQuery } from "./mentions";
@@ -11,9 +11,14 @@
   import { isSendKey } from "./send-key";
   import { fileLabel, toolLabel } from "./tool-label";
   import { foldPlan } from "./fold-turn";
-  import type { ChangesState } from "./chat-view";
+  import type { ChangesState, UsageView } from "./chat-view";
   import { AttachmentPreparation } from "./attachment-preparation";
   import { withoutLargeVisibleToolText } from "../agent/history";
+  import { formatCost, formatTokens } from "../agent/usage";
+
+  /** Where a ChatGPT account sees its plan's Codex usage. */
+  const CHATGPT_USAGE_URL = "https://chatgpt.com/codex/settings/usage";
+
 
   const MAX_IMAGE_COUNT = 4;
   const MAX_FILE_COUNT = 4;
@@ -41,7 +46,7 @@
     selection?: SelectionScope;
     /** Assistant messages: text still arriving (no actions yet). */
     streaming?: boolean;
-    errorKind?: "stopped";
+    errorKind?: ChatErrorKind;
     /** Changes rows: the files a turn changed, and whether it can be undone. */
     files?: string[];
     changesState?: ChangesState;
@@ -81,13 +86,30 @@
     listSkills: () => Skill[];
     /** Continue the turn that was cut off when Obsidian was ended. */
     onContinue: () => void;
+    /** Summarize the chat now (the context ring's details). */
+    onCompact: () => void;
   }
 
   let {
     app, component, provider, model, onSend, onClear, onStop, onEdit, onRegenerate, onCopy,
     title, onNewChat, listConversations, onOpenConversation, onRenameConversation, onDeleteConversation,
-    onToggleFollow, onUndo, listSkills, onContinue,
+    onToggleFollow, onUndo, listSkills, onContinue, onCompact,
   }: Props = $props();
+
+  // ─── Context ring ─────────────────────────────────────────────────────
+  let usage = $state<UsageView | null>(null);
+  let usageOpen = $state(false);
+  let usageEl: HTMLElement | undefined = $state();
+
+  export function setUsage(next: UsageView | null): void {
+    usage = next;
+    if (!next) usageOpen = false;
+  }
+
+  /** The details close on a click elsewhere or Escape. */
+  function closeUsageOutside(event: MouseEvent): void {
+    if (usageOpen && usageEl && event.target instanceof Node && !usageEl.contains(event.target)) usageOpen = false;
+  }
 
   /** A turn was cut off when Obsidian was ended in the background: offer Continue. */
   let canContinue = $state(false);
@@ -427,7 +449,7 @@
     if (idx !== -1) messages.splice(idx, 1);
   }
 
-  export function addError(text: string, errorKind?: "stopped"): void {
+  export function addError(text: string, errorKind?: ChatErrorKind): void {
     messages.push({ id: nextId++, type: "error", text, errorKind });
   }
 
@@ -1057,6 +1079,8 @@
   </div>
 {/snippet}
 
+<svelte:window onclick={closeUsageOutside} onkeydown={(e) => { if (e.key === "Escape") usageOpen = false; }} />
+
 <div class="ochatting-container">
   <!-- Header -->
   <div class="ochatting-header">
@@ -1075,6 +1099,72 @@
       <span class="ochatting-header-title" title={displayTitle}>{displayTitle || "New chat"}</span>
       <span class="ochatting-header-model">{displayModel || "No model"}</span>
     </div>
+    {#if usage}
+      {@const share = usage.contextWindow ? Math.min(1, usage.contextTokens / usage.contextWindow) : 0}
+      <!-- How full the context is; a click shows the details -->
+      <div class="ochatting-usage" bind:this={usageEl}>
+        <button
+          class="ochatting-icon-btn ochatting-usage-btn"
+          class:is-full={usage.compactAt !== undefined && usage.contextTokens >= usage.compactAt}
+          type="button"
+          onclick={() => usageOpen = !usageOpen}
+          aria-expanded={usageOpen}
+          aria-label={usage.plan ? "Context" : "Context and cost"}
+          title={usage.contextWindow ? `Context ${Math.round(share * 100)} % full` : `Context ${formatTokens(usage.contextTokens)} tokens`}
+        >
+          <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2.5"></circle>
+            {#if usage.contextWindow}
+              <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-dasharray={`${(share * 47.12).toFixed(2)} 47.12`} transform="rotate(-90 10 10)"></circle>
+            {/if}
+          </svg>
+        </button>
+        {#if usageOpen}
+          <div class="ochatting-usage-pop" role="dialog" aria-label={usage.plan ? "Context" : "Context and cost"}>
+            <div class="ochatting-usage-row">
+              <span>Context</span>
+              <span>{formatTokens(usage.contextTokens)}{usage.contextWindow ? ` of ${formatTokens(usage.contextWindow)} (${Math.round(share * 100)} %)` : " tokens"}</span>
+            </div>
+            {#if usage.contextWindow}
+              <div class="ochatting-usage-bar"><span style:width={`${(share * 100).toFixed(1)}%`}></span></div>
+            {/if}
+            <div class="ochatting-usage-row">
+              <span>Tokens used</span>
+              <span>{formatTokens(usage.inputTokens)} in · {formatTokens(usage.outputTokens)} out</span>
+            </div>
+            {#if usage.plan}
+              <!-- No per-token cost on the plan; OpenAI gives apps no remaining-usage figure. -->
+              <div class="ochatting-usage-row">
+                <span>Plan</span>
+                <span>Included in your ChatGPT plan · <a href={CHATGPT_USAGE_URL} target="_blank" rel="noopener">Manage usage</a></span>
+              </div>
+            {:else}
+              <div class="ochatting-usage-row">
+                <span>Cost</span>
+                <span>
+                  {#if usage.costUsd !== undefined}
+                    {formatCost(usage.costUsd)} this chat{usage.lastTurnCostUsd !== undefined ? `, ${formatCost(usage.lastTurnCostUsd)} last answer` : ""}
+                  {:else}
+                    No prices known for this model
+                  {/if}
+                </span>
+              </div>
+              {#if usage.costUsd !== undefined}
+                <div class="ochatting-usage-note">Estimated from the provider's list prices{usage.partialCost ? "; some requests had no price" : ""}.</div>
+              {/if}
+            {/if}
+            <button
+              class="ochatting-usage-compact"
+              type="button"
+              disabled={busy}
+              onclick={() => { usageOpen = false; onCompact(); }}
+              title="Replace the chat so far with a summary, written by the model"
+            >Compact now</button>
+          </div>
+        {/if}
+      </div>
+    {/if}
     <button
       class="ochatting-follow-btn"
       class:is-active={followEdits}
@@ -1333,8 +1423,8 @@
           {/if}
         </details>
 
-      {:else if msg.type === "error" && msg.errorKind === "stopped"}
-        <!-- Stopped before any of the answer arrived: a quiet note, not an error -->
+      {:else if msg.type === "error" && (msg.errorKind === "stopped" || msg.errorKind === "compacted")}
+        <!-- Stopped before any of the answer arrived, or the earlier part summarized: a quiet note, not an error -->
         <div class="ochatting-stopped-note">{msg.text}</div>
 
       {:else if msg.type === "changes"}
@@ -1602,6 +1692,74 @@
   .ochatting-icon-btn.is-active {
     background: var(--background-modifier-hover);
     color: var(--text-normal);
+  }
+
+  /* ─── Context ring and its details ──────────────────────────────────── */
+  .ochatting-usage {
+    position: relative;
+  }
+
+  .ochatting-usage-btn.is-full {
+    color: var(--text-warning);
+  }
+
+  .ochatting-usage-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    width: min(280px, 80vw);
+    padding: 10px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    background: var(--background-primary);
+    box-shadow: var(--shadow-s);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-normal);
+  }
+
+  .ochatting-usage-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 6px;
+  }
+
+  .ochatting-usage-row:first-child {
+    margin-top: 0;
+  }
+
+  .ochatting-usage-row span:first-child {
+    color: var(--text-muted);
+  }
+
+  .ochatting-usage-row span:last-child {
+    text-align: right;
+  }
+
+  .ochatting-usage-bar {
+    height: 4px;
+    margin: 6px 0;
+    border-radius: 2px;
+    background: var(--background-modifier-border);
+    overflow: hidden;
+  }
+
+  .ochatting-usage-bar span {
+    display: block;
+    height: 100%;
+    background: var(--interactive-accent);
+  }
+
+  .ochatting-usage-note {
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
+
+  .ochatting-usage-compact {
+    width: 100%;
+    margin-top: 10px;
+    font-size: var(--font-ui-smaller);
   }
 
   /* ─── Body: the chat, with the history list over it ─────────────────── */

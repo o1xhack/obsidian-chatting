@@ -129,8 +129,18 @@ trimming never starts at tool results with an added message).
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without
-changes). These tests do not establish live-service or physical-iOS
-behavior.
+changes). `usage.test.mjs`: each provider's token counts (cache reads and
+writes, a compaction pass), the cost estimate, windows and prices from
+Anthropic's model list and pricing page, the Codex model list and OpenAI's
+documentation page (read once a day), the context ring with its compaction
+point and tokens used, saved with the chat and checked when loaded, gone
+after Clear; the ChatGPT plan without cost. `compaction.test.mjs`:
+compaction (Anthropic's threshold edit and beta header where the model has
+it, OpenAI's and the Codex route's `context_management`, what later requests
+send; the Codex route refusing it; the plugin's summary at the compaction
+point, after another provider's encrypted compaction (once), on a request
+too long, and on Compact now; the transcript). These tests do not establish
+live-service or physical-iOS behavior.
 
 Two Node scripts that exercise the ChatGPT/Codex Responses endpoint
 **without** going through Obsidian, so iteration on the

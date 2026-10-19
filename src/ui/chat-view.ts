@@ -3,7 +3,7 @@ import { mount, unmount } from "svelte";
 import type { Component } from "svelte";
 import type ChatPlugin from "../main";
 import ChatContainer from "./ChatContainer.svelte";
-import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry } from "../types";
+import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry, ChatErrorKind } from "../types";
 import type { ConversationRecord } from "../chat-state";
 import type { AgentLoop } from "../agent/loop";
 import { showInView } from "./show-in-view";
@@ -15,6 +15,9 @@ import { newTurnId, withoutLargeVisibleToolText } from "../agent/history";
 import { mentionContext, mentionedFiles } from "./mentions";
 import { attachmentBudgetError } from "../files/attachments";
 import { findSkills, invokedSkillsContext, type Skill } from "../agent/skills";
+import { addRequest } from "../agent/usage";
+import { compactThreshold } from "../agent/compaction";
+import { catalogModel } from "../api/model-catalog";
 
 export const VIEW_TYPE_CHAT = "ochatting-view";
 
@@ -71,6 +74,7 @@ interface ChatContainerProps {
   onUndo: (turnId: string) => void;
   listSkills: () => Skill[];
   onContinue: () => void;
+  onCompact: () => void;
 }
 
 interface ChatContainerApi extends Record<string, unknown> {
@@ -83,7 +87,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   cutMessages(turnId: string): void;
   addToolCall(name: string, input: Record<string, unknown>): number;
   updateToolResult(msgId: number, name: string, result: ToolResult): void;
-  addError(text: string, errorKind?: "stopped"): void;
+  addError(text: string, errorKind?: ChatErrorKind): void;
   /** The thinking dots, with a short label such as "Resuming…". */
   showThinking(label?: string): void;
   hideThinking(): void;
@@ -118,9 +122,34 @@ interface ChatContainerApi extends Record<string, unknown> {
   setChangesKept?(turnId: string): void;
   /** A finished turn: its steps fold into one row above the answer. */
   foldTurn(turnId: string): void;
+  /** The context ring in the header (null hides it). */
+  setUsage?(usage: UsageView | null): void;
 }
 
 export type ChangesState = "undoable" | "undone" | "kept";
+
+/** The quiet note in the chat where the earlier part was summarized. */
+const COMPACTED_NOTE = "The earlier part of this chat was summarized to keep it within the model's context.";
+
+/** The context ring and its details (the open conversation, the selected model). */
+export interface UsageView {
+  /** Tokens of the last request (input and answer). */
+  contextTokens: number;
+  /** All tokens the chat's requests used, in and out. */
+  inputTokens: number;
+  outputTokens: number;
+  /** The selected model's window; unknown: no ring, only the count. */
+  contextWindow?: number;
+  /** Where the context is compacted. */
+  compactAt?: number;
+  /** Estimated cost of the conversation and of its last turn; none without prices. */
+  costUsd?: number;
+  lastTurnCostUsd?: number;
+  /** Some requests had no price (the cost leaves them out). */
+  partialCost: boolean;
+  /** The ChatGPT plan: no per-token cost. */
+  plan: boolean;
+}
 
 /**
  * A turn in progress, in the shown conversation or another: a turn keeps
@@ -290,6 +319,7 @@ export class ObsidianChatView extends ItemView {
         onUndo: (turnId: string) => void this.undoChanges(turnId),
         listSkills: () => findSkills(this.plugin.app, this.plugin.settings.skillsFolder),
         onContinue: () => void this.continueTurn(),
+        onCompact: () => void this.compactNow(),
       },
     });
 
@@ -348,6 +378,69 @@ export class ObsidianChatView extends ItemView {
     if (!this.running && this.plugin.activeConversation.pendingTurn?.remoteEffectsPossible) {
       chat.addError("This interrupted request may have run remote MCP tools. Check the external service before sending a new message; Continue is unavailable to avoid repeating changes.");
     }
+    this.updateUsage();
+  }
+
+  /** The context ring for the open conversation and the selected model. */
+  updateUsage(): void {
+    const usage = this.plugin.activeConversation.usage;
+    if (!usage) {
+      this.chatContainer?.setUsage?.(null);
+      return;
+    }
+    const { provider, model } = this.plugin.settings;
+    const option = catalogModel(provider, model);
+    const plan = provider === "chatgpt-oauth";
+    const priced = usage.costUsd > 0 || usage.unpricedRequests === 0;
+    this.chatContainer?.setUsage?.({
+      contextTokens: usage.contextTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      contextWindow: option?.contextWindow,
+      compactAt: compactThreshold(provider, option),
+      ...(priced && !plan ? { costUsd: usage.costUsd, lastTurnCostUsd: usage.lastTurnCostUsd } : {}),
+      partialCost: usage.unpricedRequests > 0,
+      plan,
+    });
+  }
+
+  /**
+   * *Compact now* (the ring's details): the open conversation's history
+   * becomes a summary written by its model. Not while a turn runs.
+   */
+  async compactNow(): Promise<void> {
+    const chat = this.chatContainer;
+    if (!chat || this.running) return;
+    const conversation = this.plugin.activeConversation;
+    const agent = this.plugin.agentFor(conversation);
+    // Kept by the plugin if the user switches away meanwhile.
+    const release = agent.hold();
+    chat.setBusy(true);
+    chat.setInputEnabled(false);
+    chat.showThinking("Summarizing…");
+    try {
+      const onUsage: AgentCallbacks["onUsage"] = (usage, request) => {
+        const pricing = catalogModel(request.provider, request.model)?.pricing;
+        conversation.usage = addRequest(conversation.usage, usage, { ...request, pricing });
+      };
+      if (await agent.compact(onUsage)) {
+        conversation.chatHistory.push({ type: "error", text: COMPACTED_NOTE, errorKind: "compacted" });
+        // Small now; the next answer counts it.
+        if (conversation.usage) conversation.usage = { ...conversation.usage, contextTokens: 0 };
+        void this.plugin.saveChatHistory();
+      }
+    } catch (e) {
+      new Notice(`Couldn't summarize the chat: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      release();
+      if (this.plugin.activeConversation === conversation) {
+        chat.hideThinking();
+        this.renderHistory();
+        chat.setBusy(false);
+        chat.setInputEnabled(true);
+      }
+
+    }
   }
 
   /**
@@ -401,6 +494,8 @@ export class ObsidianChatView extends ItemView {
   /** Update the model display name in the header */
   updateModel(name: string): void {
     this.chatContainer?.setModel(name);
+    // The ring measures against the selected model's window.
+    this.updateUsage();
   }
 
   /** Release expired payloads also held by mounted thumbnails, without
@@ -529,7 +624,10 @@ export class ObsidianChatView extends ItemView {
     const originalTitleSource = conversation.titleSourceTurnId;
     const originalUpdatedAt = conversation.updatedAt;
     const originalNotes = conversation.notes ?? [];
+    const originalUsage = conversation.usage;
     agent.cutBeforeTurn(turnId);
+    // The history is shorter now: the next answer counts its context anew.
+    if (conversation.usage) conversation.usage = { ...conversation.usage, contextTokens: 0 };
     conversation.chatHistory = history.slice(0, index);
     if (history[index].turnId === conversation.titleSourceTurnId) delete conversation.titleSourceTurnId;
     const replacementHistory = conversation.chatHistory;
@@ -541,6 +639,7 @@ export class ObsidianChatView extends ItemView {
       conversation.automaticTitle = originalAutomaticTitle;
       conversation.titleSourceTurnId = originalTitleSource;
       conversation.updatedAt = originalUpdatedAt;
+      conversation.usage = originalUsage;
       if (originalNotes.length) conversation.notes = [...new Set([...originalNotes, ...conversation.notes ?? []])];
       // Preserve the rejection explanation alongside the original conversation.
       history.push(...replacementHistory.slice(index).filter(row => row.type === "error"));
@@ -627,7 +726,7 @@ export class ObsidianChatView extends ItemView {
       this.plugin.touchConversation();
       chat.setTitle(conversation.title);
       begin();
-      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files);
+      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens);
     }, { text, selection, images, files, notes, rollback });
   }
 
@@ -743,6 +842,21 @@ export class ObsidianChatView extends ItemView {
         onResuming: () => {
           this.endStream(turn, false);
           this.setThinking(turn, "Resuming…");
+        },
+        // The earlier part was summarized: a quiet note where it happened.
+        onCompacted: () => {
+          ui()?.addError(COMPACTED_NOTE, "compacted");
+          history.push({ type: "error", text: COMPACTED_NOTE, errorKind: "compacted" });
+        },
+        onUsage: (usage, request) => {
+          const pricing = catalogModel(request.provider, request.model)?.pricing;
+          conversation.usage = addRequest(conversation.usage, usage, { ...request, pricing });
+          if (ui()) this.updateUsage();
+        },
+        // Read in the background: saved with the settings (once a day), shown in the ring.
+        onModelDetails: () => {
+          void this.plugin.saveSettings();
+          if (ui()) this.updateUsage();
         },
         onTextDelta: (delta) => {
           answering();
@@ -1114,6 +1228,8 @@ export class ObsidianChatView extends ItemView {
     this.plugin.agent.clear();
     this.plugin.chatHistory = [];
     delete this.plugin.activeConversation.notes;
+    delete this.plugin.activeConversation.usage;
+    this.chatContainer?.setUsage?.(null);
     this.plugin.touchConversation();
     this.chatContainer?.setTitle(this.plugin.activeConversation.title);
     this.chatContainer?.clearMessages();

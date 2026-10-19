@@ -16,7 +16,8 @@ import { sendMessage } from "../api/client";
 import { ProviderError, StreamCutError } from "../api/errors";
 import { isBuffered, lastChunkAt } from "../api/stream";
 import { clearOpenAIState } from "../api/openai";
-import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { chatgptCompacts, clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { catalogModel, loadModelDetails, type ModelOption } from "../api/model-catalog";
 import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
@@ -29,6 +30,13 @@ import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
 import { appLifecycle } from "../platform/lifecycle";
+import { afterCompaction, compactThreshold, summaryMessage } from "./compaction";
+import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryRequest } from "./summary";
+
+/** The turn ID of a summary message (it starts its own turn, with no visible entry). */
+function summaryTurnId(): string {
+  return `summary-${newTurnId()}`;
+}
 
 /**
  * The API history: saving keeps the last 80 messages. Before a turn, a
@@ -264,12 +272,114 @@ export class AgentLoop {
     return this.holds > 0;
   }
 
+  // ─── Compaction ───────────────────────────────────────────────────────
+  // The provider compacts where it can (a parameter of each request); the
+  // plugin writes a summary where it can't.
+
+  /**
+   * Summarize the whole history now (*Compact now*): it becomes one
+   * message with the summary. False when nothing was done (empty, a turn
+   * runs, stopped). Throws when the summary request fails.
+   */
+  async compact(onUsage?: AgentCallbacks["onUsage"]): Promise<boolean> {
+    if (this.messages.length === 0 || this.loopVersion) return false;
+    const version = ++this.runVersion;
+    const isStopped = () => version !== this.runVersion;
+    const summary = await this.summarize({ ...this.settings }, this.messages, isStopped, onUsage);
+    if (isStopped()) return false;
+    this.messages = [summaryMessage(summary, summaryTurnId())];
+    debugLog(this.app, "COMPACTED", { reason: "user", chars: summary.length });
+    return true;
+  }
+
+  /**
+   * Before a turn: a summary where the provider can't help.
+   * - The last compaction is another provider's or model's and has no
+   *   readable summary (OpenAI's is encrypted): it gets one now, once.
+   * - The provider doesn't compact (unsupported, refused or the window
+   *   unknown to it) and the last request (`contextTokens`) passed the
+   *   compaction point: the history is summarized now.
+   * A failed summary doesn't stop the turn.
+   */
+  private async prepareContext(settings: ChatSettings, contextTokens: number, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
+    try {
+      const index = this.messages.map((message) => !!message.compaction).lastIndexOf(true);
+      const marker = this.messages[index];
+      const replay = marker?.replay;
+      const replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
+      if (marker?.compaction && !marker.compaction.summary && !replayable && index > 0) {
+        marker.compaction = { summary: await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage) };
+        debugLog(this.app, "COMPACTED", { reason: "provider switch" });
+      }
+      const option = catalogModel(settings.provider, settings.model);
+      const threshold = compactThreshold(settings.provider, option);
+      if (!isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
+        const summary = await this.summarize(settings, this.messages, isStopped, callbacks.onUsage);
+        if (isStopped()) return;
+        this.messages = [summaryMessage(summary, summaryTurnId())];
+        debugLog(this.app, "COMPACTED", { reason: "threshold", contextTokens, threshold });
+        callbacks.onCompacted?.();
+      }
+    } catch (e) {
+      debugLog(this.app, "COMPACTION_FAILED", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** The provider compacts this model's context on its side. */
+  private compactsNatively(settings: ChatSettings, option: ModelOption | undefined): boolean {
+    if (settings.provider === "anthropic") return option?.compaction === true;
+    if (settings.provider === "chatgpt-oauth") return chatgptCompacts();
+    return true;
+  }
+
+  /**
+   * The request didn't fit: summarize what came before the running turn,
+   * once per turn, and send again. False when there is nothing before it
+   * or the summary failed.
+   */
+  private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<boolean> {
+    const start = this.messages.map((message) => !!message.turnId).lastIndexOf(true);
+    if (start <= 0) return false;
+    try {
+      const summary = await this.summarize(settings, this.messages.slice(0, start), isStopped, callbacks.onUsage);
+      if (isStopped()) return false;
+      this.messages = [summaryMessage(summary, summaryTurnId()), ...this.messages.slice(start)];
+      debugLog(this.app, "COMPACTED", { reason: "overflow" });
+      callbacks.onCompacted?.();
+      return true;
+    } catch (e) {
+      debugLog(this.app, "COMPACTION_FAILED", { error: e instanceof Error ? e.message : String(e) });
+      return false;
+    }
+  }
+
+  /**
+   * A summary of `messages` by the provider (a transcript; no tools, web
+   * search or MCP servers); Stop cancels it. Its tokens count like a
+   * request of the chat (`onUsage`).
+   */
+  private async summarize(settings: ChatSettings, messages: UnifiedMessage[], isStopped: () => boolean,
+    onUsage?: AgentCallbacks["onUsage"]): Promise<string> {
+    const window = catalogModel(settings.provider, settings.model)?.contextWindow;
+    const request = new AbortController();
+    this.request = request;
+    try {
+      const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
+        [{ role: "user", content: summaryRequest(messages, window) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
+      if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
+      const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
+      if (!text) throw new Error("The summary came back empty.");
+      return text;
+    } finally {
+      if (this.request === request) this.request = null;
+    }
+  }
+
   /** Nothing in the API history yet. */
   isEmpty(): boolean {
     return this.messages.length === 0;
   }
 
-  /** The history ends in a user message or tool results: the model hasn't answered them. */
   /**
    * The history ends in a user message or tool results, waiting for an
    * answer; with `turnId`, the last turn there must be that one (a turn
@@ -362,6 +472,9 @@ export class AgentLoop {
    * `notes`: what the user did since the last turn (e.g. undid an answer's
    * changes), for the model.
    * `files`: PDF, Office and text files the user attached.
+   * `contextTokens`: the conversation's context after its last request;
+   * past the compaction point the plugin summarizes first where the
+   * provider doesn't compact.
    */
   async run(
     userMessage: string,
@@ -371,7 +484,8 @@ export class AgentLoop {
     turnId: string = newTurnId(),
     mentioned: MentionContext | null = null,
     notes: string[] = [],
-    files: FileAttachment[] = []
+    files: FileAttachment[] = [],
+    contextTokens = 0
   ): Promise<void> {
     const version = ++this.runVersion;
     const isStopped = () => version !== this.runVersion;
@@ -394,10 +508,18 @@ export class AgentLoop {
       (callbacks.onPreflightRejected ?? callbacks.onError)(budgetError);
       return;
     }
+    // The history before this turn: a refusal before the provider (rules
+    // that can't be read, a request too large) restores it, also when the
+    // summary below replaced it.
+    const beforeTurn = this.messages.slice();
+    // A summary first where the provider can't compact.
+    await this.prepareContext(turnSettings, contextTokens, callbacks, isStopped);
+    if (isStopped()) return;
     let instructionSources: string[] = [];
     try {
       const prospective: UnifiedMessage[] = [...this.messages, { role: "user", content: "", turnId }];
-      const retained = prospective.length > MAX_CONVERSATION_LENGTH ? trimHistory(prospective, KEEP_RECENT) : this.messages;
+      // Rules given before the last compaction aren't in what the provider gets: given again.
+      const retained = afterCompaction(prospective.length > MAX_CONVERSATION_LENGTH ? trimHistory(prospective, KEEP_RECENT) : this.messages, () => true);
       const paths = [...mentioned?.instructionPaths ?? [], ...selection ? [selection.filePath] : []];
       const rules = await folderInstructionContext(this.app, paths, instructionsGiven(retained));
       if (isStopped()) return;
@@ -405,6 +527,7 @@ export class AgentLoop {
       if (rules.text) contextPrefix = `${rules.text}\n\n${contextPrefix}`;
     } catch (e) {
       if (isStopped()) return;
+      this.messages = beforeTurn;
       (callbacks.onPreflightRejected ?? callbacks.onError)(e instanceof Error ? e.message : String(e));
       return;
     }
@@ -433,7 +556,6 @@ export class AgentLoop {
           { type: "text", text: fullMessage },
         ]
       : fullMessage;
-    const beforeTurn = this.messages.slice();
     this.messages.push({ role: "user", content, turnId, ...(instructionSources.length ? { instructionSources } : {}) });
 
     // Prune if conversation is too long
@@ -466,7 +588,11 @@ export class AgentLoop {
     if (!this.owesAnswer()) return;
     debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
     const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
-    await this.loop(version, callbacks, { ...this.settings, get mcpServers() { return currentServers(); } }, selection ? { ...selection } : undefined);
+    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
+    await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
+    if (version !== this.runVersion) return;
+    await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
+
   }
 
   /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
@@ -505,6 +631,8 @@ export class AgentLoop {
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
     let resends = 0;
+    // A request too long for the model is summarized and sent again, once per turn.
+    let overflowCompacted = false;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
@@ -518,6 +646,12 @@ export class AgentLoop {
           response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
         } catch (e) {
           if (isStopped()) return;
+          if (!overflowCompacted && isContextOverflow(e)) {
+            overflowCompacted = true;
+            callbacks.onThinking();
+            if (await this.compactForOverflow(turnSettings, callbacks, isStopped)) continue;
+            if (isStopped()) return;
+          }
           const msg = e instanceof Error ? e.message : String(e);
           if (e instanceof ProviderError && e.partialResponse) {
             this.keepRemoteReceipts(e.partialResponse, callbacks);
@@ -581,7 +715,18 @@ export class AgentLoop {
           : block.type === "tool_use" ? { type: "tool_use", name: block.name, input: block.input }
           : { type: block.type }),
         ...(response.serverCalls ? { serverCalls: response.serverCalls } : {}),
+        // Whether the provider compacts on its side now (the ChatGPT route may refuse it).
+        compactsNatively: this.compactsNatively(turnSettings, catalogModel(turnSettings.provider, turnSettings.model)),
+        ...(response.compaction ? { compacted: true } : {}),
       });
+      if (response.usage) {
+        // The model's window and prices for the ring (OpenAI: its documentation page, once a day).
+        if (i === 0) {
+          void loadModelDetails(turnSettings.modelCatalog, turnSettings.provider, turnSettings.apiKey, turnSettings.model)
+            .then((changed) => { if (changed) callbacks.onModelDetails?.(); }, () => undefined);
+        }
+        callbacks.onUsage?.(response.usage, { provider: turnSettings.provider, model: turnSettings.model, turnStart: i === 0 });
+      }
 
       if (isStopped()) return;
 
@@ -624,7 +769,11 @@ export class AgentLoop {
       if (isStopped()) return;
 
       // Append assistant message to history
-      this.messages.push({ role: "assistant", content: response.content, replay: response.replay });
+      this.messages.push({
+        role: "assistant", content: response.content, replay: response.replay,
+        ...(response.compaction ? { compaction: response.compaction } : {}),
+      });
+      if (response.compaction) callbacks.onCompacted?.();
       // Results of MCP calls stay in the replay: bounded like tool text.
       if (response.serverCalls?.length) this.messages = withoutLargeToolText(this.messages);
 
@@ -653,7 +802,7 @@ export class AgentLoop {
 
         // A newly discovered rule must reach the model before a write.
         // Rules returned earlier in this same batch have not reached it yet.
-        const knownRules = instructionsGiven(this.messages.slice(0, -1));
+        const knownRules = instructionsGiven(afterCompaction(this.messages.slice(0, -1), () => true));
         const initialRules = await folderInstructionContext(this.app, toolPaths(this.app, tc.name!, tc.input!), knownRules);
         let folderRules = initialRules.text;
         const instructionSources = initialRules.sources;
