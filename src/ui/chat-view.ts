@@ -634,7 +634,8 @@ export class ObsidianChatView extends ItemView {
   async continueTurn(): Promise<void> {
     const pending = this.plugin.activeConversation.pendingTurn;
     if (!pending || !this.canContinue()) return;
-    await this.runTurn(pending.turnId, (agent, callbacks) => agent.continueTurn(callbacks));
+    const selection = this.plugin.chatHistory.find(row => row.type === "user" && row.turnId === pending.turnId)?.selection;
+    await this.runTurn(pending.turnId, (agent, callbacks) => agent.continueTurn(callbacks, selection));
   }
 
   /**

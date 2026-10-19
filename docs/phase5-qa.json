@@ -1,0 +1,1 @@
+{"version":"0.9.0","status":"in-progress","automated":{"tests":621,"passed":621,"typescript":"pass","svelteErrors":0,"svelteWarnings":0,"build":"pass"},"limitations":["No live Anthropic/OpenAI API-key credentials","No physical iPhone QA; iPhone Air excluded by owner"]}

@@ -74,6 +74,8 @@ export const RESUME = {
 function transient(e: unknown): boolean {
   if (e instanceof RequestBudgetError) return false;
   if (!(e instanceof ProviderError)) return true;
+  if (["insufficient_quota", "usage_limit_reached", "usage_not_included"].includes(e.code ?? "")) return false;
+  if (e.remoteEffectsPossible) return false;
   return e.status === 0 || e.status === 408 || e.status === 429 || e.status >= 500;
 }
 
@@ -456,14 +458,15 @@ export class AgentLoop {
    * Continue the turn the history ends in, cut off before the model
    * answered (Obsidian was ended in the background): the loop runs on the
    * history as it is, without a new user message. Tool results already
-   * there are sent, not run again. A selection isn't saved, so the
-   * continued turn has none.
+   * there are sent, not run again. The view supplies the original saved
+   * selection; its fingerprint still refuses writes after the note changed.
    */
-  async continueTurn(callbacks: AgentCallbacks): Promise<void> {
+  async continueTurn(callbacks: AgentCallbacks, selection?: SelectionScope): Promise<void> {
     const version = ++this.runVersion;
     if (!this.owesAnswer()) return;
     debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
-    await this.loop(version, callbacks, { ...this.settings }, undefined);
+    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+    await this.loop(version, callbacks, { ...this.settings, get mcpServers() { return currentServers(); } }, selection ? { ...selection } : undefined);
   }
 
   /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
@@ -530,7 +533,8 @@ export class AgentLoop {
           // refused as too large, or a provider's 4xx answer other than 408/429).
           const background = transient(e) && appLifecycle.hiddenSince(startedAt);
           const cut = e instanceof StreamCutError && !e.sideEffects;
-          if (resends < RESUME.perTurn && (cut || background) && !(e instanceof StreamCutError && e.sideEffects)) {
+          if (resends < RESUME.perTurn && (cut || background) && !(e instanceof StreamCutError && e.sideEffects) &&
+              !(e instanceof ProviderError && e.remoteEffectsPossible)) {
 
             resends++;
             debugLog(this.app, "API_RESEND", { error: msg, resend: resends, background });
@@ -712,9 +716,13 @@ export class AgentLoop {
     const content = response.content.filter(block => block.type !== "tool_use");
     // Keep the receipt in both representations: even a partial native replay
     // must retain it after revoking one of its servers.
-    const receipt = calls.length ? boundedToolText(calls.map(call =>
+    const receipts = calls.map(call =>
       `Remote MCP receipt (${call.server}/${call.tool}, ${call.isError ? "error" : "completed"}): ${boundedToolText(call.result, 1000)}`,
-    ).join("\n"), 8000) : "";
+    );
+    if (callbacks) for (const call of response.serverCalls ?? []) if (call.pending) {
+      receipts.push(`Remote MCP operation (${call.server}/${call.tool}): started, outcome unknown. Check the external service before repeating it.`);
+    }
+    const receipt = boundedToolText(receipts.join("\n"), 8000);
     if (receipt) content.push({ type: "text", text: receipt });
     const replay = response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") };
     if (replay && receipt) replay.items.push(replay.provider === "anthropic"
@@ -743,11 +751,14 @@ export class AgentLoop {
     const request = new AbortController();
     this.request = request;
     const unwatch = watchForStall(request);
+    let remoteStarted = false;
     try {
       return await sendMessage(settings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped,
-        { onTextDelta, signal: request.signal });
+        { onTextDelta, signal: request.signal, onServerTool: () => { remoteStarted = true; } });
     } catch (e) {
       // Aborted, but not by Stop: the watch gave it up.
+      if (e instanceof ProviderError && e.remoteEffectsPossible) throw e;
+      if (remoteStarted && !(e instanceof ProviderError && e.partialResponse)) throw new StreamCutError("Provider", true);
       if (request.signal.aborted && !isStopped()) {
         throw new Error("No answer arrived after Obsidian came back from the background. Please try again.");
       }

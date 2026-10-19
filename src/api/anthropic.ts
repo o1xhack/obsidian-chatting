@@ -143,8 +143,7 @@ export async function sendAnthropicMessage(
     },
     body: requestBody,
   }, collected.onEvent, stream.signal).catch((error: unknown) => {
-    // The connection was lost after the answer began: a cut stream.
-    throw error instanceof StreamDropped ? new StreamCutError("Anthropic", collected.serverTool()) : error;
+    throw withReceipts(error instanceof StreamDropped ? new StreamCutError("Anthropic", collected.serverTool()) : error);
   });
 
   if (response.status !== 200) {
@@ -153,7 +152,20 @@ export async function sendAnthropicMessage(
       getNestedString(response.json, ["error", "type"]), response.retryAfterMs);
   }
 
-  const data = parseAnthropicResponse(collected.finish());
+  let complete: Record<string, unknown>;
+  try { complete = collected.finish(); }
+  catch (error) { throw withReceipts(error); }
+  return toResponse(complete);
+
+  function withReceipts(error: unknown): unknown {
+    if (!collected.serverTool()) return error;
+    const source = error instanceof Error ? error.message : String(error);
+    return new ProviderError(source + " Remote MCP tools may already have run; check their results before retrying.", 0,
+      error instanceof ProviderError ? error.code : undefined, undefined, true, toResponse(collected.snapshot()));
+  }
+
+  function toResponse(packet: Record<string, unknown>): UnifiedResponse {
+  const data = parseAnthropicResponse(packet);
   const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
   const sources = citedSources(data.content);
   if (sources) {
@@ -174,6 +186,7 @@ export async function sendAnthropicMessage(
       : undefined,
     ...withServerCalls(anthropicServerCalls(data.content, messages.flatMap(message => message.replay?.provider === "anthropic" ? message.replay.items : []))),
   };
+  }
 }
 
 // ─── Streaming ──────────────────────────────────────────────────────────────
@@ -191,6 +204,7 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
   finish: () => Record<string, unknown>;
   /** An MCP call started in this answer. */
   serverTool: () => boolean;
+  snapshot: () => Record<string, unknown>;
 } {
   let serverTool = false;
   let message: Record<string, unknown> | undefined;
@@ -271,6 +285,7 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
       return { ...message, content: blocks.filter(Boolean) };
     },
     serverTool: () => serverTool,
+    snapshot: () => ({ ...message, content: blocks.filter(Boolean) }),
   };
 }
 

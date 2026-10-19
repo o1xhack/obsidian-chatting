@@ -48,14 +48,18 @@ const identityKey = { anthropic: 'fake-test-key', openai: 'fake-test-key', 'chat
 async function expected(provider, blocks, stop) {
   const model = settings(provider).model;
   const identity = await api.catalogIdentity(provider, identityKey[provider]);
-  if (provider !== 'anthropic') return api.fromResponsesOutput(responsesData(blocks, stop), provider, model, identity);
+  if (provider !== 'anthropic') {
+    const result = api.fromResponsesOutput(responsesData(blocks, stop), provider, model, identity);
+    if (provider === 'openai') result.replay.mcpServers = {};
+    return result;
+  }
   const content = blocks.flatMap(block => block.type === 'text' ? [{ type: 'text', text: block.text }]
     : block.type === 'tool_use' ? [{ type: 'tool_use', id: block.id, name: block.name, input: block.input }] : []);
   // The cited pages follow the answer's text, before the first tool call.
   const urls = [...new Set(blocks.flatMap(block => block.citations ?? []).map(citation => citation.url))];
   const firstCall = content.findIndex(block => block.type === 'tool_use');
   if (urls.length) content.splice(firstCall === -1 ? content.length : firstCall, 0, { type: 'text', text: `\n\nSources:\n${urls.map(url => `- [${url}](${url})`).join('\n')}` });
-  return { content, replay: { provider, model, identity, items: blocks }, stopReason: stop, usage: { inputTokens: 10, outputTokens: 5 } };
+  return { content, replay: { provider, model, identity, items: blocks, mcpServers: {} }, stopReason: stop, usage: { inputTokens: 10, outputTokens: 5 } };
 }
 
 // ─── SSE parser ─────────────────────────────────────────────────────────────
@@ -265,7 +269,7 @@ for (const provider of ['anthropic', 'openai']) {
     const cb = callbacks();
     await new api.AgentLoop(app, { ...settings(provider), enableWebSearch: false, mcpServers: [{ id: 'a', name: 'linear', url: 'https://mcp.linear.app/sse', enabled: true }] }).run('File it', cb);
     assert.equal(requests, 1);
-    assert.match(cb.errors[0], /isn't sent again: a tool on an MCP server had already started/);
+    assert.match(cb.errors[0], /MCP.*(?:already.*(?:started|run))/);
   });
 }
 

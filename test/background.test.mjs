@@ -501,3 +501,63 @@ test('A turn running in another chat keeps its mark while the user switches; its
   await running;
   assert.equal(plugin.conversations.find(c => c.id === a).pendingTurn, undefined);
 });
+
+for (const provider of ['openai', 'anthropic']) {
+  for (const ending of ['cut', 'error', 'drop']) {
+    test(`${provider}: background ${ending} after MCP keeps completed receipts and never resends`, async () => {
+      const { plugin, view } = await chatSetup(provider);
+      plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+      const blocks = provider === 'openai' ? [
+        { type: 'mcp_call', id: 'remote1', name: 'create', server_label: 'remote', arguments: '{}', output: 'CREATED-ONCE' },
+      ] : [
+        { type: 'mcp_tool_use', id: 'remote1', name: 'create', server_name: 'remote', input: {} },
+        { type: 'mcp_tool_result', tool_use_id: 'remote1', content: [{ type: 'text', text: 'CREATED-ONCE' }] },
+      ];
+      const events = streamEvents(provider, blocks).slice(0, provider === 'openai' ? -1 : -2);
+      if (ending === 'error') events.push(provider === 'openai'
+        ? { type: 'error', code: 'rate_limit_exceeded', message: 'Try again in 0ms' }
+        : { type: 'error', error: { type: 'overloaded_error', message: 'Try again in 0ms' } });
+      const requests = fakeFetch(() => {
+        if (ending === 'drop') return body(sseText(events), { fail: () => { appLifecycle.markHidden(); return new TypeError('connection lost'); } });
+        appLifecycle.markHidden();
+        return body(sseText(events));
+      });
+      await view.handleUserMessage('Create once', null);
+      assert.equal(requests.length, 1);
+      assert.match(JSON.stringify(plugin.agent.exportMessages()), /Remote MCP receipt.*CREATED-ONCE/);
+      assert.match(plugin.chatHistory.find(row => row.type === 'error').text, /MCP tools may already have run/);
+      assert.equal(plugin.chatHistory.filter(row => row.type === 'tool-result').length, 1);
+      appLifecycle.markVisible();
+    });
+  }
+}
+
+test('Continue restores selection enforcement instead of granting full-note writes', async () => {
+  const selection = { filePath: 'Untitled.md', text: 'rig', from: 1, sourceText: 'Original' };
+  const saved = { version: 3, activeConversationId: 'scoped', conversations: [{
+    id: 'scoped', title: 'Scoped', createdAt: 1, updatedAt: 1,
+    pendingTurn: { turnId: 't', startedAt: 1 },
+    chatHistory: [{ type: 'user', text: 'Edit selection', turnId: 't', selection }],
+    agentMessages: [{ role: 'user', content: 'Edit selected text only', turnId: 't' }],
+  }] };
+  const { plugin, view, app } = await chatSetup('anthropic', saved);
+  let changes = 0;
+  app.vault.process = async () => { changes++; };
+  transport((_body, index) => index === 0
+    ? response('anthropic', [call('edit', 'edit_document', { path: 'Untitled.md', operation: 'replace', content: 'Unscoped overwrite' })], 'tool_use')
+    : response('anthropic', [text('Refused outside selection')]));
+  await view.continueTurn();
+  assert.equal(changes, 0);
+  assert.equal(plugin.chatHistory.find(row => row.type === 'tool-result').toolResult.isError, true);
+});
+
+test('A plan quota failure in the background is not resent', async () => {
+  const { view } = await chatSetup('openai');
+  const requests = fakeFetch(() => {
+    appLifecycle.markHidden();
+    return new Response(JSON.stringify({ error: { code: 'insufficient_quota', message: 'Quota exhausted' } }), { status: 429 });
+  });
+  await view.handleUserMessage('Question', null);
+  assert.equal(requests.length, 1);
+  appLifecycle.markVisible();
+});

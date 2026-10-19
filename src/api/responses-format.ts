@@ -40,13 +40,20 @@ export async function sendResponsesRequest(
   try {
     response = await streamSSE(url, { headers, body: requestBody }, collected.onEvent, stream.signal);
   } catch (error) {
+    if (collected.serverTool()) return collected.remoteFailure(error instanceof Error ? error.message : String(error));
     if (error instanceof StreamDropped) throw new StreamCutError(name, collected.serverTool());
     throw error;
   }
   if (response.status < 200 || response.status >= 300) throw errors.http(response);
   const { data, failure } = collected.finish();
-  if (failure) throw errors.stream(failure);
-  if (!data) throw new StreamCutError(name, collected.serverTool());
+  if (failure) {
+    if (collected.serverTool()) return collected.remoteFailure(failure.message, failure.code);
+    throw errors.stream(failure);
+  }
+  if (!data) {
+    if (collected.serverTool()) return collected.remoteFailure(`${name} stream ended before the answer was complete.`);
+    throw new StreamCutError(name);
+  }
   return data;
 }
 
@@ -212,6 +219,7 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
   finish: () => { data?: Record<string, unknown>; failure?: ResponsesFailure };
   /** An MCP call started in this answer. */
   serverTool: () => boolean;
+  remoteFailure: (message: string, code?: string) => Record<string, unknown>;
 } {
   let serverTool = false;
   const items = new Map<string | number, Record<string, unknown>>();
@@ -224,6 +232,10 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
         isRecord(event.item) && event.item.type === "mcp_call" && !serverTool) {
         serverTool = true;
         onServerTool?.();
+      }
+      // A call that started without a result still records possible effects.
+      if (type === "response.output_item.added" && isRecord(event.item) && event.item.type === "mcp_call") {
+        items.set(typeof event.output_index === "number" ? event.output_index : String(event.item.id), { ...event.item, status: "in_progress" });
       }
       if (type === "response.output_text.delta") {
         // The markers' characters go; their words are dropped from the whole text at the end.
@@ -240,6 +252,11 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
       } else if (type === "response.incomplete") {
         completed = { ...(isRecord(event.response) ? event.response : {}), status: "incomplete" };
       } else if (type === "response.failed") {
+        completed = isRecord(event.response) ? event.response : {};
+        if (Array.isArray(completed.output) && completed.output.some(item => isRecord(item) && item.type === "mcp_call")) {
+          serverTool = true;
+          onServerTool?.();
+        }
         const error = isRecord(event.response) && isRecord(event.response.error) ? event.response.error : {};
         failure = {
           message: typeof error.message === "string" ? error.message : "Response failed.",
@@ -255,6 +272,8 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
       return { data: { ...completed, output: items.size > 0 ? Array.from(items.values()) : completed.output ?? [] } };
     },
     serverTool: () => serverTool,
+    remoteFailure: (message, code) => ({ ...completed, status: "failed", error: { message, code },
+      output: Array.isArray(completed?.output) && completed.output.length ? completed.output : [...items.values()] }),
   };
 }
 

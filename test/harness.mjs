@@ -194,7 +194,13 @@ export function transport(handler) {
   globalThis.__providerRequest = async request => {
     const body = JSON.parse(request.body);
     requests.push(body);
-    return handler(body, requests.length - 1, request);
+    const result = await handler(body, requests.length - 1, request);
+    // Legacy fixtures describe a complete Responses packet. Put that packet
+    // on the wire as SSE now that requests ask for streams.
+    if (body.stream && result.status === 200 && result.text === undefined && result.json?.output) {
+      return sse([{ type: `response.${result.json.status ?? 'completed'}`, response: result.json }]);
+    }
+    return result;
   };
   return requests;
 }
