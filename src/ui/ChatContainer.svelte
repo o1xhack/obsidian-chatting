@@ -593,8 +593,8 @@
     resolve?.("");
   }
 
-  export function setInputEnabled(enabled: boolean): void {
-    if (!enabled) attachmentPreparation.cancel();
+  export function setInputEnabled(enabled: boolean, preservePreparation = false): void {
+    if (!enabled && !preservePreparation) attachmentPreparation.cancel();
     inputEnabled = enabled;
   }
 
@@ -623,15 +623,17 @@
     queued = texts;
   }
 
-  export function clearMessages(): void {
-    attachmentPreparation.cancel();
+  export function clearMessages(preserveDraft = false): void {
     pendingText.clear();
     messages = [];
     editingId = null;
-    attachments = [];
-    fileAttachments = [];
-    if (fileInputEl) fileInputEl.value = "";
-    selection = null;
+    if (!preserveDraft) {
+      attachmentPreparation.cancel();
+      attachments = [];
+      fileAttachments = [];
+      if (fileInputEl) fileInputEl.value = "";
+      selection = null;
+    }
     hideThinking();
   }
 

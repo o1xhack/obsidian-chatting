@@ -485,3 +485,16 @@ test('A provider handoff ignores the previous provider token count after install
   assert.equal(requests.length,2);
   assert.match(firstUserText(requests[1]),/Portable handoff summary/);
 });
+
+for (const failed of [false,true]) test(`Manual compaction ${failed?'failure':'success'} refreshes only history and preserves the prepared composer`, async () => {
+  const {plugin,view,chat}=await chatSetup('openai');
+  plugin.agent.importMessages([{role:'user',content:'Earlier context',turnId:'old'}]);
+  plugin.chatHistory.push({type:'user',text:'Earlier context',turnId:'old'});
+  const draft={text:'Unsent draft',images:[{id:'image'}],files:[{id:'file'}],selection:{filePath:'Plan.md',text:'Selected'},preparationCurrent:true};
+  chat.clearMessages=preserve=>{chat.shown=[];if(!preserve){draft.images=[];draft.files=[];draft.selection=null;draft.preparationCurrent=false;}};
+  chat.setInputEnabled=(enabled,preserve)=>{if(!enabled&&!preserve)draft.preparationCurrent=false;};
+  plugin.agent.summarize=async()=>{if(failed)throw Error('Summary unavailable');return 'Summary';};
+  await view.compactNow();
+  assert.deepEqual(draft,{text:'Unsent draft',images:[{id:'image'}],files:[{id:'file'}],selection:{filePath:'Plan.md',text:'Selected'},preparationCurrent:true});
+  assert.equal(view.running,false);
+});

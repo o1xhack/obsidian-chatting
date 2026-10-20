@@ -13,8 +13,8 @@
     "chatStateVersion": 4
   },
   "automated": {
-    "tests": 707,
-    "passed": 707,
+    "tests": 709,
+    "passed": 709,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -91,6 +91,8 @@
       "native-last-20-turns",
       "native-paging-keeps-complete-turn",
       "native-load-earlier-turns",
+      "native-compact-success-keeps-draft",
+      "native-compact-failure-keeps-draft",
       "native-manual-compaction",
       "native-compacted-note",
       "native-375px-no-horizontal-overflow",
@@ -98,7 +100,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "5317e63d7479ecdab06631744543edf229fe5cdbc9ba122e5f7e637acf692c91",
+    "mainSha256": "4ff90c28498480689a17cf9c301ec13d6bfdba6ee3a7a957170d705a3c139153",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -247,11 +249,17 @@
       "issue": "Provider handoff reused stale token counts to summarize twice.",
       "resolution": "Skip threshold summarization after installing the portable handoff summary.",
       "regressions": 1
+    },
+    {
+      "priority": "P2",
+      "issue": "Manual compaction history refresh cleared unsent draft attachments and selection.",
+      "resolution": "Refresh history independently of composer state and preserve in-progress attachment preparation while compaction disables sending.",
+      "regressions": 2
     }
   ],
   "finalNativeUpgrade": {
     "version": "0.10.0",
-    "mainSha256": "5317e63d7479ecdab06631744543edf229fe5cdbc9ba122e5f7e637acf692c91",
+    "mainSha256": "4ff90c28498480689a17cf9c301ec13d6bfdba6ee3a7a957170d705a3c139153",
     "scope": "final native production Plugin class, real filesystem, isolated original 0.9.0 chat-state copy",
     "migratedChats": 9,
     "visibleAndApiHistoryIdentical": true,
@@ -263,7 +271,7 @@
     "passed": true,
     "testFactRetained": true,
     "reloadReply": true,
-    "mainSha256": "5317e63d7479ecdab06631744543edf229fe5cdbc9ba122e5f7e637acf692c91"
+    "mainSha256": "4ff90c28498480689a17cf9c301ec13d6bfdba6ee3a7a957170d705a3c139153"
   },
   "additionalRegression": "Deleting the active chat cannot steal focus after a newer navigation during a lazy fallback read."
 }

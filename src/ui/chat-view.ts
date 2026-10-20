@@ -95,7 +95,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   /** The next input answers a question; `question` is shown first unless the chat shows it already. */
   showAskUser(question?: string): Promise<string>;
   cancelAskUser(): void;
-  setInputEnabled(enabled: boolean): void;
+  setInputEnabled(enabled: boolean, preservePreparation?: boolean): void;
   setBusy(busy: boolean): void;
   setComposerLocked?(locked: boolean): void;
   setRetainedAttachments?(entries: ChatHistoryEntry[]): void;
@@ -103,7 +103,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   setQueued(texts: string[]): void;
   /** The open chats list again (a chat started or finished answering). */
   updateConversations(): void;
-  clearMessages(): void;
+  clearMessages(preserveDraft?: boolean): void;
   focus(): void;
   setModel(name: string): void;
   setTitle(title: string): void;
@@ -367,10 +367,10 @@ export class ObsidianChatView extends ItemView {
    * shows, and what its running turn shows so far. Earlier turns come in
    * when the chat is scrolled near the top (`loadEarlier`).
    */
-  renderHistory(): void {
+  renderHistory(preserveDraft = false): void {
     const chat = this.chatContainer;
     if (!chat) return;
-    chat.clearMessages();
+    chat.clearMessages(preserveDraft);
     const history = this.plugin.chatHistory;
     this.shownFrom = pageStart(history, history.length);
     const shown = history.slice(this.shownFrom);
@@ -477,7 +477,7 @@ export class ObsidianChatView extends ItemView {
     const operation = { agent };
     this.compactions.set(conversation.id, operation);
     chat.setBusy(true);
-    chat.setInputEnabled(false);
+    chat.setInputEnabled(false, true);
     chat.showThinking("Summarizing…");
     try {
       const onUsage: AgentCallbacks["onUsage"] = (usage, request) => {
@@ -498,7 +498,7 @@ export class ObsidianChatView extends ItemView {
       if (current) this.compactions.delete(conversation.id);
       if (current && this.plugin.activeConversation === conversation && !this.running) {
         chat.hideThinking();
-        this.renderHistory();
+        this.renderHistory(true);
         chat.setBusy(false);
         chat.setInputEnabled(true);
       }
