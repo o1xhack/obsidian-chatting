@@ -173,6 +173,12 @@
       "migration-chat-present-chat-mvhc11rn-487jzh",
       "migration-visible-chat-mvhc11rn-487jzh",
       "migration-api-chat-mvhc11rn-487jzh",
+      "migration-chat-present-chat-mvhc5naa-yaqn50",
+      "migration-visible-chat-mvhc5naa-yaqn50",
+      "migration-api-chat-mvhc5naa-yaqn50",
+      "migration-chat-present-chat-mvhc62ak-accasu",
+      "migration-visible-chat-mvhc62ak-accasu",
+      "migration-api-chat-mvhc62ak-accasu",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -206,7 +212,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac",
+    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -263,10 +269,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac"
+    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d"
   },
   "liveVoice": {
-    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac",
+    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -281,7 +287,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhc5naa-yaqn50",
+    "conversationId": "chat-mvhceccv-hy98yh",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -294,12 +300,12 @@
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": " It's simple: SAFE — change TARGET to VERIFIED.",
+    "reconnectTranscript": "It says: \"SAFE. Change TARGET to VERIFIED.\"",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 262,
-        "bytes": 9166
+        "packets": 344,
+        "bytes": 7542
       }
     ],
     "peerClosed": true,
@@ -386,7 +392,7 @@
     }
   ],
   "liveReconnect": {
-    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac",
+    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -401,7 +407,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhc62ak-accasu",
+    "conversationId": "chat-mvhcescr-6ysfnc",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,

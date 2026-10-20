@@ -325,6 +325,7 @@ export class VoiceController {
         this.caption("assistant", event.text);
         break;
       case "turn-done":
+        if (event.text.trim()) this.update({ resumeNotice: undefined });
         // A user turn reported after the voice already answered doesn't bring the old words back.
         if (event.role === "user") {
           if (this.lastSpeaker !== "assistant") this.update({ you: event.text });

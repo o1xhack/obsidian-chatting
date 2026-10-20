@@ -1857,7 +1857,7 @@ test('A replacement waits for server readiness and announces its result only onc
     assert.equal(ch.sent.filter(e => e.type === 'session.context.append').length, 1);
     assert.match(ch.sent[0].content[0].text, /Recovered result SAFE/);
     assert.match(chat.voice.resumeNotice, /Previous task ended/, 'a quiet service still leaves a visible outcome notice');
-    ch.receive({ type: 'input_transcript.added', item: { text: 'What happened?' } });
+    ch.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'Recovered result SAFE.' } });
     assert.equal(chat.voice.resumeNotice, undefined);
   } finally { view.endVoice(); FakePeerConnection.prototype.setRemoteDescription = original; }
 });

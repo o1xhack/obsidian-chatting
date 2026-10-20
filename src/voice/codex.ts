@@ -37,7 +37,14 @@ export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersi
   // Refresh sign-in while preparing the offer. Version metadata is a
   // synchronous cached/fallback read, never a network prerequisite.
   let ready: Promise<[{ accessToken: string; accountId?: string } | null, string]> | null = null;
-  const prepared = () => ready ??= Promise.all([auth.getUsableCredential(), clientVersion()]);
+  const prepared = () => {
+    if (!ready) {
+      const credential = auth.getUsableCredential();
+      const version = clientVersion();
+      ready = credential.then(credential => [credential, version]);
+    }
+    return ready;
+  };
   return {
     name: "codex",
     prepare() {
