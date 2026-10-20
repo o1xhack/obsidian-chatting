@@ -144,8 +144,8 @@ export const PAGE_TURNS = 20;
 export function pageStart(history: ChatHistoryEntry[], end: number, turns = PAGE_TURNS): number {
   let count = 0;
   for (let index = end - 1; index > 0; index--) {
-    if (history[index].type === "user" && ++count === turns) {
-      return history.slice(0, index).some((entry) => entry.type === "user") ? index : 0;
+    if (history[index].type === "user" && history[index].turnId && ++count === turns) {
+      return history.slice(0, index).some((entry) => entry.type === "user" && entry.turnId) ? index : 0;
     }
   }
   return 0;

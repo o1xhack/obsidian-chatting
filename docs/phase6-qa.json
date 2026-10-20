@@ -13,8 +13,8 @@
     "chatStateVersion": 4
   },
   "automated": {
-    "tests": 694,
-    "passed": 694,
+    "tests": 695,
+    "passed": 695,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -64,6 +64,9 @@
       "migration-chat-present-chat-mvfwny57-go9ppz",
       "migration-visible-chat-mvfwny57-go9ppz",
       "migration-api-chat-mvfwny57-go9ppz",
+      "migration-chat-present-chat-mvfwybf8-1wi09z",
+      "migration-visible-chat-mvfwybf8-1wi09z",
+      "migration-api-chat-mvfwybf8-1wi09z",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -86,6 +89,7 @@
       "restart-mcp-uncertainty-warning",
       "restart-mcp-continue-disabled",
       "native-last-20-turns",
+      "native-paging-keeps-complete-turn",
       "native-load-earlier-turns",
       "native-manual-compaction",
       "native-compacted-note",
@@ -94,7 +98,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "b7b3379b3b3a4eb42210d145d70a12ec9b4ae116c0bf8d94345e621ae00b4e4a",
+    "mainSha256": "7f34c76cc3add283e780efc8391bc0a03fbd5bb636d16ca3ac8d51a004b0f086",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -213,6 +217,28 @@
       "issue": "A stale index could overwrite newer per-chat title metadata after an interrupted save.",
       "resolution": "Persist per-entry metadata revisions through unrelated index saves, prefer newer file metadata, and retain later custom names without restoring stale automatic-title provenance.",
       "regressions": 3
+    },
+    {
+      "priority": "P2",
+      "issue": "Paging counted ask_user answers and steering rows as independent turns.",
+      "resolution": "Only user rows with turn IDs define page boundaries; complete turns stay together.",
+      "regressions": 1
     }
-  ]
+  ],
+  "finalNativeUpgrade": {
+    "version": "0.10.0",
+    "mainSha256": "7f34c76cc3add283e780efc8391bc0a03fbd5bb636d16ca3ac8d51a004b0f086",
+    "scope": "final native production Plugin class, real filesystem, isolated original 0.9.0 chat-state copy",
+    "migratedChats": 9,
+    "visibleAndApiHistoryIdentical": true,
+    "indexVersion": 4,
+    "originalBackupRetained": true,
+    "passed": true
+  },
+  "finalRealCompaction": {
+    "passed": true,
+    "testFactRetained": true,
+    "reloadReply": true,
+    "mainSha256": "7f34c76cc3add283e780efc8391bc0a03fbd5bb636d16ca3ac8d51a004b0f086"
+  }
 }
