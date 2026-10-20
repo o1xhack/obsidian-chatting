@@ -13,8 +13,8 @@
     "chatStateVersion": 4
   },
   "automated": {
-    "tests": 695,
-    "passed": 695,
+    "tests": 700,
+    "passed": 700,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -98,7 +98,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "7f34c76cc3add283e780efc8391bc0a03fbd5bb636d16ca3ac8d51a004b0f086",
+    "mainSha256": "8dc1bb6c906d2c897c8dd375b2ea2e2b1b444a47fca4bf0b0ecc54a470c3b8d3",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -223,11 +223,17 @@
       "issue": "Paging counted ask_user answers and steering rows as independent turns.",
       "resolution": "Only user rows with turn IDs define page boundaries; complete turns stay together.",
       "regressions": 1
+    },
+    {
+      "priority": "P2",
+      "issue": "Retained raw history incorrectly suppressed folder instructions after opaque compaction.",
+      "resolution": "Initial linked-file and selection rules use actual post-compaction request history rather than persistence retention history.",
+      "regressions": 4
     }
   ],
   "finalNativeUpgrade": {
     "version": "0.10.0",
-    "mainSha256": "7f34c76cc3add283e780efc8391bc0a03fbd5bb636d16ca3ac8d51a004b0f086",
+    "mainSha256": "8dc1bb6c906d2c897c8dd375b2ea2e2b1b444a47fca4bf0b0ecc54a470c3b8d3",
     "scope": "final native production Plugin class, real filesystem, isolated original 0.9.0 chat-state copy",
     "migratedChats": 9,
     "visibleAndApiHistoryIdentical": true,
@@ -239,6 +245,7 @@
     "passed": true,
     "testFactRetained": true,
     "reloadReply": true,
-    "mainSha256": "7f34c76cc3add283e780efc8391bc0a03fbd5bb636d16ca3ac8d51a004b0f086"
-  }
+    "mainSha256": "8dc1bb6c906d2c897c8dd375b2ea2e2b1b444a47fca4bf0b0ecc54a470c3b8d3"
+  },
+  "additionalRegression": "Deleting the active chat cannot steal focus after a newer navigation during a lazy fallback read."
 }

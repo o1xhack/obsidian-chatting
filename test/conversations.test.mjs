@@ -1061,3 +1061,24 @@ test('An old lazy-open completion cannot replace a newer navigation choice', asy
   assert.equal(restored.activeConversationId, current);
   assert.notEqual(current, bid);
 });
+
+test('Deleting the active chat cannot steal focus from another chat opened during its lazy fallback read', async () => {
+  const { plugin, view, app } = await setup('anthropic');
+  answering('anthropic');
+  await view.handleUserMessage('Fallback A', null);const aid = plugin.activeConversationId;
+  view.newChat();await view.handleUserMessage('Chosen C', null);const cid = plugin.activeConversationId;
+  view.newChat();await view.handleUserMessage('Deleted B', null);const bid = plugin.activeConversationId;
+  plugin.conversations.find(c=>c.id===aid).updatedAt = Date.now()+1000;
+  await plugin.saveChatHistory();
+  const restored = await reload(app.vault.adapter);
+  const adapter = app.vault.adapter, read = adapter.read;let finish;
+  adapter.read = path => path === chatPath(aid) ? new Promise(resolve => { finish = () => read(path).then(resolve); }) : read(path);
+  const deleting = restored.deleteConversation(bid);
+  for(let i=0;i<100&&!finish;i++)await tick();
+  assert.ok(finish);
+  assert.equal(await restored.openConversation(cid), true);
+  finish();await deleting;await restored.saveChatHistory();
+  assert.equal(restored.activeConversationId, cid);
+  assert.ok(!restored.conversations.some(c=>c.id===bid));
+  assert.equal(JSON.parse(adapter.stored.get(STATE)).activeConversationId, cid);
+});

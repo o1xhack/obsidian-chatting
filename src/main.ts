@@ -493,7 +493,10 @@ export default class ChatPlugin extends Plugin {
       void this.saveChatHistory();
       return;
     }
-    this.activate(await this.firstReadable(newestFirst(this.conversations)));
+    const next = await this.firstReadable(newestFirst(this.conversations));
+    // A lazy read may finish after the user has already opened another chat.
+    if (this.activeConversationId === deleted.id && this.conversations.includes(next)) this.activate(next);
+    else void this.saveChatHistory();
   }
 
   /**

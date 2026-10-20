@@ -529,7 +529,7 @@ export class AgentLoop {
     try {
       const prospective: UnifiedMessage[] = [...this.messages, { role: "user", content: "", turnId }];
       // Rules given before the last compaction are gone with it: given again.
-      const retained = fromLastCompaction(prospective);
+      const retained = afterCompaction(prospective, () => true);
       const paths = [...mentioned?.instructionPaths ?? [], ...selection ? [selection.filePath] : []];
       const rules = await folderInstructionContext(this.app, paths, instructionsGiven(retained));
       if (isStopped()) return;
