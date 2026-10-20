@@ -142,6 +142,9 @@ export class VoiceController {
   /** User turns said during the running task, waiting for the user to be quiet (`queueSteer`). */
   private pendingSteer: VoiceTurn[] = [];
   private steerTimer?: number;
+  private task?: Promise<void>;
+  private taskResult = "";
+  private reconnecting = false;
   /** When each turn's first and last words arrived (ms). */
   private readonly turnTimes = new WeakMap<VoiceTurn, { first: number; last: number }>();
 
@@ -178,6 +181,20 @@ export class VoiceController {
       this.host.render(null);
       this.host.showError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /** Keep delegated work and its hooks alive before replacing its call.
+   * Delegation IDs belong to that call, so finish the task first and seed
+   * the replacement with its saved result instead of replaying its tools.
+   */
+  async prepareReconnect(): Promise<string | undefined> {
+    this.reconnecting = true;
+    this.session.setMicEnabled(false);
+    this.update({ status: "reconnecting" });
+    void this.session.end();
+    const task = this.task;
+    if (task) await task;
+    return task ? this.taskResult : undefined;
   }
 
   /** End the conversation. A running turn finishes in the chat but isn't spoken. */
@@ -357,11 +374,14 @@ export class VoiceController {
 
   /** A turn is complete (Codex sends its whole text): keep it. */
   private finishTurn(role: VoiceTurn["role"], text: string): void {
-    if (role === "user" && [this.lastRequest, this.lastRequestTranscript].some(request => request && sameWords(text, request))) {
+    const consumed = [this.lastRequest, this.lastRequestTranscript].some(request => request && sameWords(text, request));
+    if (role === "user" && (consumed || this.steeredSpoken.some(request => normalizedWords(request) === normalizedWords(text)))) {
       // The request a delegation already took, reported late.
       if (this.openTurn?.role === "user" && sameWords(this.openTurn.text, text)) this.openTurn = null;
-      this.lastRequest = "";
-      this.lastRequestTranscript = "";
+      if (consumed) {
+        this.lastRequest = "";
+        this.lastRequestTranscript = "";
+      }
       return;
     }
     if (this.openTurn?.role !== role) {
@@ -473,7 +493,10 @@ export class VoiceController {
     if (this.host.turnRunning()) this.host.stopTurn();
     // A new task: what was added to the last one no longer counts as taken.
     this.steeredSpoken = [];
-    await this.runVoiceTurn(id, request, context);
+    const task = this.runVoiceTurn(id, request, context);
+    this.task = task;
+    try { await task; }
+    finally { if (this.task === task) this.task = undefined; }
   }
 
   /** Run `request` as a chat turn and send the answer back to speak; then what was added too late. */
@@ -503,12 +526,19 @@ export class VoiceController {
       failed = error instanceof Error ? error.message : String(error);
       if (!this.ended) this.host.showError(failed);
     } finally {
+      // A final transcript fragment may arrive before the task resolves,
+      // while its terminal/assistant event is still on the wire.
+      if (!stopped && !this.ended && this.openTurn?.role === "user") {
+        const kept = this.closeTurn();
+        if (kept) this.queueSteer(kept);
+      }
       this.voiceTurnRunning = false;
     }
     // Ended meanwhile: the view ran what was added (as typed turns).
     if (this.ended) return;
     if (stopped) {
-      this.sendAll(speakEvents(this.answerTo, "The task was stopped. Any changes already made are shown in the chat."));
+      this.taskResult = "The task was stopped. Any changes already made are shown in the chat.";
+      this.sendAll(speakEvents(this.answerTo, this.taskResult));
       this.update({ status: "listening" });
       return;
     }
@@ -516,6 +546,7 @@ export class VoiceController {
     // Words still waiting to be added when the task ended run as the next turn.
     const pending = this.takePendingSteer();
     const later = [...this.host.takeSteered(), ...(pending ? [pending] : [])];
+    this.taskResult = failed ? `The task failed: ${failed}. Do not claim it succeeded.` : answer ? spokenAnswer(answer) : "The task ended without a final answer; check the chat for details.";
     // Said first, so a request the user makes while the result is spoken
     // isn't taken for part of this task (the voice then claimed it was "on the way").
     if (!later.length) this.sendAll(progressEvents(this.answerTo, failed ? "The request failed. Do not claim the requested work succeeded." : TASK_DONE));
@@ -529,15 +560,16 @@ export class VoiceController {
   }
 
   private sendAll(events: Record<string, unknown>[]): void {
+    if (this.reconnecting) return;
     for (const event of events) this.session.send(event);
   }
 
   private onEnded(error?: string): void {
     window.clearTimeout(this.speakingTimer);
     const wasEnded = this.ended;
-    this.ended = true;
     // Lost in the background: the bar stays, the view reconnects on the return.
-    if (this.background && !wasEnded) return;
+    if ((this.background || this.reconnecting) && !wasEnded) return;
+    this.ended = true;
     this.host.render(null);
     if (error && !wasEnded) this.host.showError(error);
   }
@@ -548,7 +580,7 @@ export class VoiceController {
   }
 
   private render(): void {
-    if (!this.ended) this.host.render({ ...this.state });
+    if (!this.ended) this.host.render({ ...this.state, ...(this.reconnecting ? { status: "reconnecting" as const } : {}) });
   }
 }
 

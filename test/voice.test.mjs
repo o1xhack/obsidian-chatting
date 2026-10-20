@@ -218,6 +218,50 @@ test('A late original transcript is not re-steered when its delegation rephrased
   view.endVoice();
 });
 
+test('An open last-second correction runs next and its late terminal is not duplicated', async () => {
+  const { view, chat, plugin } = await voiceSetup();
+  let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('First done.')])); })
+    : response('anthropic', [text('Correction done.')]) });
+  await startListening(view, chat);
+  const ch = channel();
+  said(ch, 'Please read that note.');
+  delegated(ch, 'first', 'Read the note');
+  await until(() => log.chat.length === 1);
+  said(ch, 'Also preserve the title');
+  release();
+  await until(() => log.chat.length === 2 && spoken(ch).some(([, value]) => value === 'Correction done.'));
+  assert.match(userText(log.chat[1]), /Also preserve the title/);
+  ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Also preserve the title' } });
+  ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Please read that note.' } });
+  answered(ch, 'Okay.');
+  await sleep(60);
+  assert.equal(log.chat.length, 2);
+  assert.equal(plugin.chatHistory.filter(e => e.type === 'user' && e.text === 'Also preserve the title').length, 1);
+  view.endVoice();
+});
+
+for (const timing of ['before-waiter', 'after-waiter']) {
+  test(`A pre-open channel close ${timing} immediately releases startup resources`, async () => {
+    const original = FakePeerConnection.prototype.setRemoteDescription;
+    FakePeerConnection.prototype.setRemoteDescription = async function () {
+      if (timing === 'before-waiter') this.channel.onclose();
+      else setTimeout(() => this.channel.close(), 0);
+    };
+    try {
+      const { view, chat } = await voiceSetup();
+      serve();
+      view.startVoice();
+      await until(() => chat.shown.some(e => e.type === 'error'), 200);
+      assert.equal(chat.voice, null);
+      assert.equal(rtc.mic.track.stopped, true);
+      assert.equal(pc().closed, true);
+      assert.equal(chat.shown.filter(e => e.type === 'error').length, 1);
+    } finally { FakePeerConnection.prototype.setRemoteDescription = original; }
+  });
+}
+
 test('A streaming probe aborts an unanswered fetch and advances with a timeout', async () => {
   api.CAPABILITY_TIMING.networkMs = 10;
   let signal, calls = 0;
@@ -1354,3 +1398,64 @@ test('Desktop: a minimised window keeps the call and its microphone', async () =
   assert.equal(chat.voice.status, 'listening');
   view.endVoice();
 });
+
+for (const lost of [false, true]) {
+  test(`Mobile reconnect preserves a running delegated task (${lost ? 'lost' : 'healthy'} call) and seeds its result without replay`, async () => {
+    api.Platform.isMobileApp = true;
+    const { view, chat, plugin } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('Preserved running result.')])); })
+      : response('anthropic', [text('Next request done.')]) });
+    await startListening(view, chat);
+    const controller = view.voice, first = pc();
+    first.connectionState = 'connected';
+    delegated(channel(), 'original', 'Read the note');
+    await until(() => log.chat.length === 1);
+    appLifecycle.markHidden();
+    if (lost) { first.connectionState = 'failed'; first.onconnectionstatechange(); }
+    await sleep(60);
+    appLifecycle.markVisible();
+    assert.equal(view.voice, controller, 'in-flight hooks retain their owner');
+    assert.equal(chat.voice.status, 'reconnecting');
+    assert.equal(rtc.pcs.length, 1, 'replacement waits for the result, avoiding cross-call delegation IDs');
+    assert.equal(rtc.mic.track.enabled, false);
+    release();
+    await until(() => rtc.pcs.length === 2 && chat.voice?.status === 'listening');
+    assert.equal(log.chat.length, 1, 'original task was neither stopped nor replayed');
+    assert.equal(plugin.chatHistory.filter(e => e.type === 'assistant' && e.text === 'Preserved running result.').length, 1);
+    const seed = JSON.parse(log.live[1].body).session.initial_items;
+    assert.ok(seed.some(e => e.content[0].text === 'Preserved running result.'));
+    assert.match(seed.at(-1).content[0].text, /tell me its latest result.*Do not run the task again/);
+    delegated(channel(), 'new-call', 'Read another note');
+    await until(() => spoken(channel()).some(([, value]) => value === 'Next request done.'));
+    assert.equal(log.chat.length, 2);
+    assert.deepEqual(errorsShown(chat), []);
+    view.endVoice();
+  });
+}
+
+for (const outcome of ['failed', 'stopped']) {
+  test(`Reconnection carries the ${outcome} outcome instead of a previous successful answer`, async () => {
+    const { view, chat, plugin } = await voiceSetup();
+    const log = serve();
+    plugin.chatHistory.push({ type: 'assistant', text: 'Old task succeeded.' });
+    await startListening(view, chat);
+    let release;
+    view.voice.host.runTurn = async (_request, hooks) => {
+      await new Promise(resolve => { release = resolve; });
+      if (outcome === 'failed') hooks.onError('Synthetic backend refusal');
+      else hooks.onStopped();
+    };
+    delegated(channel(), 'old', 'Work on the note');
+    await until(() => release);
+    view.reconnectVoice();
+    release();
+    await until(() => rtc.pcs.length === 2 && chat.voice?.status === 'listening');
+    const prompt = JSON.parse(log.live[1].body).session.initial_items.at(-1).content[0].text;
+    assert.match(prompt, outcome === 'failed' ? /task failed: Synthetic backend refusal/ : /task was stopped/);
+    assert.doesNotMatch(prompt, /Old task succeeded/);
+    assert.equal(log.chat.length, 0);
+    view.endVoice();
+  });
+}

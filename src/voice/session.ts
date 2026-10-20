@@ -122,7 +122,7 @@ export class VoiceSession {
       channel.onclose = () => {
         this.handlers.log("VOICE_CHANNEL", { state: "closed" });
         this.onClosed?.();
-        if (this.started && !this.ended) this.finish("The voice connection was closed.");
+        if (!this.ended && !this.closing) this.finish("The voice connection was closed.");
       };
 
       await pc.setLocalDescription(await pc.createOffer());
@@ -233,6 +233,7 @@ export class VoiceSession {
   }
 
   private waitForStart(): Promise<void> {
+    if (this.ended || this.closing) return Promise.reject(new VoiceCancelled());
     if (this.started) return Promise.resolve();
     let timer = 0;
     return new Promise<void>((resolve, reject) => {

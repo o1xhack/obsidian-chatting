@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 768,
-    "passed": 768,
+    "tests": 775,
+    "passed": 775,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -86,6 +86,21 @@
       "migration-chat-present-chat-mvh8bbyq-huzydu",
       "migration-visible-chat-mvh8bbyq-huzydu",
       "migration-api-chat-mvh8bbyq-huzydu",
+      "migration-chat-present-chat-mvh8m742-bfnpfa",
+      "migration-visible-chat-mvh8m742-bfnpfa",
+      "migration-api-chat-mvh8m742-bfnpfa",
+      "migration-chat-present-chat-mvh94sc5-6bwgxh",
+      "migration-visible-chat-mvh94sc5-6bwgxh",
+      "migration-api-chat-mvh94sc5-6bwgxh",
+      "migration-chat-present-chat-mvh957ol-0ulykf",
+      "migration-visible-chat-mvh957ol-0ulykf",
+      "migration-api-chat-mvh957ol-0ulykf",
+      "migration-chat-present-chat-mvh968o1-61ph4b",
+      "migration-visible-chat-mvh968o1-61ph4b",
+      "migration-api-chat-mvh968o1-61ph4b",
+      "migration-chat-present-chat-mvh96itd-wbqnh8",
+      "migration-visible-chat-mvh96itd-wbqnh8",
+      "migration-api-chat-mvh96itd-wbqnh8",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -119,7 +134,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "54b55d24a74750e1733d8026cbbdb8cf02d0e0b1cb77437e1796c7389324c18f",
+    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -140,6 +155,11 @@
       "duplicate-delegation-no-second-request",
       "completed-user-turn-queued-native",
       "completed-correction-sent-to-native-backend",
+      "native-open-last-second-correction-runs-next",
+      "native-reconnect-retains-running-controller",
+      "native-reconnect-mutes-immediately",
+      "held-microphone-muted-during-connect",
+      "native-reconnect-task-finishes-without-replay",
       "voice-375px-no-overflow",
       "end-mutes-microphone-immediately",
       "end-removes-bar",
@@ -150,10 +170,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "54b55d24a74750e1733d8026cbbdb8cf02d0e0b1cb77437e1796c7389324c18f"
+    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf"
   },
   "liveVoice": {
-    "mainSha256": "54b55d24a74750e1733d8026cbbdb8cf02d0e0b1cb77437e1796c7389324c18f",
+    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -167,7 +187,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh8m742-bfnpfa",
+    "conversationId": "chat-mvh97ifr-eey9l2",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
@@ -196,6 +216,46 @@
     {
       "comment": 4330742565,
       "fix": "Bound streaming/CORS/model probes; abort fetch and cancel stalled readers, then continue diagnostics."
+    },
+    {
+      "comment": 4330955611,
+      "fix": "Keep task hooks alive, close the old transport, wait for the task outcome and seed the replacement without tool replay; carry stopped/failed outcomes explicitly."
+    },
+    {
+      "comment": 4330955618,
+      "fix": "Drain open user words when a task resolves and deduplicate late terminal events."
+    },
+    {
+      "comment": 4330955623,
+      "fix": "Close startup resources immediately when the data channel closes before opening, with or without a registered startup waiter."
     }
-  ]
+  ],
+  "liveReconnect": {
+    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf",
+    "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
+    "events": [
+      "session.started",
+      "input_transcript.added",
+      "turn.created",
+      "turn.delta",
+      "delegation.created",
+      "output_transcript.added",
+      "turn.done",
+      "delegation.context.appended",
+      "session.closed"
+    ],
+    "passed": true,
+    "conversationId": "chat-mvh97t3o-7dydr7",
+    "connected": true,
+    "retainedController": true,
+    "reconnected": true,
+    "noReplay": true,
+    "answerReadNote": true,
+    "delegated": true,
+    "toolCount": 1,
+    "peerClosed": true,
+    "tools": [
+      "read_document"
+    ]
+  }
 }

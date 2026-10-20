@@ -625,7 +625,7 @@ export class ObsidianChatView extends ItemView {
   }
 
   /** Start a voice conversation in the current conversation. */
-  startVoice(options: { reconnecting?: boolean; micOn?: boolean } = {}): void {
+  startVoice(options: { reconnecting?: boolean; micOn?: boolean; finishedTask?: string } = {}): void {
     if (this.voice) return;
     const route = this.plugin.voiceRoute();
     if (!route) {
@@ -642,7 +642,7 @@ export class ObsidianChatView extends ItemView {
       takeSteered: () => this.takeStashed(),
       stopTurn: () => this.handleStop(),
       turnRunning: () => !!this.turn,
-      history: () => this.plugin.chatHistory,
+      history: () => options.finishedTask ? [...this.plugin.chatHistory, { type: "user", text: `The voice connection was interrupted while the backend task ran. Its turn has now ended; tell me its latest result below. Do not run the task again.\n\n${options.finishedTask}` }] : this.plugin.chatHistory,
       openFile: () => this.plugin.app.workspace.getActiveFile(),
       showError: (message) => {
         this.chatContainer?.addError(message);
@@ -696,15 +696,20 @@ export class ObsidianChatView extends ItemView {
   /**
    * Replace the voice conversation: the old call ends quietly, a new one
    * starts ("Reconnecting…"), seeded with the chat as it is now, so an
-   * answer finished meanwhile is included. If it fails, the error shows.
+   * answer finished meanwhile is included. Running work retains its original
+   * hooks until it finishes; the new call gets its result without replay.
+   * If it fails, the error shows.
    */
   private reconnectVoice(): void {
     const old = this.voice;
     if (!old) return;
-    this.voice = null;
-    this.releaseVoiceScreen?.();
-    void old.end();
-    this.startVoice({ reconnecting: true, micOn: old.isMicOn() });
+    void old.prepareReconnect().then((finishedTask) => {
+      if (this.voice !== old) return;
+      this.voice = null;
+      this.releaseVoiceScreen?.();
+      void old.end();
+      this.startVoice({ reconnecting: true, micOn: old.isMicOn(), finishedTask });
+    });
   }
 
   /** End the voice conversation, if one runs. */
