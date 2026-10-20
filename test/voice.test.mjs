@@ -1459,3 +1459,40 @@ for (const outcome of ['failed', 'stopped']) {
     view.endVoice();
   });
 }
+
+for (const ending of ['final-answer', 'spoken-question', 'before-loop', 'voice-ended']) {
+  test(`Late voice steering keeps its preceding question when rerun after ${ending}`, async () => {
+    const { view, chat, plugin, app } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(ending === 'spoken-question'
+        ? response('anthropic', [call('ask', 'ask_user', { question: 'Which title?' }), call('unsafe', 'create_file', { path: 'Should-not-exist.md', content: 'unsafe' })], 'tool_use')
+        : response('anthropic', [text('First completed.')])) })
+      : response('anthropic', [text('Added context-aware section.')]) });
+    await startListening(view, chat);
+    const ch = channel();
+    said(ch, 'Read the first note');
+    delegated(ch, 'first');
+    await until(() => log.chat.length === 1);
+    if (ending === 'before-loop') view.turn.agent.steer = () => false;
+    said(ch, 'Add another section');
+    answered(ch, 'Should I use the heading Cobalt notes?');
+    said(ch, 'Do that');
+    delegated(ch, 'correction');
+    await until(() => chat.queued.includes('Do that'));
+    if (ending === 'voice-ended') view.endVoice();
+    release();
+    await until(() => plugin.chatHistory.some(row => row.type === 'assistant' && row.text === 'Added context-aware section.'));
+    assert.equal(log.chat.length, 2);
+    assert.match(userText(log.chat[1]), /Voice: "Should I use the heading Cobalt notes\?"/);
+    assert.match(userText(log.chat[1]), /Do that$/);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.turnId && /Do that$/.test(row.text)).length, 1);
+    assert.equal(app.vault.getFileByPath('Should-not-exist.md'), null);
+    if (ending !== 'voice-ended') assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.turnId && row.text === 'Do that').length, 1, 'typed request stays separate from voice context');
+    if (ending === 'spoken-question') {
+      assert.ok(plugin.chatHistory.some(row => row.type === 'assistant' && row.text === 'Which title?'));
+      assert.match(JSON.stringify(log.chat[1]), /Tool execution cancelled/);
+    }
+    view.endVoice();
+  });
+}

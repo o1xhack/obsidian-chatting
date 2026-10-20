@@ -3,7 +3,7 @@ import { mount, unmount } from "svelte";
 import type { Component } from "svelte";
 import type ChatPlugin from "../main";
 import ChatContainer from "./ChatContainer.svelte";
-import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry, ChatErrorKind, VoiceTurn } from "../types";
+import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry, ChatErrorKind, VoiceTurn, SteeredMessage } from "../types";
 import type { ConversationRecord } from "../chat-state";
 import type { AgentLoop } from "../agent/loop";
 import { showInView } from "./show-in-view";
@@ -24,6 +24,11 @@ import { appLifecycle } from "../platform/lifecycle";
 import { VoiceController, VOICE_TIMING, requestContext, type VoiceTurnHooks, type VoiceViewState } from "../voice/controller";
 
 export const VIEW_TYPE_CHAT = "ochatting-view";
+
+/** Saved/typed fallback stays compatible with pendingMessages' string format. */
+function steeredText(item: SteeredMessage): string {
+  return item.context?.length ? `${voiceTranscriptText(item.context)}\n\n${item.text}` : item.text;
+}
 
 /** Voice bar controls and the voice button. */
 export type VoiceAction = "start" | "end" | "mute" | "talk-start" | "talk-end" | "play";
@@ -215,7 +220,7 @@ interface RunningTurn {
   /** Typed while it runs, until the agent takes them in or they run next (shown as queued). */
   queued: string[];
   /** Typed when no loop step could take them (the turn was ending): they run next. */
-  unsteered: string[];
+  unsteered: SteeredMessage[];
   /** Lets the screen sleep again (the turn holds it on). */
   releaseScreen: () => void;
   /** Past its preflight (linked files read, the request allowed): its user row is in the history. */
@@ -716,6 +721,7 @@ export class ObsidianChatView extends ItemView {
   endVoice(): void {
     const voice = this.voice;
     if (!voice) return;
+    this.voiceLeftovers.delete(this.plugin.activeConversation);
     this.voice = null;
     this.releaseVoiceScreen?.();
     this.releaseVoiceScreen = undefined;
@@ -808,6 +814,7 @@ export class ObsidianChatView extends ItemView {
     const later = conversation.pendingMessages;
     if (later?.length && !turn && !this.voice) {
       delete conversation.pendingMessages;
+      this.voiceLeftovers.delete(conversation);
       void this.handleUserMessage(later.join("\n\n"), null);
     }
   }
@@ -1206,7 +1213,7 @@ export class ObsidianChatView extends ItemView {
         back?.();
         // Rollback renders history, which clears attachment chips. Restore after it.
         // Typed meanwhile, added to a message that was never sent: back in the input with it.
-        const unsent = [draft.text, ...this.takeLeftovers(turn)].join("\n\n");
+        const unsent = [draft.text, ...this.takeLeftovers(turn).map(steeredText)].join("\n\n");
         if (ui() && !voice) chat.restoreDraft?.(unsent, draft.selection, draft.images, draft.files);
         else conversation.chatHistory.push({ type: "error", text: `This message wasn't sent: "${unsent}"` });
       }
@@ -1243,10 +1250,14 @@ export class ObsidianChatView extends ItemView {
         }
         // Not shown: saved with the chat, they run when it's shown again.
         // A voice conversation takes them itself; not shown, they wait in its chat.
-        if (later.length && (!shown || voice?.active())) conversation.pendingMessages = [...conversation.pendingMessages ?? [], ...later];
+        if (later.length && (!shown || voice?.active())) {
+          const earlier = this.voiceLeftovers.get(conversation) ?? (conversation.pendingMessages ?? []).map(text => ({ text }));
+          conversation.pendingMessages = [...conversation.pendingMessages ?? [], ...later.map(steeredText)];
+          if (shown && voice?.active()) this.voiceLeftovers.set(conversation, [...earlier, ...later]);
+        }
         // Persist after each turn
         void this.plugin.saveChatHistory();
-        if (later.length && shown && !voice?.active()) void this.handleUserMessage(later.join("\n\n"), null);
+        if (later.length && shown && !voice?.active()) void this.handleUserMessage(later.map(steeredText).join("\n\n"), null);
       }
     }
   }
@@ -1388,7 +1399,7 @@ export class ObsidianChatView extends ItemView {
     const turn = this.turn;
     if (!turn) return;
     this.showQueued(turn, [...turn.queued, text]);
-    if (!turn.agent.steer(text)) turn.unsteered.push(text);
+    if (!turn.agent.steer(text)) turn.unsteered.push({ text });
   }
 
   /** A spoken request while the voice's turn runs: added to it with what was said before it. */
@@ -1398,22 +1409,25 @@ export class ObsidianChatView extends ItemView {
     this.showQueued(turn, [...turn.queued, text]);
     // Before the loop has started (its message still being checked, a
     // summary written): it waits and runs next, as typed text does.
-    if (!turn.agent.steer(text, context.length ? voiceTranscriptText(context) : undefined)) turn.unsteered.push(text);
+    if (!turn.agent.steer(text, context)) turn.unsteered.push({ text, context: context.map(item => ({ ...item })) });
     return true;
   }
 
   /** What the shown conversation's last turn left over (for the voice conversation). */
-  private takeStashed(): string[] {
+  private voiceLeftovers = new WeakMap<ConversationRecord, SteeredMessage[]>();
+
+  private takeStashed(): SteeredMessage[] {
     const conversation = this.plugin.activeConversation;
-    const later = conversation.pendingMessages ?? [];
+    const later = this.voiceLeftovers.get(conversation) ?? (conversation.pendingMessages ?? []).map(text => ({ text }));
+    this.voiceLeftovers.delete(conversation);
     delete conversation.pendingMessages;
     return later;
   }
 
   /** Added messages the turn didn't take in; they leave the queue (they run next). */
-  private takeLeftovers(turn: RunningTurn): string[] {
+  private takeLeftovers(turn: RunningTurn): SteeredMessage[] {
     const later = [...turn.unsteered.splice(0), ...turn.agent.takeSteered()];
-    if (later.length) this.showQueued(turn, turn.queued.filter((text) => !later.includes(text)));
+    if (later.length) this.showQueued(turn, turn.queued.filter((text) => !later.some(item => item.text === text)));
     return later;
   }
 

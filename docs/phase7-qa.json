@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 775,
-    "passed": 775,
+    "tests": 779,
+    "passed": 779,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -101,6 +101,12 @@
       "migration-chat-present-chat-mvh96itd-wbqnh8",
       "migration-visible-chat-mvh96itd-wbqnh8",
       "migration-api-chat-mvh96itd-wbqnh8",
+      "migration-chat-present-chat-mvh97ifr-eey9l2",
+      "migration-visible-chat-mvh97ifr-eey9l2",
+      "migration-api-chat-mvh97ifr-eey9l2",
+      "migration-chat-present-chat-mvh97t3o-7dydr7",
+      "migration-visible-chat-mvh97t3o-7dydr7",
+      "migration-api-chat-mvh97t3o-7dydr7",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -134,7 +140,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf",
+    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -156,6 +162,9 @@
       "completed-user-turn-queued-native",
       "completed-correction-sent-to-native-backend",
       "native-open-last-second-correction-runs-next",
+      "native-spoken-question-keeps-queued-addition",
+      "native-late-addition-context-preserved",
+      "native-late-context-keeps-request-separate",
       "native-reconnect-retains-running-controller",
       "native-reconnect-mutes-immediately",
       "held-microphone-muted-during-connect",
@@ -170,10 +179,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf"
+    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91"
   },
   "liveVoice": {
-    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf",
+    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -187,7 +196,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh97ifr-eey9l2",
+    "conversationId": "chat-mvh9oxep-88bwa4",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
@@ -228,10 +237,18 @@
     {
       "comment": 4330955623,
       "fix": "Close startup resources immediately when the data channel closes before opening, with or without a registered startup waiter."
+    },
+    {
+      "comment": 4331079879,
+      "fix": "Retain structured voice context in agent/view leftovers and pass it into the next run; persist a context-preserving string fallback using the existing chat format."
+    },
+    {
+      "comment": 4331079884,
+      "fix": "Keep additions queued when ask_user ends a voice turn instead of reporting them as consumed before a nonexistent next request."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "58e889bdf6bfec1bcb29d12efe3e04d3b346194d14470b188e9a93210d2e7adf",
+    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -245,7 +262,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh97t3o-7dydr7",
+    "conversationId": "chat-mvh9p8nm-b9tmgj",
     "connected": true,
     "retainedController": true,
     "reconnected": true,

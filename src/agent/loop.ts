@@ -11,6 +11,7 @@ import type {
   FileAttachment,
   UnifiedResponse,
   VoiceTurn,
+  SteeredMessage,
   ServerToolCall,
 } from "../types";
 import { sendMessage } from "../api/client";
@@ -25,7 +26,7 @@ import { executeTool } from "../tools/executor";
 import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
-import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
+import { buildSystemPrompt, buildContextMessage, voiceTranscriptText } from "./system-prompt";
 import { cutBeforeTurn, editableTurn, fromLastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
 
 import { debugLog } from "../debug";
@@ -165,7 +166,7 @@ export class AgentLoop {
   /** The run whose loop is working now (0: none); `steer()` adds to it. */
   private loopVersion = 0;
   /** Messages the user added while the loop works; sent with its next request (`steer`). */
-  private steered: { text: string; context?: string }[] = [];
+  private steered: SteeredMessage[] = [];
   /** The running turn comes from a voice conversation (`ask_user` ends it). */
   private voiceTurn = false;
   /** Turns holding this loop (`hold()`). */
@@ -195,16 +196,16 @@ export class AgentLoop {
    * goes to the model with it, not into the chat (what was said in voice
    * before the request).
    */
-  steer(text: string, context?: string): boolean {
+  steer(text: string, context?: VoiceTurn[]): boolean {
     if (!this.loopVersion || this.loopVersion !== this.runVersion) return false;
-    this.steered.push({ text, ...(context ? { context } : {}) });
+    this.steered.push({ text, ...(context?.length ? { context: context.map(turn => ({ ...turn })) } : {}) });
     debugLog(this.app, "STEER", { text, context });
     return true;
   }
 
   /** Added messages the finished turn didn't get to; they need a turn of their own. */
-  takeSteered(): string[] {
-    return this.steered.splice(0).map((item) => item.text);
+  takeSteered(): SteeredMessage[] {
+    return this.steered.splice(0);
   }
 
   /** Stop a running turn and clear the history. */
@@ -890,8 +891,8 @@ ${mentioned.text}` : buildContextMessage(context);
       if (isStopped()) return;
       // What the user added meanwhile goes with the next request, after the
       // results; without another request (the last step) it runs next instead.
-      if (i + 1 < maxIterations) for (const { text, context } of this.steered.splice(0)) {
-        resultBlocks.push({ type: "text", text: `[The user added while you were working:${context ? ` ${context}` : ""}] ${text}` });
+      if (!askedAloud && i + 1 < maxIterations) for (const { text, context } of this.steered.splice(0)) {
+        resultBlocks.push({ type: "text", text: `[The user added while you were working:${context?.length ? ` ${voiceTranscriptText(context)}` : ""}] ${text}` });
         callbacks.onSteered?.(text);
       }
       // A question in a voice turn is its answer; the user's reply starts the next turn.

@@ -256,6 +256,12 @@ export interface VoiceTurn {
   text: string;
 }
 
+/** An addition a running turn has not yet sent to the model. */
+export interface SteeredMessage {
+  text: string;
+  context?: VoiceTurn[];
+}
+
 // ─── Selection Scope ────────────────────────────────────────────────────────
 
 export interface SelectionScope {

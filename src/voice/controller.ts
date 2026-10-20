@@ -4,7 +4,7 @@
  * the chat view (any provider), and the answer goes back for the voice to
  * speak.
  */
-import type { ChatHistoryEntry, VoiceTurn } from "../types";
+import type { ChatHistoryEntry, VoiceTurn, SteeredMessage } from "../types";
 import {
   VOICE_INSTRUCTIONS,
   openFileNote,
@@ -53,7 +53,7 @@ export interface VoiceHost {
   /** Add a request to the running turn (steering); false when none is running. */
   steerTurn(text: string, context?: VoiceTurn[]): boolean;
   /** Steered requests the finished turn didn't get to. */
-  takeSteered(): string[];
+  takeSteered(): SteeredMessage[];
   /** Stop the running turn, like Stop. */
   stopTurn(): void;
   turnRunning(): boolean;
@@ -545,7 +545,7 @@ export class VoiceController {
     // Added after the turn's last step: it needs a turn of its own.
     // Words still waiting to be added when the task ended run as the next turn.
     const pending = this.takePendingSteer();
-    const later = [...this.host.takeSteered(), ...(pending ? [pending] : [])];
+    const later = [...this.host.takeSteered(), ...(pending ? [{ text: pending }] : [])];
     this.taskResult = failed ? `The task failed: ${failed}. Do not claim it succeeded.` : answer ? spokenAnswer(answer) : "The task ended without a final answer; check the chat for details.";
     // Said first, so a request the user makes while the result is spoken
     // isn't taken for part of this task (the voice then claimed it was "on the way").
@@ -553,7 +553,7 @@ export class VoiceController {
     if (failed) this.sendAll(speakEvents(this.answerTo, "That didn't work; the error is shown in the chat."));
     else if (answer) this.sendAll(speakEvents(this.answerTo, spokenAnswer(answer)));
     if (later.length) {
-      await this.runVoiceTurn(this.answerTo, later.join("\n"));
+      await this.runVoiceTurn(this.answerTo, later.map(item => item.text).join("\n"), later.flatMap(item => item.context ?? []));
       return;
     }
     if (this.state.status === "thinking") this.update({ status: "listening" });
