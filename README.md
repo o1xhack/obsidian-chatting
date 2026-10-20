@@ -21,14 +21,15 @@
 
 ## ✨ Work with your vault through conversation
 
-Chatting with AI helps you turn a request into work done in Obsidian: find related notes, improve a draft, organize a project or update a Canvas. It brings together six core capabilities:
+Chatting with AI turns conversation into work in Obsidian: find related notes, improve a draft, organize a project or update a Canvas, then keep the task moving across chats and longer conversations. It brings together seven core capabilities:
 
-- 📱 **Mobile-first, lightweight chat** — work on phone, tablet and desktop, without setting up a vault index or a separate backend.
-- 🧰 **An assistant that can act** — search and edit notes, organize files and properties, follow links, work with Canvas and read web pages through 22 built-in tools.
+- 📱 **Mobile-first, interactive chat** — read answers as they arrive and add a follow-up while the assistant works, on phone, tablet or desktop. No vault index or separate backend to set up.
+- 🧰 **Vault actions and connected tools** — use 22 built-in tools for notes, files, properties, links, Canvas and web pages; optionally connect remote MCP tools with an Anthropic or OpenAI API key.
 - 📎 **The context you choose** — work from the active note, constrain an edit to selected text, mention files with `@` or `[[`, and bring images, PDFs and Office documents into the conversation.
 - 🧩 **Your repeatable workflows** — teach the assistant your vault conventions with `AGENTS.md` and reusable Skills, or invoke a skill directly with `/name`.
 - 👀 **Changes you can follow and undo** — jump to edited passages and Canvas cards, inspect the steps and undo an answer's changes while its snapshots are available in the current session.
-- 💬 **Separate, continuing conversations** — keep named chats for different tasks, return after a restart, edit earlier messages and regenerate answers.
+- 💬 **Conversations you can steer and revisit** — keep named chats for different tasks, switch while answers continue, and return to saved conversations after a restart.
+- 🧠 **Long chats with visible usage** — see context use and token totals, check API cost estimates where pricing is available, and summarize earlier context to keep a conversation going.
 
 Connect through **Anthropic API**, **OpenAI API**, or **your ChatGPT account**. Choose the provider that fits how you already use AI.
 
@@ -46,7 +47,7 @@ Ask in ordinary language. The assistant chooses the tools, reads the relevant ma
 
 Search by content, tags or properties; inspect incoming, outgoing and unlinked mentions; read and edit Canvas cards and connections; inspect vault images and load web pages as text.
 
-With an Anthropic or OpenAI API key you can add remote MCP servers in the settings. The provider connects to them, the assistant uses their tools, and each call shows as a step in the chat.
+With an **Anthropic or OpenAI API key**, add public HTTPS MCP servers to bring tools from other services into the conversation. The provider connects to enabled servers; their calls and results appear alongside vault-tool steps. Remote MCP is not available through this plugin's ChatGPT account connection, and local or stdio servers are not supported.
 
 ### Give each task the right context
 
@@ -60,23 +61,33 @@ A root `AGENTS.md` supplies vault-wide instructions; a folder's `AGENTS.md` adds
 
 Skills use the Claude Code / Codex folder format. Their instructions and supporting files can be read; bundled scripts are not executed.
 
-### Review the work and keep conversations going
+### Review changes and undo vault work
 
 **Follow the AI's edits** opens changed passages or Canvas cards without taking focus from chat. Finished tool steps fold into a compact row you can expand. Per-answer **Undo** restores recorded edits, creations, renames and deletions; it asks before overwriting files that changed afterward. Snapshots are bounded and kept in memory, so undo is unavailable after a restart or when its snapshots expire.
 
-Create, switch, rename and delete separate chats. Each has its own provider conversation, and chats resume after restarting Obsidian. An answer keeps running when you switch to another chat; the list shows *Answering…*, and a notice says when it is ready or has a question. If you switch apps or lock the phone while an answer runs, a request the phone cut off is sent again when you come back; if the phone closed Obsidian meanwhile, **Continue** finishes the interrupted answer. While an answer runs, you can type and send more: the message joins the running task (shown as *Queued* until the assistant takes it in). You can edit a previous message, copy an answer or regenerate the last answer. Editing or regenerating does not undo changes already made to vault files.
+### Keep conversations moving
 
-A small ring in the chat header shows how full the model's context is; click it for the tokens the chat used, its estimated cost (with the ChatGPT account, a link to your plan's usage) and **Compact now**. Before the context is full, the earlier part of the chat is summarized so it can go on: by the provider where it offers that, otherwise by the plugin with the same model; **Settings → Compaction point** sets when. A chat has no message limit: it shows its last 20 turns and loads earlier ones as you scroll up.
+Create, switch, rename and delete separate chats. Each has its own provider conversation, and switching chats leaves an already-sent answer running in its own chat. The list shows *Answering…*; questions wait in that chat until you return. You can type and send more while it works: text joins the next step or becomes the next turn, while new attachments and selections wait for the next turn.
 
-Answers appear as the model writes them and render Markdown, tables, wiki links and math. Read earlier messages without being pulled back to the bottom, then jump to the latest reply when you are ready.
+If switching apps or locking a phone interrupts a request, the plugin can resume eligible transient failures when you return. After a restart, **Continue** is offered for eligible pending turns. This is recovery when Obsidian returns, not a guarantee that a phone keeps running in the background. If a remote MCP action may already have run, check the external service before retrying; uncertain remote requests are not automatically repeated.
+
+Answers stream where the connection supports it; otherwise they arrive together. Stop keeps text already shown. Markdown, tables, wiki links and math render in the chat, and reading earlier messages does not pull you to the bottom. Copy answers, edit messages still in the model's retained history, or regenerate the last answer; editing and regenerating do not undo file changes.
+
+### Keep long chats useful
+
+The header's context ring shows how much of the model's window the conversation uses. Open it for token totals, **estimated API cost when pricing is available**, and **Compact now**. ChatGPT account chats link to plan usage instead of estimating subscription charges.
+
+Set **Compaction point** to choose when earlier model context is summarized, or compact manually. The full visible conversation stays readable as earlier turns load when you scroll up, while the model continues from the summary and recent context. Summaries can lose detail; messages covered by the last compaction can no longer be edited or regenerated.
+
+Chats are saved as individual local files and loaded when opened; settings show total saved-chat size, and larger chats show their own size in the list. Existing chats migrate with a backup of the old history file. Local history storage is separate from the model's context window and does not make that window unlimited.
 
 ## ⚙️ Three ways to connect
 
-| Connection | What you need | How it works |
-|---|---|---|
-| **Anthropic** | Anthropic API key | Claude models, with model-dependent thinking and web search. |
-| **OpenAI** | OpenAI API key | OpenAI models through the Responses API, with model-dependent reasoning and web search. |
-| **ChatGPT account** | A ChatGPT plan with Codex access | Sign in with your account and use its available Codex models. |
+| Connection | What you need | How it works | Remote MCP |
+|---|---|---|---|
+| **Anthropic** | Anthropic API key | Claude models, with model-dependent thinking and web search. | Supported |
+| **OpenAI** | OpenAI API key | OpenAI models through the Responses API, with model-dependent reasoning and web search. | Supported |
+| **ChatGPT account** | A ChatGPT plan with Codex access | Sign in with your account and use its available Codex models. | Not available in this connection |
 
 Model lists are fetched from your provider or account and cached for 24 hours. Refresh them manually at any time; supported thinking levels follow the catalog where available. Available models and access depend on your provider and account.
 
@@ -148,14 +159,14 @@ ln -s "$(pwd)" /path/to/vault/.obsidian/plugins/chatting-with-ai
 - **Credentials use Obsidian SecretStorage.** API keys and ChatGPT sign-in credentials are kept out of the plugin's `data.json`; connect each device separately.
 - **Chat history stays in your vault's plugin folder.** Named conversations are listed in `chat-state.json`, each chat in its own file in the `chats` folder. The plugin has no chat-sync service; whether these files travel to another device depends on your sync setup. Attachment data is bounded, and older attachments can remain as name-only chips.
 - **Changes happen in your vault.** Selection restrictions apply to direct edits of the selected note. Undo needs live snapshots; use your normal backups or version history for longer-term recovery.
-- **MCP servers start off; enabled servers act without asking for each call.** The provider can share conversation context with their tools. Add only servers you trust; tokens stay in this device's SecretStorage. Stop cannot recall a remote request, and vault Undo does not undo external MCP changes.
+- **MCP servers start off; enabled servers act without asking for each call.** The provider can share conversation context and the configured token with their tools. Add only servers you trust; tokens are stored in this device's SecretStorage. Stop cannot recall a remote request, and vault Undo does not undo external MCP changes.
 - **Web pages and attachments are external input.** Web-page reading uses your device's network, including addresses it can reach locally. Treat instructions hidden in pages or files as untrusted. Large attachments and requests are limited to protect device memory and request size.
 
 For attachment limits, provider-specific PDF/Office handling, the complete tool list, settings and recovery details, see the **[user guide](docs/user-guide.md)**. Recorded validation scope is in the [desktop and iPhone QA notes](docs/phase1-review.md).
 
 ## 🗺️ What's next
 
-Named conversations, image and document attachments, model-catalog refresh, Canvas, vault instructions and Skills are available today. **Archiving and searching past conversations remain on the roadmap.** See [releases](https://github.com/o1xhack/obsidian-chatting/releases) for version-by-version changes, or [open an issue](https://github.com/o1xhack/obsidian-chatting/issues) with feedback.
+Vault and Canvas work, chosen context, Skills, review/undo, streaming, conversation steering, long-chat compaction and usage tracking are available today. Remote MCP is optional for Anthropic/OpenAI API-key connections. **Archiving and searching past conversations remain on the roadmap.** See [releases](https://github.com/o1xhack/obsidian-chatting/releases) for version-by-version changes, or [open an issue](https://github.com/o1xhack/obsidian-chatting/issues) with feedback.
 
 ## 🤝 Contributing
 
