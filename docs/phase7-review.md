@@ -14,9 +14,9 @@ Hold mode is muted before SDP exchange. Ending a call disables the microphone an
 
 ## Validation
 
-759 automated tests, TypeScript, Svelte (zero errors/warnings) and production build pass. Regressions cover duplicate dispatch, held microphone negotiation, late events, sign-out, scoped writes, compaction refusal, clarification batches, stopped tasks, pending permission cancellation and hung call creation without retries.
+760 automated tests, TypeScript, Svelte (zero errors/warnings) and production build pass. Regressions cover duplicate dispatch, held microphone negotiation, late events, sign-out, scoped writes, compaction refusal, clarification batches, stopped tasks, pending permission cancellation and hung call creation without retries.
 
-The production bundle passed 87 native Mac regression checks and 15 mounted voice-UI checks, including actual hold-key/blur behavior, delegated answer rendering, duplicate suppression, ending and a 375px layout. All 1,809 protected existing vault files retained their hashes. These checks use synthetic microphone/WebRTC/provider transport, and do not establish physical-device acceptance. See phase7-qa.json for candidate hashes and later verification.
+The production bundle passed 90 native Mac regression checks and 15 mounted voice-UI checks, including actual hold-key/blur behavior, delegated answer rendering, duplicate suppression, ending and a 375px layout. All 1,809 protected existing vault files retained their hashes. These checks use synthetic microphone/WebRTC/provider transport, and do not establish physical-device acceptance. See phase7-qa.json for candidate hashes and later verification.
 
 A synthetic spoken request passed through the real ChatGPT/Codex WebRTC service, triggered delegation, ran one read_document tool on the real selected chat backend, and returned the test note text to chat and the spoken response. No vault write tool ran. Real account call creation and WebRTC connectivity were established with a synthetic audio track. Physical microphone sampling is not accepted: this Mac enumerated only Splashtop Remote Sound (Virtual), whose getUserMedia request did not return. Physical iOS/Android and Bluetooth are not accepted by the maintainer in this run; the contributor's earlier Android report is attributed separately.
 

@@ -220,6 +220,15 @@ test('A data-channel send failure during End still releases the microphone and p
   assert.equal(ended.length, 1);
 });
 
+test('A non-Error call failure is normalized and releases startup resources', async () => {
+  const session = new S.VoiceSession({ name: 'test', connect: async () => { throw 'offline'; } }, {
+    onMessage() {}, onEnded() {}, onAudioBlocked() {}, log() {},
+  });
+  await assert.rejects(session.start('test', []), error => error instanceof Error && error.message === 'offline');
+  assert.equal(rtc.mic.track.stopped, true);
+  assert.equal(pc().closed, true);
+});
+
 test('Hold mode is muted before SDP exchange, including reconnects', async () => {
   const { view, chat } = await voiceSetup({ micMode: 'hold' });
   serve({ live: () => {

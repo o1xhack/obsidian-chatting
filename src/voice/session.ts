@@ -279,7 +279,7 @@ export class VoiceSession {
       }, (error: unknown) => {
         if (settled) return;
         settled = true;
-        reject(error);
+        reject(error instanceof Error ? error : new Error(message(error)));
       });
     }).finally(() => {
       window.clearTimeout(timer);

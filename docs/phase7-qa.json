@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 759,
-    "passed": 759,
+    "tests": 760,
+    "passed": 760,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -77,6 +77,9 @@
       "migration-chat-present-chat-mvh77wud-meq70z",
       "migration-visible-chat-mvh77wud-meq70z",
       "migration-api-chat-mvh77wud-meq70z",
+      "migration-chat-present-chat-mvh7d2si-sj2qft",
+      "migration-visible-chat-mvh7d2si-sj2qft",
+      "migration-api-chat-mvh7d2si-sj2qft",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -110,7 +113,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "fc0dc56317c354d13c0e1ef789846f4ae89fa3fb228cd69a99e7944635033655",
+    "mainSha256": "4e6839540e0b364d8ba5abe0c351b2e867680c67dedf41595285ac01bb2b4736",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -136,10 +139,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "fc0dc56317c354d13c0e1ef789846f4ae89fa3fb228cd69a99e7944635033655"
+    "mainSha256": "4e6839540e0b364d8ba5abe0c351b2e867680c67dedf41595285ac01bb2b4736"
   },
   "liveVoice": {
-    "mainSha256": "fc0dc56317c354d13c0e1ef789846f4ae89fa3fb228cd69a99e7944635033655",
+    "mainSha256": "4e6839540e0b364d8ba5abe0c351b2e867680c67dedf41595285ac01bb2b4736",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -153,7 +156,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh7d2si-sj2qft",
+    "conversationId": "chat-mvh7kda3-vr23n6",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
