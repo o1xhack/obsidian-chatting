@@ -2,18 +2,24 @@
   import type { App, TFile } from "obsidian";
   import { Component as ObsidianComponent, MarkdownRenderer, Notice } from "obsidian";
   import { tick, onDestroy } from "svelte";
-  import type { ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary } from "../types";
+  import type { ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ChatErrorKind } from "../types";
   import { ACCEPTED_FILES, MAX_FILE_BYTES, fileAttachment, attachmentBudgetError } from "../files/attachments";
   import { formatBytes } from "../images";
+  import { LARGE_CHAT_BYTES } from "../chat-state";
   import { insertMention, mentionAt, mentionCandidates, type MentionQuery } from "./mentions";
   import { skillAt, skillCandidates, type Skill } from "../agent/skills";
   import { normalizeMathMarkdown } from "./math-markdown";
   import { isSendKey } from "./send-key";
   import { fileLabel, toolLabel } from "./tool-label";
   import { foldPlan } from "./fold-turn";
-  import type { ChangesState } from "./chat-view";
+  import type { ChangesState, UsageView } from "./chat-view";
   import { AttachmentPreparation } from "./attachment-preparation";
   import { withoutLargeVisibleToolText } from "../agent/history";
+  import { formatCost, formatTokens } from "../agent/usage";
+
+  /** Where a ChatGPT account sees its plan's Codex usage. */
+  const CHATGPT_USAGE_URL = "https://chatgpt.com/codex/settings/usage";
+
 
   const MAX_IMAGE_COUNT = 4;
   const MAX_FILE_COUNT = 4;
@@ -41,7 +47,7 @@
     selection?: SelectionScope;
     /** Assistant messages: text still arriving (no actions yet). */
     streaming?: boolean;
-    errorKind?: "stopped";
+    errorKind?: ChatErrorKind;
     /** Changes rows: the files a turn changed, and whether it can be undone. */
     files?: string[];
     changesState?: ChangesState;
@@ -81,13 +87,32 @@
     listSkills: () => Skill[];
     /** Continue the turn that was cut off when Obsidian was ended. */
     onContinue: () => void;
+    /** Summarize the chat now (the context ring's details). */
+    onCompact: () => void;
+    /** Show the turns before the shown ones (scrolled near the top). */
+    onLoadEarlier: () => void;
   }
 
   let {
     app, component, provider, model, onSend, onClear, onStop, onEdit, onRegenerate, onCopy,
     title, onNewChat, listConversations, onOpenConversation, onRenameConversation, onDeleteConversation,
-    onToggleFollow, onUndo, listSkills, onContinue,
+    onToggleFollow, onUndo, listSkills, onContinue, onCompact, onLoadEarlier,
   }: Props = $props();
+
+  // ─── Context ring ─────────────────────────────────────────────────────
+  let usage = $state<UsageView | null>(null);
+  let usageOpen = $state(false);
+  let usageEl: HTMLElement | undefined = $state();
+
+  export function setUsage(next: UsageView | null): void {
+    usage = next;
+    if (!next) usageOpen = false;
+  }
+
+  /** The details close on a click elsewhere or Escape. */
+  function closeUsageOutside(event: MouseEvent): void {
+    if (usageOpen && usageEl && event.target instanceof Node && !usageEl.contains(event.target)) usageOpen = false;
+  }
 
   /** A turn was cut off when Obsidian was ended in the background: offer Continue. */
   let canContinue = $state(false);
@@ -267,6 +292,12 @@
   const BOTTOM_SLACK = 32;
   let messageListEl: HTMLElement | undefined = $state();
   let stickToBottom = true;
+  /**
+   * Scrolled up from the bottom: the browser keeps the view on what it shows
+   * when rows above change height (scroll anchoring: earlier turns coming
+   * in, rows laid out late). Off while following the bottom.
+   */
+  let readingBack = $state(false);
   let showJump = $state(false);
   let lastQuestionId = -1;
   let lastScrollTop = 0;
@@ -290,7 +321,49 @@
 
   function jumpToBottom(): void {
     stickToBottom = true;
+    readingBack = false;
     followBottom();
+  }
+
+  // ─── Earlier turns ────────────────────────────────────────────────────
+  // The view shows a chat's last turns; scrolled near the top, or when they
+  // don't fill the view, the turns before them come in above, and the view
+  // stays where it was (Safari doesn't keep it by itself).
+  /** Pixels from the top at which the earlier turns load. */
+  const EARLIER_SLACK = 400;
+  let hasEarlier = false;
+
+  /** Whether the chat has turns before the shown ones (set by the view). */
+  export function setHasEarlier(value: boolean): void {
+    hasEarlier = value;
+    if (value) void tick().then(loadEarlierIfNear);
+  }
+
+  function loadEarlierIfNear(): void {
+    const el = messagesEl;
+    // A hidden chat (a background tab) has no height: it would load every turn.
+    if (hasEarlier && el && el.clientHeight > 0 && el.scrollTop < EARLIER_SLACK) onLoadEarlier();
+  }
+
+  /**
+   * Rows from an earlier part of the chat: `fill` adds them as it would at
+   * the end; they go above the shown ones, and the view keeps its place.
+   */
+  export function prependMessages(fill: () => void): void {
+    const shown = messages;
+    const el = messagesEl;
+    const fromBottom = el ? el.scrollHeight - el.scrollTop : 0;
+    messages = [];
+    try {
+      fill();
+    } finally {
+      messages = [...messages, ...shown];
+    }
+    void tick().then(() => {
+      if (!el) return;
+      el.scrollTop = el.scrollHeight - fromBottom;
+      lastScrollTop = el.scrollTop;
+    });
   }
 
   // A new question (sent, or the history shown anew) brings the view down.
@@ -300,6 +373,7 @@
     if (lastId !== lastQuestionId) {
       lastQuestionId = lastId;
       stickToBottom = true;
+      readingBack = false;
     }
     followBottom();
   });
@@ -309,7 +383,11 @@
   $effect(() => {
     const el = messagesEl;
     if (!el || !messageListEl) return;
-    const observer = new ResizeObserver(() => followBottom());
+    // Shown after being hidden, the chat may need its earlier turns too.
+    const observer = new ResizeObserver(() => {
+      followBottom();
+      loadEarlierIfNear();
+    });
     observer.observe(el, { box: "border-box" });
     observer.observe(messageListEl);
     // Scrolling up (wheel, touch, scrollbar, keys) stops following; back at the bottom it follows.
@@ -318,6 +396,8 @@
       else if (el.scrollTop < lastScrollTop) stickToBottom = false;
       lastScrollTop = el.scrollTop;
       showJump = !stickToBottom && !isAtBottom(el);
+      readingBack = !stickToBottom;
+      loadEarlierIfNear();
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
@@ -427,7 +507,7 @@
     if (idx !== -1) messages.splice(idx, 1);
   }
 
-  export function addError(text: string, errorKind?: "stopped"): void {
+  export function addError(text: string, errorKind?: ChatErrorKind): void {
     messages.push({ id: nextId++, type: "error", text, errorKind });
   }
 
@@ -513,8 +593,8 @@
     resolve?.("");
   }
 
-  export function setInputEnabled(enabled: boolean): void {
-    if (!enabled) attachmentPreparation.cancel();
+  export function setInputEnabled(enabled: boolean, preservePreparation = false): void {
+    if (!enabled && !preservePreparation) attachmentPreparation.cancel();
     inputEnabled = enabled;
   }
 
@@ -543,15 +623,17 @@
     queued = texts;
   }
 
-  export function clearMessages(): void {
-    attachmentPreparation.cancel();
+  export function clearMessages(preserveDraft = false): void {
     pendingText.clear();
     messages = [];
     editingId = null;
-    attachments = [];
-    fileAttachments = [];
-    if (fileInputEl) fileInputEl.value = "";
-    selection = null;
+    if (!preserveDraft) {
+      attachmentPreparation.cancel();
+      attachments = [];
+      fileAttachments = [];
+      if (fileInputEl) fileInputEl.value = "";
+      selection = null;
+    }
     hideThinking();
   }
 
@@ -1057,6 +1139,8 @@
   </div>
 {/snippet}
 
+<svelte:window onclick={closeUsageOutside} onkeydown={(e) => { if (e.key === "Escape") usageOpen = false; }} />
+
 <div class="ochatting-container">
   <!-- Header -->
   <div class="ochatting-header">
@@ -1075,6 +1159,72 @@
       <span class="ochatting-header-title" title={displayTitle}>{displayTitle || "New chat"}</span>
       <span class="ochatting-header-model">{displayModel || "No model"}</span>
     </div>
+    {#if usage}
+      {@const share = usage.contextWindow ? Math.min(1, usage.contextTokens / usage.contextWindow) : 0}
+      <!-- How full the context is; a click shows the details -->
+      <div class="ochatting-usage" bind:this={usageEl}>
+        <button
+          class="ochatting-icon-btn ochatting-usage-btn"
+          class:is-full={usage.compactAt !== undefined && usage.contextTokens >= usage.compactAt}
+          type="button"
+          onclick={() => usageOpen = !usageOpen}
+          aria-expanded={usageOpen}
+          aria-label={usage.plan ? "Context" : "Context and cost"}
+          title={usage.contextWindow ? `Context ${Math.round(share * 100)} % full` : `Context ${formatTokens(usage.contextTokens)} tokens`}
+        >
+          <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2.5"></circle>
+            {#if usage.contextWindow}
+              <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-dasharray={`${(share * 47.12).toFixed(2)} 47.12`} transform="rotate(-90 10 10)"></circle>
+            {/if}
+          </svg>
+        </button>
+        {#if usageOpen}
+          <div class="ochatting-usage-pop" role="dialog" aria-label={usage.plan ? "Context" : "Context and cost"}>
+            <div class="ochatting-usage-row">
+              <span>Context</span>
+              <span>{formatTokens(usage.contextTokens)}{usage.contextWindow ? ` of ${formatTokens(usage.contextWindow)} (${Math.round(share * 100)} %)` : " tokens"}</span>
+            </div>
+            {#if usage.contextWindow}
+              <div class="ochatting-usage-bar"><span style:width={`${(share * 100).toFixed(1)}%`}></span></div>
+            {/if}
+            <div class="ochatting-usage-row">
+              <span>Tokens used</span>
+              <span>{formatTokens(usage.inputTokens)} in · {formatTokens(usage.outputTokens)} out</span>
+            </div>
+            {#if usage.plan}
+              <!-- No per-token cost on the plan; OpenAI gives apps no remaining-usage figure. -->
+              <div class="ochatting-usage-row">
+                <span>Plan</span>
+                <span>Included in your ChatGPT plan · <a href={CHATGPT_USAGE_URL} target="_blank" rel="noopener">Manage usage</a></span>
+              </div>
+            {:else}
+              <div class="ochatting-usage-row">
+                <span>Cost</span>
+                <span>
+                  {#if usage.costUsd !== undefined}
+                    {formatCost(usage.costUsd)} this chat{usage.lastTurnCostUsd !== undefined ? `, ${formatCost(usage.lastTurnCostUsd)} last answer` : ""}
+                  {:else}
+                    No prices known for this model
+                  {/if}
+                </span>
+              </div>
+              {#if usage.costUsd !== undefined}
+                <div class="ochatting-usage-note">Estimated from the provider's list prices{usage.partialCost ? "; some requests had no price" : ""}.</div>
+              {/if}
+            {/if}
+            <button
+              class="ochatting-usage-compact"
+              type="button"
+              disabled={busy}
+              onclick={() => { usageOpen = false; onCompact(); }}
+              title="Replace the chat so far with a summary, written by the model"
+            >Compact now</button>
+          </div>
+        {/if}
+      </div>
+    {/if}
     <button
       class="ochatting-follow-btn"
       class:is-active={followEdits}
@@ -1152,6 +1302,10 @@
                 <span class="ochatting-history-title">{conversation.title}</span>
                 <span class="ochatting-history-date">
                   {#if conversation.running}<span class="ochatting-spinner ochatting-history-running" aria-hidden="true"></span>{/if}{conversation.running ? "Answering…" : formatDate(conversation.updatedAt)}
+                  <!-- A large chat: its size, so it can be deleted when no longer needed -->
+                  {#if (conversation.size ?? 0) > LARGE_CHAT_BYTES}
+                    · <span class="ochatting-history-size" title="A large chat. Delete it if you no longer need it.">{formatBytes(conversation.size ?? 0)}</span>
+                  {/if}
                 </span>
               </button>
               <button
@@ -1180,7 +1334,7 @@
   {/if}
 
   <!-- Messages -->
-  <div class="ochatting-messages" bind:this={messagesEl}>
+  <div class="ochatting-messages" class:is-reading-back={readingBack} bind:this={messagesEl}>
     <div class="ochatting-message-list" bind:this={messageListEl}>
     {#each messages as msg (msg.id)}
       {#if msg.type === "user"}
@@ -1333,8 +1487,8 @@
           {/if}
         </details>
 
-      {:else if msg.type === "error" && msg.errorKind === "stopped"}
-        <!-- Stopped before any of the answer arrived: a quiet note, not an error -->
+      {:else if msg.type === "error" && (msg.errorKind === "stopped" || msg.errorKind === "compacted")}
+        <!-- Stopped before any of the answer arrived, or the earlier part summarized: a quiet note, not an error -->
         <div class="ochatting-stopped-note">{msg.text}</div>
 
       {:else if msg.type === "changes"}
@@ -1604,6 +1758,74 @@
     color: var(--text-normal);
   }
 
+  /* ─── Context ring and its details ──────────────────────────────────── */
+  .ochatting-usage {
+    position: relative;
+  }
+
+  .ochatting-usage-btn.is-full {
+    color: var(--text-warning);
+  }
+
+  .ochatting-usage-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    width: min(280px, 80vw);
+    padding: 10px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    background: var(--background-primary);
+    box-shadow: var(--shadow-s);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-normal);
+  }
+
+  .ochatting-usage-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 6px;
+  }
+
+  .ochatting-usage-row:first-child {
+    margin-top: 0;
+  }
+
+  .ochatting-usage-row span:first-child {
+    color: var(--text-muted);
+  }
+
+  .ochatting-usage-row span:last-child {
+    text-align: right;
+  }
+
+  .ochatting-usage-bar {
+    height: 4px;
+    margin: 6px 0;
+    border-radius: 2px;
+    background: var(--background-modifier-border);
+    overflow: hidden;
+  }
+
+  .ochatting-usage-bar span {
+    display: block;
+    height: 100%;
+    background: var(--interactive-accent);
+  }
+
+  .ochatting-usage-note {
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
+
+  .ochatting-usage-compact {
+    width: 100%;
+    margin-top: 10px;
+    font-size: var(--font-ui-smaller);
+  }
+
   /* ─── Body: the chat, with the history list over it ─────────────────── */
   .ochatting-body {
     position: relative;
@@ -1700,6 +1922,10 @@
   .ochatting-history-date {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
+  }
+
+  .ochatting-history-size {
+    color: var(--text-warning);
   }
 
   /* A chat whose answer runs in the background */
@@ -1817,10 +2043,25 @@
     user-select: text;
   }
 
+  /* Scrolled up: the browser keeps the view where it is when rows above
+     change height (Safari doesn't; there the earlier turns are placed by
+     prependMessages) */
+  .ochatting-messages.is-reading-back {
+    overflow-anchor: auto;
+  }
+
   .ochatting-message-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* Rows off screen aren't laid out or painted; they keep their last size.
+     Not on iOS: Safari doesn't keep the scroll position when a row above
+     gets its real size. */
+  :global(body:not(.is-ios)) .ochatting-message-list > * {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 80px;
   }
 
   /* Round "to the latest message" button, stuck to the bottom edge of the view */

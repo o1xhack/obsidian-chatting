@@ -21,8 +21,8 @@ and insert positions, `set_properties` input checks, `read_file` and
 `read_document` refusing binary files, the local date from
 `get_current_datetime`, and quoting of a multi-line selection.
 `chat-view.test.mjs` drives the chat view and the plugin's commands with a
-fake Svelte component: the API history cap (80 messages saved, cut to 60
-past 80) and OpenAI chaining past it, tool card inputs and `ask_user`
+fake Svelte component: the API history without a cap by count (saved and
+loaded whole) and OpenAI chaining past 80 messages, tool card inputs and `ask_user`
 questions and answers after a reload, Stop and Clear while `ask_user` waits,
 a streamed answer growing in one message and kept on Stop,
 Copy transcript with the chat panel closed, commands waiting for the view,
@@ -81,9 +81,14 @@ aside. `instructions.test.mjs`: the vault's `AGENTS.md`: the root file in
 the system prompt (cut after 32,768 characters, gone with the file), a
 folder's with the first tool result touching it (outer first, not repeated,
 again after a cut, the active note counts) and the *Vault instructions*
-settings row in both settings paths. `conversations.test.mjs`: the version 3
-format of `chat-state.json` and its one-time migration, new chat, switching,
-renaming and deleting through the chat view, OpenAI chaining per
+settings row in both settings paths. `conversations.test.mjs`: the saved
+chats (version 4: the index in `chat-state.json` and a file per chat; only
+changed chats written, sizes in bytes, the whole visible history and the
+API history from its last compaction on, a chat's file read when it is
+opened, an unreadable one kept aside, unlisted files added back and deleted
+ones gone) and the one-time migrations to it (a version 3 file split once
+and kept aside; back from an older version that saved the index), new chat,
+switching, renaming and deleting through the chat view, OpenAI chaining per
 conversation, turns that go on in the background (a question waiting for
 the return, the notices, deleting the chat stops its turn, messages added
 after the last step), and the commands that start a new chat.
@@ -125,12 +130,32 @@ again at most twice, "Resuming…"; no `requestUrl()` fallback for a
 desktop; Continue after Obsidian was ended mid-turn and what dismisses it).
 `typed-steering.test.mjs`: typing while an answer runs (queued, taken in
 with the next step or run as the next turn; Stop and Clear drop it;
-trimming never starts at tool results with an added message).
+cutting the history never starts at tool results with an added message).
+`chat-saving.test.mjs`: saving the chats (nothing saved before they were
+read, two copies of each file and the newer whole one loaded, also for a
+chat's file; unreadable or invalid files kept aside, the index checked
+like a whole saved chat; saves never overlap; a reloaded plugin waits for
+the previous one's last save).
+`long-chats.test.mjs`: long chats (the compaction point: a share of the
+window, 50k at least, tokens for an unknown window; the setting's slider
+with its marks and token field and the *Chats* group in both settings
+paths; turns before the last compaction locked; a long chat showing its
+last 20 turns and loading the earlier ones).
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without
-changes). These tests do not establish live-service or physical-iOS
-behavior.
+changes). `usage.test.mjs`: each provider's token counts (cache reads and
+writes, a compaction pass), the cost estimate, windows and prices from
+Anthropic's model list and pricing page, the Codex model list and OpenAI's
+documentation page (read once a day), the context ring with its compaction
+point and tokens used, saved with the chat and checked when loaded, gone
+after Clear; the ChatGPT plan without cost. `compaction.test.mjs`:
+compaction (Anthropic's threshold edit and beta header where the model has
+it, OpenAI's and the Codex route's `context_management`, what later requests
+send; the Codex route refusing it; the plugin's summary at the compaction
+point, after another provider's encrypted compaction (once), on a request
+too long, and on Compact now; the transcript). These tests do not establish
+live-service or physical-iOS behavior.
 
 Two Node scripts that exercise the ChatGPT/Codex Responses endpoint
 **without** going through Obsidian, so iteration on the

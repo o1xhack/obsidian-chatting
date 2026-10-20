@@ -1,9 +1,10 @@
-import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, StreamOptions, UnifiedMessage, UnifiedResponse } from "../types";
+import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, StreamOptions, TokenUsage, UnifiedMessage, UnifiedResponse } from "../types";
 import { ProviderError, StreamCutError } from "./errors";
 import { StreamDropped, streamSSE, type StreamResult } from "./stream";
 import { serializeRequest } from "./request-budget";
 import { isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
+import { afterCompaction } from "../agent/compaction";
 import { fileAsText, isSentAsFile } from "../files/attachments";
 import { openaiServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
 
@@ -68,11 +69,16 @@ export function buildResponsesInput(
   servers: McpServer[] = [],
 ): Record<string, unknown>[] {
   const items: Record<string, unknown>[] = [];
-  for (const message of withoutOldToolImages(messages)) {
-    if (message.role === "assistant" && message.replay?.provider === provider && (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity)) {
-      const replay = withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers);
-      if (replay.length) { items.push(...replay); continue; }
-      // Portable receipts still explain external changes after revocation.
+  const replayable = (message: UnifiedMessage) => message.role === "assistant" && message.replay?.provider === provider &&
+    (!model || !message.replay.model || message.replay.model === model) && (!identity || !message.replay.identity || message.replay.identity === identity);
+  // After a compaction, from its message on.
+  for (const message of withoutOldToolImages(afterCompaction(messages, replayable))) {
+    if (replayable(message) && message.replay) {
+      // Items before the latest compaction item are covered by it.
+      const replayed = withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers);
+      const last = replayed.map((item) => item.type).lastIndexOf("compaction");
+      if (replayed.length) { items.push(...(last > 0 ? replayed.slice(last) : replayed)); continue; }
+
     }
     const content: Record<string, unknown>[] = [];
     const flush = () => {
@@ -180,9 +186,11 @@ export function fromResponsesOutput(
     content,
     replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
-    usage: usage ? { inputTokens: numberValue(usage.input_tokens), outputTokens: numberValue(usage.output_tokens) } : undefined,
+    usage: usage ? responsesUsage(usage) : undefined,
     // Tools OpenAI called on MCP servers; their items stay in the replay as sent.
     ...withServerCalls(openaiServerCalls(output)),
+    // Server-side compaction: its item is encrypted, so no readable summary.
+    ...(output.some((item) => item.type === "compaction") ? { compaction: {} } : {}),
   };
   if (failed) {
     const error = isRecord(data.error) ? data.error : {};
@@ -194,6 +202,26 @@ export function fromResponsesOutput(
       typeof error.code === "string" ? error.code : undefined, undefined, remoteEffectsPossible, remoteEffectsPossible ? result : undefined);
   }
   return result;
+}
+
+/**
+ * Server-side compaction: the server compacts when a request's context
+ * crosses `threshold` and returns an encrypted compaction item.
+ */
+export function compactionParameter(threshold: number | undefined): Record<string, unknown> {
+  return threshold ? { context_management: [{ type: "compaction", compact_threshold: threshold }] } : {};
+}
+
+/** Responses API usage: `input_tokens` includes the cached ones (`input_tokens_details.cached_tokens`). */
+function responsesUsage(usage: Record<string, unknown>): TokenUsage {
+  const details = isRecord(usage.input_tokens_details) ? usage.input_tokens_details : {};
+  const cached = numberValue(details.cached_tokens);
+  return {
+    inputTokens: numberValue(usage.input_tokens),
+    outputTokens: numberValue(usage.output_tokens),
+    ...(cached ? { cachedInputTokens: cached } : {}),
+  };
+
 }
 
 /**

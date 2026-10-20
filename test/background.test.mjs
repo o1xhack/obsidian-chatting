@@ -4,7 +4,7 @@
 // real plugin and chat view with a fake Svelte component.
 import assert from 'node:assert/strict';
 import { test, beforeEach, afterEach } from 'node:test';
-import { api, settings, text, call, response, streamEvents, sseText, sse, transport, vaultApp } from './harness.mjs';
+import { api, settings, text, call, response, streamEvents, sseText, sse, transport, vaultApp, chatFiles } from './harness.mjs';
 
 const { AppLifecycle, appLifecycle } = api.lifecycle;
 
@@ -53,13 +53,8 @@ function fakeChat() {
 // records its writes, and has a chat view with a fake component.
 async function chatSetup(provider, saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async (path) => { if (!saved || !path.endsWith('/chat-state.json')) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async (path) => !!saved && path.endsWith('/chat-state.json'),
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.settings = { ...plugin.settings, ...settings(provider) };
@@ -414,7 +409,7 @@ test('A turn cut off mid-way is saved with its mark and finished tool results; C
   // What leaving the app saves (see the test above).
   await plugin.saveChatHistory();
   const saved = JSON.parse(JSON.stringify(writes.at(-1)));
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, api.chatState.CHAT_STATE_VERSION);
   const [conversation] = saved.conversations;
   assert.equal(conversation.pendingTurn.turnId, plugin.chatHistory[0].turnId);
   assert.deepEqual(roles(conversation.agentMessages), ['user', 'assistant', 'user']);
@@ -495,7 +490,7 @@ test('A turn running in another chat keeps its mark while the user switches; its
   const a = plugin.activeConversationId;
   view.newChat();
   assert.ok(plugin.conversations.find(c => c.id === a).pendingTurn);
-  view.openConversation(a);
+  await view.openConversation(a);
   assert.equal(chat.continueShown, false);
   release();
   await running;
@@ -615,4 +610,14 @@ for (const provider of ['anthropic', 'openai']) test(`${provider}: enabling MCP 
   restored.view.renderHistory();
   assert.equal(restored.chat.continueShown, false);
   assert.ok(restored.chat.shown.some(row => /may have run remote MCP tools/.test(row.text)));
+});
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: failed durable MCP checkpoint prevents the provider POST`, async () => {
+  const { plugin, view } = await chatSetup(provider);
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  plugin.app.vault.adapter.write = async () => { throw new Error('disk full'); };
+  const requests = transport(() => response(provider, [text('Must never arrive')]));
+  await view.handleUserMessage('Create a remote item', null);
+  assert.equal(requests.length, 0);
+  assert.ok(plugin.chatHistory.some(row => row.type === 'error' && /checkpoint/.test(row.text)));
 });

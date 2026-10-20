@@ -1,18 +1,20 @@
 /**
- * The saved chats (`chat-state.json`): the conversation records, their
- * format, the one-time migrations from older formats, and saving each
- * attached image and file once. Pure functions; `main.ts` reads and writes
- * the file.
+ * The saved chats: `chat-state.json`, the index, and one file per chat in
+ * `chats/` (from version 4); the conversation records, their format, the
+ * one-time migrations from older formats, and saving each attached image
+ * and file once. Pure functions; `main.ts` reads and writes the files.
  */
 import { historySelection } from "./selection-history";
 import type { ChatHistoryEntry, FileAttachment, ImageAttachment, UnifiedMessage } from "./types";
-import { assignLegacyTurnIds, trimHistory, withoutOldToolImages, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./agent/history";
+import { assignLegacyTurnIds, fromLastCompaction, withoutOldToolImages, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./agent/history";
+import type { ConversationUsage } from "./agent/usage";
 
-/** Current format version of `chat-state.json`. */
-export const CHAT_STATE_VERSION = 3;
+/** Current format version of `chat-state.json` and the chat files. */
+export const CHAT_STATE_VERSION = 4;
 
-/** Saved per conversation: the last 100 visible entries (and `MAX_CONVERSATION_LENGTH` API messages). */
-export const SAVED_ENTRIES = 100;
+
+/** A chat whose file is larger is marked with its size in the chat list. */
+export const LARGE_CHAT_BYTES = 5 * 1024 * 1024;
 
 /** The title of a conversation without a user message yet. */
 export const NEW_CHAT_TITLE = "New chat";
@@ -48,7 +50,24 @@ export interface ConversationRecord {
    * background); still there at the next start, the turn was cut off.
    */
   pendingTurn?: PendingTurn;
+  /** Context of the last request, tokens used and estimated cost (the ring in the chat header). */
+  usage?: ConversationUsage;
+  /** Revision of title metadata in the index; carried unchanged for unread chats. */
+  metadataSavedAt?: number;
+  /** Size of its saved file in bytes (in the index). */
+  size?: number;
+  /**
+   * In memory only: just its index entry was read; its histories are empty
+   * until its file is read (`ChatPlugin.loadConversation`).
+   */
+  unloaded?: boolean;
 }
+
+/** A conversation in the index (`chat-state.json`, version 4). */
+export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size" | "metadataSavedAt">;
+
+/** A conversation as saved in its file: without the index-only fields. */
+export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded" | "metadataSavedAt">;
 
 /** The turn a conversation was running. */
 export interface PendingTurn {
@@ -58,14 +77,36 @@ export interface PendingTurn {
   startedAt: number;
 }
 
-/** `chat-state.json` as this version writes it. */
-export interface ChatState {
+/** `chat-state.json` as this version writes it: the index. */
+export interface ChatIndex {
   version: number;
   /** When it was written (ms); tells the newer of the two copies. */
   savedAt: number;
   /** The conversation the chat shows; opened again on the next start. */
   activeConversationId: string;
+  conversations: ConversationEntry[];
+}
+
+/**
+ * The saved chats as read: from version 4 the index, its conversations
+ * `unloaded`; from older versions (migrated to version 3) every
+ * conversation whole.
+ */
+export interface ChatState {
+  version: number;
+  activeConversationId: string;
   conversations: ConversationRecord[];
+}
+
+/** A chat file (`chats/<id>.json`) as read. */
+export interface ChatFile {
+  /** A newer-format copy must win recovery without being parsed or overwritten. */
+  unsupported?: boolean;
+  /** When it was written (ms); tells the newer of the two copies. */
+  savedAt?: number;
+  /** Written over a deleted chat's file that couldn't be removed. */
+  deleted?: boolean;
+  conversation?: ConversationRecord;
 }
 
 type StateRecord = Record<string, unknown>;
@@ -95,54 +136,114 @@ const CHAT_STATE_MIGRATIONS: Record<number, (state: StateRecord) => StateRecord>
   },
 };
 
-/** The saved conversations in the current format, or null if it isn't a saved chat. */
-export function migrateChatState(value: unknown): Pick<ChatState, "activeConversationId" | "conversations"> | null {
+/**
+ * The saved chats in the current format, or null if they aren't any. Up to
+ * version 3 `chat-state.json` holds every conversation whole (migrated to
+ * version 3 here; `main.ts` then writes each to its own file once); from
+ * version 4 it is the index, and its conversations come back `unloaded`.
+ */
+export function migrateChatState(value: unknown): ChatState | null {
   if (!isRecord(value)) return null;
   let state = value;
   let version = typeof state.version === "number" ? state.version : 1;
-  while (version < CHAT_STATE_VERSION) {
+  while (version < 3) {
     const migrate = CHAT_STATE_MIGRATIONS[version];
     if (!migrate) return null;
     state = migrate(state);
     version++;
   }
-  const conversations = arrayOf<unknown>(state.conversations)
-    .filter((item): item is StateRecord => isRecord(item) && typeof item.id === "string")
-    .map((item): ConversationRecord => {
-      const chatHistory = withoutLargeVisibleToolText(arrayOf<ChatHistoryEntry>(item.chatHistory).map(compactSelection));
-      const customTitle = item.customTitle === true && typeof item.title === "string";
-      const derived = conversationTitle(chatHistory);
-      const automaticTitle = typeof item.automaticTitle === "string" && item.automaticTitle.trim() ? item.automaticTitle
-        : !customTitle && typeof item.title === "string" && item.title.trim() ? item.title : derived;
-      const first = chatHistory.find(entry => entry.type === "user");
-      const titleSourceTurnId = typeof item.titleSourceTurnId === "string" ? item.titleSourceTurnId
-        : item.titleSourceTurnId === null || automaticTitle !== derived ? null : first?.turnId;
-      const notes = arrayOf<unknown>(item.notes).filter((note): note is string => typeof note === "string");
-      const pendingMessages = arrayOf<unknown>(item.pendingMessages).filter((text): text is string => typeof text === "string");
-      // Optional, so no new format version: an older plugin just drops it.
-      const pending = item.pendingTurn;
-      const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
-        ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) }
-        : undefined;
-      return {
-        id: item.id as string,
-        title: customTitle ? item.title as string : automaticTitle,
-        automaticTitle,
-        ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}),
-        customTitle,
-        createdAt: typeof item.createdAt === "number" ? item.createdAt : 0,
-        updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : 0,
-        chatHistory,
-        agentMessages: withoutLargeToolText(withoutOldToolImages(trimHistory(arrayOf<UnifiedMessage>(item.agentMessages), MAX_CONVERSATION_LENGTH))),
-        ...(notes.length ? { notes } : {}),
-        ...(pendingMessages.length ? { pendingMessages } : {}),
-        ...(pendingTurn ? { pendingTurn } : {}),
-      };
-    });
+  const items = arrayOf<unknown>(state.conversations)
+    .filter((item): item is StateRecord => isRecord(item) && typeof item.id === "string");
+  const conversations = version >= 4 ? items.map(item => indexedConversation({ ...item, metadataSavedAt: item.metadataSavedAt ?? state.savedAt ?? 0 })) : items.map(savedRecord);
+
   if (conversations.length === 0) conversations.push(newConversation());
   const active = conversations.find((conversation) => conversation.id === state.activeConversationId)
     ?? newestFirst(conversations)[0];
-  return { activeConversationId: active.id, conversations };
+  return { version, activeConversationId: active.id, conversations };
+}
+
+/** A conversation from its index entry: `unloaded` until its file is read. */
+function indexedConversation(item: StateRecord): ConversationRecord {
+  const size = item.size;
+  return {
+    id: item.id as string,
+    title: typeof item.title === "string" && item.title ? item.title : NEW_CHAT_TITLE,
+    ...(typeof item.automaticTitle === "string" && item.automaticTitle ? { automaticTitle: item.automaticTitle } : {}),
+    ...(typeof item.titleSourceTurnId === "string" || item.titleSourceTurnId === null ? { titleSourceTurnId: item.titleSourceTurnId } : {}),
+    customTitle: item.customTitle === true,
+    createdAt: typeof item.createdAt === "number" ? item.createdAt : 0,
+    updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : 0,
+    chatHistory: [],
+    agentMessages: [],
+    ...(typeof size === "number" && Number.isFinite(size) && size >= 0 ? { size } : {}),
+    ...(typeof item.metadataSavedAt === "number" ? { metadataSavedAt: item.metadataSavedAt } : {}),
+    unloaded: true,
+  };
+}
+
+/** A whole saved conversation (in `chat-state.json` up to version 3, then in its file). */
+function savedRecord(item: StateRecord): ConversationRecord {
+  const chatHistory = withoutLargeVisibleToolText(arrayOf<ChatHistoryEntry>(item.chatHistory).map(compactSelection));
+  const customTitle = item.customTitle === true && typeof item.title === "string";
+  const derived = conversationTitle(chatHistory);
+  const automaticTitle = typeof item.automaticTitle === "string" && item.automaticTitle.trim() ? item.automaticTitle
+    : !customTitle && typeof item.title === "string" && item.title.trim() ? item.title : derived;
+  const first = chatHistory.find(entry => entry.type === "user");
+  const titleSourceTurnId = typeof item.titleSourceTurnId === "string" ? item.titleSourceTurnId
+    : item.titleSourceTurnId === null || automaticTitle !== derived ? null : first?.turnId;
+  const notes = arrayOf<unknown>(item.notes).filter((note): note is string => typeof note === "string");
+  const pendingMessages = arrayOf<unknown>(item.pendingMessages).filter((text): text is string => typeof text === "string");
+  // Optional, so no new format version: an older plugin just drops it.
+  const pending = item.pendingTurn;
+  const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
+    ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) }
+    : undefined;
+  return {
+    id: item.id as string,
+    title: customTitle ? item.title as string : automaticTitle,
+    automaticTitle,
+    ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}),
+    customTitle,
+    createdAt: typeof item.createdAt === "number" ? item.createdAt : 0,
+    updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : 0,
+    chatHistory,
+    // Bounded on load as when saved: old tool images and oversized tool text go.
+    agentMessages: withoutLargeToolText(withoutOldToolImages(arrayOf<UnifiedMessage>(item.agentMessages))),
+    ...(notes.length ? { notes } : {}),
+    ...(pendingMessages.length ? { pendingMessages } : {}),
+    ...(pendingTurn ? { pendingTurn } : {}),
+    // Optional too: an older plugin drops it.
+    ...savedUsage(item.usage),
+  };
+}
+
+/**
+ * A chat file's content, or null if it isn't one (or is from a newer
+ * version). `main.ts` checks the histories' entries before (`isChatFile`).
+ */
+export function parseChatFile(value: unknown): ChatFile | null {
+  if (!isRecord(value) || typeof value.version !== "number" || value.version > CHAT_STATE_VERSION) return null;
+  const savedAt = typeof value.savedAt === "number" ? value.savedAt : undefined;
+  if (value.deleted === true) return { ...(savedAt !== undefined ? { savedAt } : {}), deleted: true };
+  const item = value.conversation;
+  if (!isRecord(item) || typeof item.id !== "string") return null;
+  return { ...(savedAt !== undefined ? { savedAt } : {}), conversation: savedRecord(item) };
+}
+
+/** A chat file's text; `conversation` is `savedConversation()` as JSON. */
+export function chatFileText(conversation: string, savedAt: number): string {
+  return `{"version":${CHAT_STATE_VERSION},"savedAt":${savedAt},"conversation":${conversation}}`;
+}
+
+/** Written over a deleted chat's file that couldn't be removed. */
+export const DELETED_CHAT_FILE = `{"version":${CHAT_STATE_VERSION},"deleted":true}`;
+
+/** A conversation's index entry. */
+export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size, metadataSavedAt }: ConversationRecord): ConversationEntry {
+  return {
+    id, title, ...(automaticTitle !== undefined ? { automaticTitle } : {}), ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}),
+    customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}), ...(metadataSavedAt !== undefined ? { metadataSavedAt } : {}),
+  };
 }
 
 /** A new, empty conversation. */
@@ -182,9 +283,9 @@ export function updateConversationTitle(conversation: ConversationRecord): void 
   if (!conversation.customTitle) conversation.title = conversation.automaticTitle ?? conversationTitle(conversation.chatHistory);
 }
 
-/** Nothing said yet. */
+/** Nothing said yet (a conversation not read yet was saved with content). */
 export function isEmptyConversation(conversation: ConversationRecord): boolean {
-  return conversation.chatHistory.length === 0 && conversation.agentMessages.length === 0;
+  return !conversation.unloaded && conversation.chatHistory.length === 0 && conversation.agentMessages.length === 0;
 }
 
 /** Most recently used first. */
@@ -192,14 +293,27 @@ export function newestFirst(conversations: ConversationRecord[]): ConversationRe
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-/** A conversation as saved: capped, image and file data only in the API history. */
-export function savedConversation(conversation: ConversationRecord): ConversationRecord {
-  const titled = { ...conversation };
+/**
+ * A conversation as saved in its file: the whole visible history, the API
+ * history from its last compaction on, image and file data only in the API
+ * history.
+ */
+export function savedConversation({ size: _size, unloaded: _unloaded, metadataSavedAt: _metadataSavedAt, ...conversation }: ConversationRecord): SavedConversation {
+  const titled: ConversationRecord = { ...conversation };
   updateConversationTitle(titled);
   return {
-    ...titled,
-    chatHistory: withoutImageData(conversation.chatHistory.slice(-SAVED_ENTRIES)),
-    agentMessages: withoutLargeToolText(withoutOldToolImages(trimHistory(conversation.agentMessages, MAX_CONVERSATION_LENGTH))),
+    // Stable top-level order also makes cache digests independent of whether
+    // the record came from an index entry or a whole chat file.
+    id: titled.id, title: titled.title,
+    ...(titled.automaticTitle !== undefined ? { automaticTitle: titled.automaticTitle } : {}),
+    ...(titled.titleSourceTurnId !== undefined ? { titleSourceTurnId: titled.titleSourceTurnId } : {}),
+    customTitle: titled.customTitle, createdAt: titled.createdAt, updatedAt: titled.updatedAt,
+    chatHistory: withoutImageData(conversation.chatHistory),
+    agentMessages: withoutLargeToolText(withoutOldToolImages(fromLastCompaction(conversation.agentMessages))),
+    ...(titled.notes ? { notes: titled.notes } : {}),
+    ...(titled.pendingMessages ? { pendingMessages: titled.pendingMessages } : {}),
+    ...(titled.pendingTurn ? { pendingTurn: titled.pendingTurn } : {}),
+    ...(titled.usage ? { usage: titled.usage } : {}),
   };
 }
 
@@ -245,6 +359,25 @@ export function restoreImages(entries: ChatHistoryEntry[], messages: UnifiedMess
     if (entry.attachedFiles?.length) restored.attachedFiles = entry.attachedFiles.map((file) => files.get(file.id) ?? file);
     return restored;
   });
+}
+
+/** A saved usage record, checked field by field (`{ usage }`), or nothing. */
+function savedUsage(value: unknown): { usage?: ConversationUsage } {
+  if (!isRecord(value)) return {};
+  const number = (field: unknown) => (typeof field === "number" && Number.isFinite(field) && field >= 0 ? field : undefined);
+  const contextTokens = number(value.contextTokens);
+  const costUsd = number(value.costUsd);
+  if (contextTokens === undefined || costUsd === undefined || typeof value.model !== "string" || typeof value.provider !== "string") return {};
+  const lastTurnCostUsd = number(value.lastTurnCostUsd);
+  return {
+    usage: {
+      contextTokens, costUsd, model: value.model, provider: value.provider,
+      inputTokens: number(value.inputTokens) ?? 0,
+      outputTokens: number(value.outputTokens) ?? 0,
+      unpricedRequests: number(value.unpricedRequests) ?? 0,
+      ...(lastTurnCostUsd !== undefined ? { lastTurnCostUsd } : {}),
+    },
+  };
 }
 
 function arrayOf<T>(value: unknown): T[] {

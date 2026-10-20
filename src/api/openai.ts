@@ -1,4 +1,5 @@
-import { supportsReasoning, catalogIdentity } from "./model-catalog";
+import { supportsReasoning, cachedCatalog, catalogIdentity } from "./model-catalog";
+import { compactThreshold } from "../agent/compaction";
 import { ProviderError } from "./errors";
 import { getNestedString } from "../json";
 import type {
@@ -11,8 +12,9 @@ import type {
 } from "../types";
 
 import { withoutOldToolImages } from "../agent/history";
-import { buildResponsesInput, fromResponsesOutput, sendResponsesRequest } from "./responses-format";
+import { buildResponsesInput, compactionParameter, fromResponsesOutput, sendResponsesRequest } from "./responses-format";
 import { activeServers, openaiMcpTools, mcpServerIdentities } from "./mcp";
+
 
 const DEFAULT_OPENAI_URL = "https://api.openai.com";
 
@@ -66,10 +68,16 @@ export async function sendOpenAIMessage(
   // Rebuilt/restored histories include native response items and tool pairs.
   const input = buildResponsesInput(canChain ? messages.slice(previous.messages.length + 1) : prepared, "openai", model, identity, servers);
 
+  // Server-side compaction at the model's compaction point; its window comes
+  // from the model's documentation page (`loadModelDetails`).
+  const option = settings.modelCatalog
+    ? cachedCatalog(settings.modelCatalog, "openai", identity)?.models.find((item) => item.value === model)
+    : undefined;
   const body: Record<string, unknown> = {
     model,
     input,
     stream: true,
+    ...compactionParameter(compactThreshold("openai", option, settings)),
   };
 
   // Chain to previous response for multi-turn context

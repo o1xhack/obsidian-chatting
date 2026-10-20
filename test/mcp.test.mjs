@@ -294,7 +294,7 @@ test('Settings before Obsidian 1.13: display() draws the heading, a row per serv
   const rows = [];
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
     renderMcpHeading: () => rows.push('heading'), renderMcpServer: (setting, server, removable) => rows.push(`${server.name}, removable: ${removable}`), renderAddMcpServer: () => rows.push('add') });
   delete tab.display;
   tab.display();

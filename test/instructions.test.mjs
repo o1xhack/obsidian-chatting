@@ -74,6 +74,23 @@ test('A folder\'s AGENTS.md comes with the first result touching it, outer folde
   assert.match(results[0].content, /from Work\/AGENTS\.md[\s\S]*from Work\/Sub\/AGENTS\.md/);
 });
 
+test('A folder\'s AGENTS.md given before a compaction comes again with the next result there', async () => {
+  const { app, loop } = loopWith({ 'Work/AGENTS.md': 'Work notes: keep a Status line.', 'Work/Plan.md': 'Plan' });
+  const rules = await api.instructions.folderInstructions(app, ['Work/Plan.md'], new Set());
+  // The rules came with an earlier result; a compaction then summarized that part away.
+  loop.importMessages([
+    { role: 'user', content: 'Read the plan', turnId: 'old' },
+    { role: 'assistant', content: [call('r0', 'read_document', { path: 'Work/Plan.md' })] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r0', content: `Plan\n\n${rules}`, instructionSources: ['Work/AGENTS.md'], instructionOffset: 4 }] },
+    { role: 'assistant', content: [text('Read it.')], compaction: { summary: 'The user had the plan read.' } },
+  ]);
+  const requests = transport((body, index) => index === 0
+    ? response('anthropic', [call('r1', 'read_document', { path: 'Work/Plan.md' })], 'tool_use')
+    : response('anthropic', [text('done')], 'end_turn', index));
+  await loop.run('Read it again', callbacks());
+  assert.match(resultText(toolResults(requests[1]).at(-1)), /keep a Status line/);
+});
+
 test('Tools on the active note (no path) count for its folder', () => {
   const app = { workspace: { getActiveFile: () => ({ path: 'Work/Plan.md' }) } };
   assert.deepEqual(api.instructions.toolPaths(app, 'read_document', {}), ['Work/Plan.md']);
@@ -215,11 +232,16 @@ test('get_links delivers folder instructions for its linked sources and unlinked
   assert.doesNotMatch(JSON.stringify(loop.exportMessages()), /instructionPaths/);
 });
 
-test('Linked-file rules are given again when pruning discards their earlier delivery', async () => {
+test('Linked-file rules are given again when a compaction drops their earlier delivery', async () => {
   const { app, loop } = loopWith({ 'Work/AGENTS.md': 'Retain the work rule.', 'Work/Plan.md': 'Plan' });
   const rules = await api.instructions.folderInstructions(app, ['Work/Plan.md'], new Set());
-  const history = [];
-  for (let i = 0; i < 40; i++) history.push({ role: 'user', content: i === 0 ? rules : `Question ${i}`, ...(i === 0 ? { instructionSources: ['Work/AGENTS.md'] } : {}), turnId: `old${i}` }, { role: 'assistant', content: [text('Answer')] });
+  // The rules came with the first turn; a later compaction summarized it away.
+  const history = [
+    { role: 'user', content: rules, instructionSources: ['Work/AGENTS.md'], turnId: 'old0' },
+    { role: 'assistant', content: [text('Answer')] },
+    { role: 'user', content: 'Question 1', turnId: 'old1' },
+    { role: 'assistant', content: [text('Answer')], compaction: { summary: 'The user asked about the plan.' } },
+  ];
   loop.importMessages(history);
   const requests = transport(() => response('anthropic', [text('ok')]));
   await loop.run('Summarize linked plan', callbacks(), null, [], 'next', { text: 'Plan content', images: [], files: [], instructionPaths: ['Work/Plan.md'] });
@@ -265,7 +287,7 @@ test('Settings: Vault instructions creates AGENTS.md with a short comment, then 
   const ignore = () => {};
   delete tab.display;
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
-    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderInstructions: setting => drawn.push(setting) });
+    renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderSkills: ignore, renderMaxIterations: ignore, renderChats: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {}, renderInstructions: setting => drawn.push(setting) });
   tab.display();
   assert.equal(drawn.length, 1);
 });
@@ -396,4 +418,29 @@ test('Four near-limit nested rules survive deferral and permit a compliant retry
   assert.deepEqual(cb.errors, []);
   assert.equal(files.get(input.path), 'Compliant');
   assert.equal(requests.length, 3);
+});
+
+for (const provider of ['openai', 'chatgpt-oauth']) for (const origin of ['linked', 'selection']) test(`${provider}: ${origin} rules before an opaque compaction are rediscovered from actual request context`, async () => {
+  const { app } = loopWith({ 'Work/AGENTS.md': 'KEEP-WORK-RULE-7319', 'Work/Plan.md': 'Plan' });
+  if (provider === 'chatgpt-oauth') api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'fake-token', accountId: 'fake-account' }) });
+  const config = settings(provider);
+  const identity = await api.catalogIdentity(provider, provider === 'chatgpt-oauth' ? 'fake-account' : config.apiKey);
+  const loop = new api.AgentLoop(app, config);
+  const rules = await api.instructions.folderInstructions(app, ['Work/Plan.md'], new Set());
+  loop.importMessages([
+    { role: 'user', content: rules, instructionSources: ['Work/AGENTS.md'], turnId: 'old0' },
+    { role: 'user', content: 'Old turn covered by the compaction', turnId: 'old1' },
+    { role: 'assistant', content: [text('Answer')], compaction: {}, replay: { provider, model: config.model, identity, items: [{ type: 'compaction', id: 'cmp1', encrypted_content: 'opaque' }] } },
+  ]);
+  const requests = transport(() => response(provider, [text('ok')]));
+  const linked = origin === 'linked' ? { text: 'Linked plan content', images: [], files: [], instructionPaths: ['Work/Plan.md'] } : null;
+  const selection = origin === 'selection' ? { filePath: 'Work/Plan.md', text: 'Plan' } : null;
+  const cb = callbacks();
+  await loop.run('Read the plan', cb, selection, [], 'new1', linked);
+  assert.deepEqual(cb.errors, []);
+  assert.equal(requests.length, 1, 'same-account opaque replay requires no portable summary');
+  assert.equal(JSON.stringify(requests[0].input).split('KEEP-WORK-RULE-7319').length - 1, 1);
+  assert.doesNotMatch(JSON.stringify(requests[0].input), /Old turn covered/);
+  await loop.run('Read it again', callbacks(), selection, [], 'new2', linked);
+  assert.doesNotMatch(JSON.stringify(requests[1].input.at(-1)), /KEEP-WORK-RULE-7319/);
 });

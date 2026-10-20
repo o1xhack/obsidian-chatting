@@ -29,17 +29,46 @@ export function retainedAttachmentBytes(item: ImageAttachment | FileAttachment):
   return bytes + stringBytes(item.id) + stringBytes(item.fileName) + stringBytes(item.mediaType) + 128;
 }
 
+/** Count payloads as the shared retention pass does, including legacy UI-only data. */
+export function conversationAttachmentBytes(conversation: ConversationRecord): number {
+  let bytes = 0;
+  const ids = new Set<string>();
+  const count = (item: ImageAttachment | FileAttachment) => { ids.add(item.id); bytes += retainedAttachmentBytes(item); };
+  for (const message of conversation.agentMessages) {
+    if (typeof message.content === "string") continue;
+    for (const block of message.content) {
+      if (block.image) count(block.image);
+      if (block.file) count(block.file);
+      for (const item of [...block.images ?? [], ...block.files ?? []]) count(item);
+    }
+  }
+  for (const entry of conversation.chatHistory) {
+    for (const item of [...entry.images ?? [], ...entry.attachedFiles ?? []]) {
+      if (!ids.has(item.id) && (item.data || ("text" in item && item.text))) count(item);
+    }
+  }
+  return bytes;
+}
+
 /** Mutates retained history in place to preserve entry identities and in-flight
  * tool-result arrays. Only attachment payloads expire, never conversation text.
  */
-export function boundConversationAttachments(conversations: ConversationRecord[], activeId: string, limit = MAX_HISTORY_ATTACHMENT_BYTES): { changed: Set<string>; omitted: number } {
+export function boundConversationAttachments(conversations: ConversationRecord[], activeId: string, limit = MAX_HISTORY_ATTACHMENT_BYTES,
+  /** Chats unchanged since read or saved: counted first, never stripped (reading a chat doesn't change its file). */
+  unchanged: ReadonlySet<string> = new Set()): { changed: Set<string>; omitted: number } {
   let remaining = limit;
   let omitted = 0;
   const changed = new Set<string>();
-  const ordered = [...conversations].sort((a, b) => Number(b.id === activeId) - Number(a.id === activeId) || b.updatedAt - a.updatedAt);
+  const ordered = [...conversations].sort((a, b) => Number(unchanged.has(b.id)) - Number(unchanged.has(a.id)) ||
+    Number(b.id === activeId) - Number(a.id === activeId) || b.updatedAt - a.updatedAt);
   const accepted = new Map<ConversationRecord, Map<string, ImageAttachment | FileAttachment>>();
   const seen = new Map<ConversationRecord, Set<string>>();
+  let whole = false;
   const keep = (item: ImageAttachment | FileAttachment): boolean => {
+    if (whole) {
+      remaining -= retainedAttachmentBytes(item);
+      return true;
+    }
     // Lower bound first: don't scan payloads that provably cannot fit.
     const text = "text" in item ? item.text ?? "" : "";
     if (item.data.length + text.length > remaining) return false;
@@ -50,6 +79,7 @@ export function boundConversationAttachments(conversations: ConversationRecord[]
   };
   const missing = (names: string[]) => `[Attachment data omitted from older chat history to stay within the shared retention budget: ${names.join(", ")}. Reattach the file if needed.]`;
   for (const conversation of ordered) {
+    whole = unchanged.has(conversation.id);
     const blobs = new Map<string, ImageAttachment | FileAttachment>();
     const ids = new Set<string>();
     accepted.set(conversation, blobs);
@@ -88,6 +118,7 @@ export function boundConversationAttachments(conversations: ConversationRecord[]
     }
   }
   for (const conversation of ordered) {
+    whole = unchanged.has(conversation.id);
     const blobs = accepted.get(conversation)!;
     const ids = seen.get(conversation)!;
     for (const entry of [...conversation.chatHistory].reverse()) {

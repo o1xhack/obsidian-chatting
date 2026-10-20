@@ -16,7 +16,8 @@ import { sendMessage } from "../api/client";
 import { ProviderError, StreamCutError } from "../api/errors";
 import { isBuffered, lastChunkAt } from "../api/stream";
 import { clearOpenAIState } from "../api/openai";
-import { clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { chatgptCompacts, chatgptReplayIdentity, clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { catalogModel, loadModelDetails, type ModelOption } from "../api/model-catalog";
 import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
 import { executeTool } from "../tools/executor";
@@ -24,20 +25,20 @@ import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { trimHistory, cutBeforeTurn, editableTurn, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText, MAX_CONVERSATION_LENGTH } from "./history";
+import { cutBeforeTurn, editableTurn, fromLastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
+
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
 import { appLifecycle } from "../platform/lifecycle";
+import { afterCompaction, compactThreshold, summaryMessage } from "./compaction";
+import { catalogIdentity } from "../api/model-catalog";
+import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryChunks, summaryChunkRequest } from "./summary";
 
-/**
- * The API history: saving keeps the last 80 messages. Before a turn, a
- * history over 80 messages is cut to the last 60, so it is cut every few
- * turns, not on each; in between it stays the same array and OpenAI can
- * chain to its previous response. Both keep whole user turns, so they
- * round up: a long turn can keep a few more messages.
- */
-const KEEP_RECENT = 60;
+/** The turn ID of a summary message (it starts its own turn, with no visible entry). */
+function summaryTurnId(): string {
+  return `summary-${newTurnId()}`;
+}
 
 function displayServerCalls(calls: ServerToolCall[], callbacks: AgentCallbacks): void {
   const rows = withoutLargeVisibleToolText(calls.filter(call => !call.pending).map(call => ({
@@ -48,6 +49,7 @@ function displayServerCalls(calls: ServerToolCall[], callbacks: AgentCallbacks):
     callbacks.onToolResult(row.name, row.toolResult);
   }
 }
+
 /** Sending a request again (a cut-off stream, back from the background); tests shorten the wait. */
 export const RESUME = {
   /** Requests sent again per turn at most; after that the error shows. */
@@ -212,19 +214,19 @@ export class AgentLoop {
     this.messages = cutBeforeTurn(this.messages, turnId);
   }
 
-  /** Turn `turnId` can be edited or answered again (the API history still holds it). */
+  /** Turn `turnId` can be edited or answered again (after the last compaction, in the API history). */
   canEditTurn(turnId: string): boolean {
     return editableTurn(this.messages, turnId);
   }
 
-  /** Export API messages for persistence */
-  exportMessages(limit = MAX_CONVERSATION_LENGTH): UnifiedMessage[] {
-    return trimHistory(this.messages, limit);
+  /** The API history as saved: from the last compaction on. */
+  exportMessages(): UnifiedMessage[] {
+    return fromLastCompaction(this.messages);
   }
 
-  /** Restore API messages from persistence, as many as saving keeps */
+  /** Continue from a saved API history (a new array). */
   importMessages(messages: UnifiedMessage[]): void {
-    this.messages = withoutLargeToolText(trimHistory(messages, MAX_CONVERSATION_LENGTH));
+    this.messages = withoutLargeToolText([...messages]);
     this.pruneToolImages();
     clearOpenAIState();
     clearChatGPTOAuthState();
@@ -238,8 +240,9 @@ export class AgentLoop {
     clearChatGPTOAuthState();
   }
 
+  /** What the last compaction covers leaves memory too (`fromLastCompaction`). */
   trimForRetention(): void {
-    const retained = trimHistory(this.messages, MAX_CONVERSATION_LENGTH);
+    const retained = fromLastCompaction(this.messages);
     if (retained !== this.messages) {
       this.messages = retained;
       this.invalidateHistoryCursor();
@@ -264,12 +267,131 @@ export class AgentLoop {
     return this.holds > 0;
   }
 
+  // ─── Compaction ───────────────────────────────────────────────────────
+  // The provider compacts where it can (a parameter of each request); the
+  // plugin writes a summary where it can't.
+
+  /**
+   * Summarize the whole history now (*Compact now*): it becomes one
+   * message with the summary. False when nothing was done (empty, a turn
+   * runs, stopped). Throws when the summary request fails.
+   */
+  async compact(onUsage?: AgentCallbacks["onUsage"]): Promise<boolean> {
+    if (this.messages.length === 0 || this.loopVersion) return false;
+    const version = ++this.runVersion;
+    const isStopped = () => version !== this.runVersion;
+    const summary = await this.summarize({ ...this.settings }, this.messages, isStopped, onUsage);
+    if (isStopped()) return false;
+    this.messages = [summaryMessage(summary, summaryTurnId())];
+    debugLog(this.app, "COMPACTED", { reason: "user", chars: summary.length });
+    return true;
+  }
+
+  /**
+   * Before a turn: a summary where the provider can't help.
+   * - The last compaction is another provider's or model's and has no
+   *   readable summary (OpenAI's is encrypted): it gets one now, once.
+   * - The provider doesn't compact (unsupported, refused or the window
+   *   unknown to it) and the last request (`contextTokens`) passed the
+   *   compaction point: the history is summarized now.
+   * A failed summary doesn't stop the turn.
+   */
+  private async prepareContext(settings: ChatSettings, contextTokens: number, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
+    try {
+      let handedOff = false;
+      const index = this.messages.map((message) => !!message.compaction).lastIndexOf(true);
+      const marker = this.messages[index];
+      const replay = marker?.replay;
+      let replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
+      if (replayable && replay?.identity && marker?.compaction && !marker.compaction.summary) {
+        const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() :
+          await catalogIdentity(settings.provider, settings.apiKey);
+        replayable = replay.identity === identity;
+        if (isStopped()) return;
+      }
+      if (marker?.compaction && !marker.compaction.summary && !replayable && index > 0) {
+        const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
+        if (isStopped()) return;
+        marker.compaction = { summary };
+        handedOff = true;
+        debugLog(this.app, "COMPACTED", { reason: "provider switch" });
+      }
+      const option = catalogModel(settings.provider, settings.model);
+      const threshold = compactThreshold(settings.provider, option, settings);
+      if (!handedOff && !isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
+        const summary = await this.summarize(settings, this.messages, isStopped, callbacks.onUsage);
+        if (isStopped()) return;
+        this.messages = [summaryMessage(summary, summaryTurnId())];
+        debugLog(this.app, "COMPACTED", { reason: "threshold", contextTokens, threshold });
+        callbacks.onCompacted?.();
+      }
+    } catch (e) {
+      debugLog(this.app, "COMPACTION_FAILED", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** The provider compacts this model's context on its side. */
+  private compactsNatively(settings: ChatSettings, option: ModelOption | undefined): boolean {
+    if (settings.provider === "anthropic") return option?.compaction === true;
+    if (settings.provider === "chatgpt-oauth") return chatgptCompacts();
+    return true;
+  }
+
+  /**
+   * The request didn't fit: summarize what came before the running turn,
+   * once per turn, and send again. False when there is nothing before it
+   * or the summary failed.
+   */
+  private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<boolean> {
+    const start = this.messages.map((message) => !!message.turnId).lastIndexOf(true);
+    if (start <= 0) return false;
+    try {
+      const summary = await this.summarize(settings, this.messages.slice(0, start), isStopped, callbacks.onUsage);
+      if (isStopped()) return false;
+      this.messages = [summaryMessage(summary, summaryTurnId()), ...this.messages.slice(start)];
+      debugLog(this.app, "COMPACTED", { reason: "overflow" });
+      callbacks.onCompacted?.();
+      return true;
+    } catch (e) {
+      debugLog(this.app, "COMPACTION_FAILED", { error: e instanceof Error ? e.message : String(e) });
+      return false;
+    }
+  }
+
+  /**
+   * A summary of `messages` by the provider (a transcript; no tools, web
+   * search or MCP servers); Stop cancels it. Its tokens count like a
+   * request of the chat (`onUsage`).
+   */
+  private async summarize(settings: ChatSettings, messages: UnifiedMessage[], isStopped: () => boolean,
+    onUsage?: AgentCallbacks["onUsage"]): Promise<string> {
+    const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() : await catalogIdentity(settings.provider, settings.apiKey);
+    const window = settings.modelCatalog?.entries.find(entry => entry.provider === settings.provider && entry.identity === identity)
+      ?.models.find(model => model.value === settings.model)?.contextWindow;
+    const request = new AbortController();
+    this.request = request;
+    try {
+      let summary = "";
+      for (const chunk of summaryChunks(messages, window)) {
+        if (isStopped()) throw new Error("Summarization stopped.");
+        const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
+          [{ role: "user", content: summaryChunkRequest(chunk, summary) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
+        if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
+        const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
+        if (!text) throw new Error("The summary came back empty.");
+        summary = text;
+      }
+      return summary;
+    } finally {
+      if (this.request === request) this.request = null;
+    }
+  }
+
   /** Nothing in the API history yet. */
   isEmpty(): boolean {
     return this.messages.length === 0;
   }
 
-  /** The history ends in a user message or tool results: the model hasn't answered them. */
   /**
    * The history ends in a user message or tool results, waiting for an
    * answer; with `turnId`, the last turn there must be that one (a turn
@@ -362,6 +484,9 @@ export class AgentLoop {
    * `notes`: what the user did since the last turn (e.g. undid an answer's
    * changes), for the model.
    * `files`: PDF, Office and text files the user attached.
+   * `contextTokens`: the conversation's context after its last request;
+   * past the compaction point the plugin summarizes first where the
+   * provider doesn't compact.
    */
   async run(
     userMessage: string,
@@ -371,7 +496,8 @@ export class AgentLoop {
     turnId: string = newTurnId(),
     mentioned: MentionContext | null = null,
     notes: string[] = [],
-    files: FileAttachment[] = []
+    files: FileAttachment[] = [],
+    contextTokens = 0
   ): Promise<void> {
     const version = ++this.runVersion;
     const isStopped = () => version !== this.runVersion;
@@ -394,10 +520,18 @@ export class AgentLoop {
       (callbacks.onPreflightRejected ?? callbacks.onError)(budgetError);
       return;
     }
+    // The history before this turn: a refusal before the provider (rules
+    // that can't be read, a request too large) restores it, also when the
+    // summary below replaced it.
+    const beforeTurn = this.messages.slice();
+    // A summary first where the provider can't compact.
+    await this.prepareContext(turnSettings, contextTokens, callbacks, isStopped);
+    if (isStopped()) return;
     let instructionSources: string[] = [];
     try {
       const prospective: UnifiedMessage[] = [...this.messages, { role: "user", content: "", turnId }];
-      const retained = prospective.length > MAX_CONVERSATION_LENGTH ? trimHistory(prospective, KEEP_RECENT) : this.messages;
+      // Rules given before the last compaction are gone with it: given again.
+      const retained = afterCompaction(prospective, () => true);
       const paths = [...mentioned?.instructionPaths ?? [], ...selection ? [selection.filePath] : []];
       const rules = await folderInstructionContext(this.app, paths, instructionsGiven(retained));
       if (isStopped()) return;
@@ -405,6 +539,7 @@ export class AgentLoop {
       if (rules.text) contextPrefix = `${rules.text}\n\n${contextPrefix}`;
     } catch (e) {
       if (isStopped()) return;
+      this.messages = beforeTurn;
       (callbacks.onPreflightRejected ?? callbacks.onError)(e instanceof Error ? e.message : String(e));
       return;
     }
@@ -433,11 +568,12 @@ export class AgentLoop {
           { type: "text", text: fullMessage },
         ]
       : fullMessage;
-    const beforeTurn = this.messages.slice();
     this.messages.push({ role: "user", content, turnId, ...(instructionSources.length ? { instructionSources } : {}) });
 
-    // Prune if conversation is too long
-    this.pruneHistory();
+    // What the last compaction covers goes; a new array only then, so
+    // OpenAI keeps chaining and the prompt caches keep their prefix.
+    this.messages = fromLastCompaction(this.messages);
+    this.pruneToolImages();
 
     debugLog(this.app, "USER_MESSAGE", {
       userMessage,
@@ -466,7 +602,11 @@ export class AgentLoop {
     if (!this.owesAnswer()) return;
     debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
     const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
-    await this.loop(version, callbacks, { ...this.settings, get mcpServers() { return currentServers(); } }, selection ? { ...selection } : undefined);
+    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
+    await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
+    if (version !== this.runVersion) return;
+    await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
+
   }
 
   /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
@@ -505,6 +645,8 @@ export class AgentLoop {
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
     let resends = 0;
+    // A request too long for the model is summarized and sent again, once per turn.
+    let overflowCompacted = false;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
@@ -518,6 +660,12 @@ export class AgentLoop {
           response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
         } catch (e) {
           if (isStopped()) return;
+          if (!overflowCompacted && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
+            overflowCompacted = true;
+            callbacks.onThinking();
+            if (await this.compactForOverflow(turnSettings, callbacks, isStopped)) continue;
+            if (isStopped()) return;
+          }
           const msg = e instanceof Error ? e.message : String(e);
           if (e instanceof ProviderError && e.partialResponse) {
             this.keepRemoteReceipts(e.partialResponse, callbacks);
@@ -581,7 +729,18 @@ export class AgentLoop {
           : block.type === "tool_use" ? { type: "tool_use", name: block.name, input: block.input }
           : { type: block.type }),
         ...(response.serverCalls ? { serverCalls: response.serverCalls } : {}),
+        // Whether the provider compacts on its side now (the ChatGPT route may refuse it).
+        compactsNatively: this.compactsNatively(turnSettings, catalogModel(turnSettings.provider, turnSettings.model)),
+        ...(response.compaction ? { compacted: true } : {}),
       });
+      if (response.usage) {
+        // The model's window and prices for the ring (OpenAI: its documentation page, once a day).
+        if (i === 0) {
+          void loadModelDetails(turnSettings.modelCatalog, turnSettings.provider, turnSettings.apiKey, turnSettings.model)
+            .then((changed) => { if (changed) callbacks.onModelDetails?.(); }, () => undefined);
+        }
+        callbacks.onUsage?.(response.usage, { provider: turnSettings.provider, model: turnSettings.model, turnStart: i === 0 });
+      }
 
       if (isStopped()) return;
 
@@ -624,7 +783,11 @@ export class AgentLoop {
       if (isStopped()) return;
 
       // Append assistant message to history
-      this.messages.push({ role: "assistant", content: response.content, replay: response.replay });
+      this.messages.push({
+        role: "assistant", content: response.content, replay: response.replay,
+        ...(response.compaction ? { compaction: response.compaction } : {}),
+      });
+      if (response.compaction) callbacks.onCompacted?.();
       // Results of MCP calls stay in the replay: bounded like tool text.
       if (response.serverCalls?.length) this.messages = withoutLargeToolText(this.messages);
 
@@ -653,7 +816,7 @@ export class AgentLoop {
 
         // A newly discovered rule must reach the model before a write.
         // Rules returned earlier in this same batch have not reached it yet.
-        const knownRules = instructionsGiven(this.messages.slice(0, -1));
+        const knownRules = instructionsGiven(afterCompaction(this.messages.slice(0, -1), () => true));
         const initialRules = await folderInstructionContext(this.app, toolPaths(this.app, tc.name!, tc.input!), knownRules);
         let folderRules = initialRules.text;
         const instructionSources = initialRules.sources;
@@ -768,13 +931,5 @@ export class AgentLoop {
       unwatch();
       if (this.request === request) this.request = null;
     }
-  }
-
-  /** Drop oldest messages when conversation gets too long, keeping recent context */
-  private pruneHistory(): void {
-    if (this.messages.length > MAX_CONVERSATION_LENGTH) {
-      this.messages = trimHistory(this.messages, KEEP_RECENT);
-    }
-    this.pruneToolImages();
   }
 }

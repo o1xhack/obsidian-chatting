@@ -4,7 +4,7 @@
 // history no longer holds it. Older saved chats are migrated once.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, settings, text, response, transport, vaultApp } from './harness.mjs';
+import { api, settings, text, response, transport, vaultApp, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
@@ -34,13 +34,8 @@ function fakeChat() {
 // records what it writes there, and has a chat view with a fake component.
 async function setup(saved) {
   const { app } = vaultApp();
-  const writes = [];
-  app.vault.adapter = {
-    append: async () => {},
-    read: async path => { if (!saved || !path.endsWith('/chat-state.json')) throw new Error('ENOENT'); return JSON.stringify(saved); },
-    exists: async () => !!saved,
-    write: async (path, data) => { if (path.endsWith('/chat-state.json')) writes.push(JSON.parse(data)); },
-  };
+  const { adapter, writes } = chatFiles(saved);
+  app.vault.adapter = adapter;
   const plugin = new api.ChatPlugin();
   plugin.app = app;
   plugin.agent = new api.AgentLoop(app, settings('anthropic'));
@@ -63,6 +58,7 @@ test('The saved chat holds each image\'s data once, in the API history', async (
   const { plugin, view, writes } = await setup();
   answering();
   await view.handleUserMessage('Look at these', null, [one, two]);
+  await plugin.saveChatHistory();
   const saved = writes.at(-1);
   const json = JSON.stringify(saved);
   assert.equal(saved.version, api.chatState.CHAT_STATE_VERSION);
@@ -81,6 +77,7 @@ test('After a reload the images are shown again and regenerate sends them', asyn
   const first = await setup();
   answering();
   await first.view.handleUserMessage('Look at these', null, [one, two]);
+  await first.plugin.saveChatHistory();
   const { view, plugin } = await setup(first.writes.at(-1));
   assert.deepEqual(userImages(plugin)[0].map(image => image.data), [one.data, two.data]);
 
@@ -140,10 +137,15 @@ test('A chat saved without a version is migrated once: turn IDs, image data only
   assert.equal(count(json, two.data), 0);
 });
 
-test('A chat in the current format is taken as it is; an unknown older version is no saved chat', () => {
+test('A version 3 chat is taken as it is; the index gives conversations to read later; an unknown older version is no saved chat', () => {
   const chatHistory = [{ type: 'user', text: 'Q', images: [one] }];
-  const current = { version: api.chatState.CHAT_STATE_VERSION, activeConversationId: 'c1', conversations: [{ id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory, agentMessages: [] }] };
-  assert.deepEqual(api.chatState.migrateChatState(current).conversations[0].chatHistory, chatHistory);
+  const conversation = { id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory, agentMessages: [] };
+  const v3 = api.chatState.migrateChatState({ version: 3, activeConversationId: 'c1', conversations: [conversation] });
+  assert.equal(v3.version, 3);
+  assert.deepEqual(v3.conversations[0].chatHistory, chatHistory);
+  // The index (version 4): each conversation's histories wait in its own file.
+  const index = api.chatState.migrateChatState({ version: api.chatState.CHAT_STATE_VERSION, activeConversationId: 'c1', conversations: [{ id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, size: 9 }] });
+  assert.deepEqual(index.conversations[0], { id: 'c1', title: 'Q', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory: [], agentMessages: [], size: 9, metadataSavedAt: 0, unloaded: true });
   assert.equal(api.chatState.migrateChatState({ version: 0, chatHistory: [] }), null);
   assert.equal(api.chatState.migrateChatState([]), null);
 });

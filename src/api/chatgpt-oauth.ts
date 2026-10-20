@@ -1,5 +1,6 @@
-import { oauthReasoning, oauthParallelTools, getCodexClientVersion, cachedCatalog, catalogIdentity } from "./model-catalog";
+import { oauthReasoning, oauthParallelTools, getCodexClientVersion, cachedCatalog, catalogIdentity, catalogModel } from "./model-catalog";
 import { RequestBudgetError } from "./request-budget";
+import { compactThreshold } from "../agent/compaction";
 /**
  * ChatGPT OAuth API client.
  *
@@ -27,7 +28,7 @@ import type {
   UnifiedResponse,
   StreamOptions,
 } from "../types";
-import { buildResponsesInput, fromResponsesOutput, sendResponsesRequest } from "./responses-format";
+import { buildResponsesInput, compactionParameter, fromResponsesOutput, sendResponsesRequest } from "./responses-format";
 import type { StreamResult } from "./stream";
 import { ProviderError, StreamCutError } from "./errors";
 import { asRecord, getNestedString, isRecord } from "../json";
@@ -65,6 +66,14 @@ const USER_AGENT = "OpenAI/JS 4.x chatting-with-ai/0.1";
 
 // Settings uses the account-specific Codex catalog, preserving custom model IDs.
 
+/** The Codex route refused server-side compaction once (until Obsidian restarts). */
+let compactionRefused = false;
+
+/** Whether the Codex route compacts on its side (else the plugin summarizes). */
+export function chatgptCompacts(): boolean {
+  return !compactionRefused;
+}
+
 /** Held by main.ts; injected via setChatGPTOAuthService(). */
 let oauthService: ChatGPTOAuthService | null = null;
 
@@ -82,6 +91,12 @@ export function setChatGPTOAuthService(service: ChatGPTOAuthService | null): voi
  */
 export function clearChatGPTOAuthState(): void {
   /* no-op: history lives entirely in AgentLoop.messages */
+}
+
+/** Account identity for deciding whether encrypted compaction can be replayed. */
+export async function chatgptReplayIdentity(): Promise<string | undefined> {
+  const credential = await oauthService?.getUsableCredential();
+  return credential ? catalogIdentity("chatgpt-oauth", credential.accountId || credential.accessToken) : undefined;
 }
 
 export async function sendChatGPTOAuthMessage(
@@ -134,6 +149,9 @@ export async function sendChatGPTOAuthMessage(
     // fields aren't strictly documented as required, but Codex's response
     // pipeline expects them and at least one is required for reasoning models.
     parallel_tool_calls: oauthParallelTools(model),
+    // Server-side compaction at the catalog's point (`auto_compact_token_limit`
+    // or 80 % of the window), as for OpenAI; not after this route refused it.
+    ...(compactionRefused ? {} : compactionParameter(compactThreshold("chatgpt-oauth", catalogModel("chatgpt-oauth", model), settings))),
   };
 
   const reasoning = oauthReasoning(model, settings.thinkingLevel);
@@ -174,8 +192,25 @@ export async function sendChatGPTOAuthMessage(
     if (shouldStop()) throw new Error("Request cancelled.");
   };
   checkCancelled();
+  // The Codex route doesn't document `context_management`. A 400 to a
+  // request with it sends the request again without; if that one goes
+  // through, the route refused it, and from then on the plugin summarizes
+  // the chat itself instead.
+  const attempt = async (accessToken: string, accountId: string | undefined): Promise<UnifiedResponse> => {
+    try {
+      return await sendOnce(body, accessToken, accountId, identity, stream);
+    } catch (e) {
+      if (!(e instanceof ProviderError) || e.status !== 400 || !("context_management" in body)) throw e;
+      checkCancelled();
+      const { context_management: _refused, ...without } = body;
+      const response = await sendOnce(without, accessToken, accountId, identity, stream);
+      compactionRefused = true;
+      delete (body as Record<string, unknown>).context_management;
+      return response;
+    }
+  };
   try {
-    return await sendOnce(body, credential.accessToken, credential.accountId, identity, stream);
+    return await attempt(credential.accessToken, credential.accountId);
   } catch (e) {
     // A rejected token (401), e.g. revoked before it expired: refresh once
     // and retry once. A second 401, or a failed refresh, keeps the
@@ -190,7 +225,7 @@ export async function sendChatGPTOAuthMessage(
     }
     checkCancelled();
     if (!renewed) throw e;
-    return sendOnce(body, renewed.accessToken, renewed.accountId, identity, stream);
+    return attempt(renewed.accessToken, renewed.accountId);
   }
 }
 
