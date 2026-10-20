@@ -122,6 +122,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   setTitle(title: string): void;
   setSelection(selection: SelectionScope): void;
   getSelection(): SelectionScope | null;
+  clearSelection?(): void;
   setEnterSends(on: boolean): void;
   /** Offer Continue for a turn that was cut off when Obsidian was ended. */
   setContinue(show: boolean): void;
@@ -974,6 +975,7 @@ export class ObsidianChatView extends ItemView {
       this.plugin.touchConversation();
       chat.setTitle(conversation.title);
       begin();
+      if (voice && selection && chat.getSelection() === selection) chat.clearSelection?.();
       await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens, voice ? voiceContext : null);
     }, { text, selection, images, files, notes, rollback }, voice);
   }

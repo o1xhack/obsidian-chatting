@@ -104,7 +104,7 @@ export function requestContext(turns: VoiceTurn[]): VoiceTurn[] {
       user.push(turn);
       continue;
     }
-    if (turn.text.trim().endsWith("?")) kept.push(...user, turn);
+    if (isQuestion(turn.text)) kept.push(...user, turn);
     user = [];
   }
   return [...kept, ...user];
@@ -141,6 +141,9 @@ export class VoiceController {
   private steeredSpoken: string[] = [];
   /** User turns said during the running task, waiting for the user to be quiet (`queueSteer`). */
   private pendingSteer: VoiceTurn[] = [];
+  /** A timer raced the backend's last step; keep it for the next turn. */
+  private fallbackLeftovers: SteeredMessage[] = [];
+  private clarificationPending = false;
   private steerTimer?: number;
   private task?: Promise<void>;
   private taskResult = "";
@@ -264,6 +267,7 @@ export class VoiceController {
       case "input":
         // Still speaking: words waiting to be added to the task wait for the rest.
         if (this.pendingSteer.length) this.restartSteerTimer();
+        if (event.text.trim()) this.clarificationPending = false;
         this.pendingInput += event.text;
         this.addSpoken("user", event.text);
         this.caption("user", event.text);
@@ -314,6 +318,7 @@ export class VoiceController {
     }
     // `you` is the user's current words only: they go once the voice answers.
     this.update({ assistant: current + text, you: "", status: "speaking" });
+    if (this.pendingSteer.length && isQuestion(current + text)) this.clarificationPending = true;
     window.clearTimeout(this.speakingTimer);
     this.speakingTimer = window.setTimeout(() => {
       if (!this.ended) this.update({ status: this.voiceTurnRunning ? "thinking" : "listening" });
@@ -329,7 +334,7 @@ export class VoiceController {
       if (times) times.last = now;
     } else {
       const kept = this.closeTurn();
-      if (kept?.role === "user" && this.voiceTurnRunning) this.queueSteer(kept);
+      if (kept?.role === "user" && (this.voiceTurnRunning || this.pendingSteer.length)) this.queueSteer(kept);
       this.openTurn = { role, text };
       this.turnTimes.set(this.openTurn, { first: now, last: now });
     }
@@ -355,21 +360,51 @@ export class VoiceController {
   }
 
   private flushSteer(): void {
-    if (!this.voiceTurnRunning || this.ended) return;
-    const text = this.takePendingSteer();
-    if (text && !this.host.steerTurn(text)) this.steeredSpoken.pop();
+    if (this.ended) return;
+    const pending = this.takePendingSteer();
+    if (!pending) return;
+    if (this.voiceTurnRunning || this.host.turnRunning()) {
+      if (!this.host.steerTurn(pending.text, pending.context)) this.fallbackLeftovers.push(pending);
+    } else {
+      // The old task finished while the voice was asking for clarification.
+      void this.startTask(this.answerTo, pending.text, pending.context).catch((error: unknown) => {
+        if (!this.ended) this.host.showError(error instanceof Error ? error.message : String(error));
+      });
+    }
   }
 
-  /** The queued words as one text, taken out of the transcript (no context for the next request). */
-  private takePendingSteer(): string {
+  /** A question with no later user reply must never dispatch incomplete work. */
+  private awaitingReply(): boolean {
+    if (this.clarificationPending) return true;
+    const turns = [...this.spoken, ...(this.openTurn ? [this.openTurn] : [])];
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (!turns[i].text.trim()) continue;
+      if (turns[i].role === "user") return false;
+      if (isQuestion(turns[i].text)) return true;
+    }
+    return false;
+  }
+
+  /** Take a complete addition with its clarification context, once quiet. */
+  private takePendingSteer(): SteeredMessage | undefined {
     window.clearTimeout(this.steerTimer);
+    if (!this.pendingSteer.length) return;
+    if (this.awaitingReply()) return;
+    if (this.lastSpeaker === "assistant" && this.state.status === "speaking") {
+      this.restartSteerTimer();
+      return;
+    }
+    const open = this.closeTurn();
+    if (open?.role === "user") this.pendingSteer.push(open);
     const turns = this.pendingSteer.splice(0);
-    if (!turns.length) return "";
-    this.spoken = this.spoken.filter((turn) => !turns.includes(turn));
+    const context = this.spoken.filter((turn) => !turns.includes(turn));
+    this.spoken = [];
+    this.pendingInput = "";
+    this.clarificationPending = false;
     const text = turns.map((turn) => turn.text).join(" ");
-    this.steeredSpoken.push(text);
+    this.steeredSpoken.push(...new Set([...turns.map(turn => turn.text), text]));
     this.host.log("VOICE_STEER_SPOKEN", { text });
-    return text;
+    return { text, ...(context.length ? { context } : {}) };
   }
 
   /** A turn is complete (Codex sends its whole text): keep it. */
@@ -384,6 +419,7 @@ export class VoiceController {
       }
       return;
     }
+    if (role === "user" && text.trim()) this.clarificationPending = false;
     if (this.openTurn?.role !== role) {
       // Reported after the other speaker started (the voice often answers
       // first): the turn is already kept from its pieces.
@@ -393,13 +429,14 @@ export class VoiceController {
         return;
       }
       const closed = this.closeTurn();
-      if (closed?.role === "user" && this.voiceTurnRunning) this.queueSteer(closed);
+      if (closed?.role === "user" && (this.voiceTurnRunning || this.pendingSteer.length)) this.queueSteer(closed);
     }
     const times = this.openTurn ? this.turnTimes.get(this.openTurn) : undefined;
     this.openTurn = { role, text };
     if (times) this.turnTimes.set(this.openTurn, times);
     const kept = this.closeTurn();
-    if (kept?.role === "user" && this.voiceTurnRunning) this.queueSteer(kept);
+    if (kept?.role === "user" && (this.voiceTurnRunning || this.pendingSteer.length)) this.queueSteer(kept);
+    if (role === "assistant" && this.pendingSteer.length && isQuestion(text)) this.clarificationPending = true;
   }
 
   /** Keep the open turn in the transcript; returns it as kept. */
@@ -426,6 +463,7 @@ export class VoiceController {
     // Words waiting to be added to the running task go with this request instead.
     window.clearTimeout(this.steerTimer);
     this.pendingSteer = [];
+    this.clarificationPending = false;
     const turns = this.spoken.splice(0);
     let request = text.trim();
     let last = -1;
@@ -439,7 +477,9 @@ export class VoiceController {
     if (last >= 0 && (!request || sameWords(turns[last].text, request))) {
       const taken = !request;
       let first = this.turnTimes.get(turns[last])?.first ?? 0;
-      request ||= turns[last].text;
+      // A three-word prefix is a duplicate for terminal-event matching,
+      // but cannot replace the user's longer request and its constraints.
+      if (!request || normalizedWords(turns[last].text).length > normalizedWords(request).length) request = turns[last].text;
       turns.splice(last, 1);
       // A short "Okay," of the voice while the user goes on speaking splits
       // one sentence into two user turns ("remove the one on the" – "Okay,"
@@ -493,6 +533,10 @@ export class VoiceController {
     if (this.host.turnRunning()) this.host.stopTurn();
     // A new task: what was added to the last one no longer counts as taken.
     this.steeredSpoken = [];
+    await this.startTask(id, request, context);
+  }
+
+  private async startTask(id: string, request: string, context: VoiceTurn[] = []): Promise<void> {
     const task = this.runVoiceTurn(id, request, context);
     this.task = task;
     try { await task; }
@@ -537,6 +581,13 @@ export class VoiceController {
     // Ended meanwhile: the view ran what was added (as typed turns).
     if (this.ended) return;
     if (stopped) {
+      window.clearTimeout(this.steerTimer);
+      this.pendingSteer = [];
+      this.fallbackLeftovers = [];
+      this.clarificationPending = false;
+      this.pendingInput = "";
+      this.spoken = [];
+      this.openTurn = null;
       this.taskResult = "The task was stopped. Any changes already made are shown in the chat.";
       this.sendAll(speakEvents(this.answerTo, this.taskResult));
       this.update({ status: "listening" });
@@ -545,7 +596,7 @@ export class VoiceController {
     // Added after the turn's last step: it needs a turn of its own.
     // Words still waiting to be added when the task ended run as the next turn.
     const pending = this.takePendingSteer();
-    const later = [...this.host.takeSteered(), ...(pending ? [{ text: pending }] : [])];
+    const later = [...this.host.takeSteered(), ...this.fallbackLeftovers.splice(0), ...(pending ? [pending] : [])];
     this.taskResult = failed ? `The task failed: ${failed}. Do not claim it succeeded.` : answer ? spokenAnswer(answer) : "The task ended without a final answer; check the chat for details.";
     // Said first, so a request the user makes while the result is spoken
     // isn't taken for part of this task (the voice then claimed it was "on the way").
@@ -591,7 +642,11 @@ function normalizedWords(text: string): string {
 /** A short interjection of the voice while the user speaks ("Okay,", "Mhm."), not an answer or a question. */
 function isBackchannel(text: string): boolean {
   const trimmed = text.trim();
-  return !trimmed.endsWith("?") && trimmed.split(/\s+/).filter(Boolean).length <= 3;
+  return !isQuestion(trimmed) && trimmed.split(/\s+/).filter(Boolean).length <= 3;
+}
+
+function isQuestion(text: string): boolean {
+  return /[?？]\s*$/.test(text);
 }
 
 /**

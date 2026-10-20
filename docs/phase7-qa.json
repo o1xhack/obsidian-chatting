@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 779,
-    "passed": 779,
+    "tests": 786,
+    "passed": 786,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -107,6 +107,18 @@
       "migration-chat-present-chat-mvh97t3o-7dydr7",
       "migration-visible-chat-mvh97t3o-7dydr7",
       "migration-api-chat-mvh97t3o-7dydr7",
+      "migration-chat-present-chat-mvh9oxep-88bwa4",
+      "migration-visible-chat-mvh9oxep-88bwa4",
+      "migration-api-chat-mvh9oxep-88bwa4",
+      "migration-chat-present-chat-mvh9p8nm-b9tmgj",
+      "migration-visible-chat-mvh9p8nm-b9tmgj",
+      "migration-api-chat-mvh9p8nm-b9tmgj",
+      "migration-chat-present-chat-mvha9p0t-0hgs0g",
+      "migration-visible-chat-mvha9p0t-0hgs0g",
+      "migration-api-chat-mvha9p0t-0hgs0g",
+      "migration-chat-present-chat-mvhaa0ok-uks1za",
+      "migration-visible-chat-mvhaa0ok-uks1za",
+      "migration-api-chat-mvhaa0ok-uks1za",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -140,7 +152,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91",
+    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -165,6 +177,13 @@
       "native-spoken-question-keeps-queued-addition",
       "native-late-addition-context-preserved",
       "native-late-context-keeps-request-separate",
+      "native-prefix-retains-full-user-constraint",
+      "native-accepted-voice-consumes-selection",
+      "native-first-turn-retains-saved-scope",
+      "native-later-voice-turn-is-unscoped",
+      "native-clarification-blocks-premature-steering",
+      "native-finished-task-keeps-unanswered-addition",
+      "native-clarified-addition-runs-with-context",
       "native-reconnect-retains-running-controller",
       "native-reconnect-mutes-immediately",
       "held-microphone-muted-during-connect",
@@ -179,10 +198,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91"
+    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020"
   },
   "liveVoice": {
-    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91",
+    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -196,7 +215,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh9oxep-88bwa4",
+    "conversationId": "chat-mvhabxg5-r36rx1",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
@@ -245,10 +264,22 @@
     {
       "comment": 4331079884,
       "fix": "Keep additions queued when ask_user ends a voice turn instead of reporting them as consumed before a nonexistent next request."
+    },
+    {
+      "comment": 4331165156,
+      "fix": "Hold fallback additions through voice clarification and carry the answer/context when ready, including after the old task finishes; Stop discards them and consumed raw input cannot replay."
+    },
+    {
+      "comment": 4331165165,
+      "fix": "Consume the selection only when the first accepted voice turn begins; preflight refusal retains it."
+    },
+    {
+      "comment": 4331165172,
+      "fix": "Preserve the longer normalized utterance when a delegation matches only its prefix; terminal-event deduplication remains."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "58edd030cd87ab323f17aa773242f6447c4118ab183d6cc2f14b027b3856fb91",
+    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -262,7 +293,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh9p8nm-b9tmgj",
+    "conversationId": "chat-mvhac7yb-ylv6oo",
     "connected": true,
     "retainedController": true,
     "reconnected": true,
