@@ -1630,3 +1630,117 @@ test('Stop discards an addition awaiting clarification and its later answer cann
   assert.equal(log.chat.length, 2);
   view.endVoice();
 });
+
+for (const order of [[0, 1], [1, 0]]) {
+  test(`Consecutive delegated utterances ignore out-of-order terminal events (${order.join('-')})`, async () => {
+    const { view, chat, plugin } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')) })
+      : response('anthropic', [text('Both requests processed once.')]) });
+    await startListening(view, chat);
+    const ch = channel(), raw = ['Could you read that first note?', 'Please preserve its original title.'];
+    said(ch, raw[0]); delegated(ch, 'a', 'Read the first note');
+    await until(() => release);
+    said(ch, raw[1]); delegated(ch, 'b', 'Keep the original title');
+    for (const i of order) ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: raw[i] } });
+    await sleep(100);
+    assert.deepEqual(chat.queued, ['Keep the original title']);
+    release();
+    await until(() => spoken(ch).some(([, value]) => value === 'Both requests processed once.'));
+    assert.equal(log.chat.length, 2);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user').length, 2);
+    view.endVoice();
+  });
+}
+
+for (const finished of [false, true]) {
+  test(`A shorter late delegation after fallback steering cannot repeat constrained work (${finished ? 'finished' : 'running'})`, async () => {
+    const { view, chat, plugin } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')) })
+      : response('anthropic', [text('Constrained request completed.')]) });
+    await startListening(view, chat);
+    const ch = channel(), full = 'Delete the note after making a backup';
+    delegated(ch, 'first', 'Read the note');
+    await until(() => release);
+    said(ch, full); answered(ch, 'Okay.');
+    await until(() => chat.queued.includes(full));
+    if (finished) { release(); await until(() => spoken(ch).some(([, value]) => value === 'Constrained request completed.')); }
+    delegated(ch, 'late-prefix', 'Delete the note');
+    await sleep(100);
+    if (!finished) { assert.deepEqual(chat.queued, [full]); release(); }
+    await until(() => spoken(ch).some(([, value]) => value === 'Constrained request completed.'));
+    assert.equal(log.chat.length, 2);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === full).length, 1);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === 'Delete the note').length, 0);
+    view.endVoice();
+  });
+}
+
+for (const finished of [false, true]) {
+  test(`Reconnect preserves a pending clarification and waits for the reply (${finished ? 'old task done' : 'old task running'})`, async () => {
+    api.Platform.isMobileApp = true;
+    const { view, chat } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('Original work complete.')])) })
+      : response('anthropic', [text('Clarified request complete.')]) });
+    await startListening(view, chat);
+    pc().connectionState = 'connected';
+    const old = channel();
+    delegated(old, 'original', 'Read the first note');
+    await until(() => release);
+    said(old, 'Delete it'); answered(old, 'Which note should I delete?');
+    old.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'Which note should I delete?' } });
+    if (finished) { release(); await until(() => spoken(old).some(([, value]) => value === 'Original work complete.')); }
+    appLifecycle.markHidden(); await sleep(60); appLifecycle.markVisible();
+    if (!finished) release();
+    await until(() => rtc.pcs.length === 2 && chat.voice?.status === 'listening');
+    const ch = channel(), seed = JSON.stringify(JSON.parse(log.live[1].body).session.initial_items);
+    assert.match(seed, /Delete it/); assert.match(seed, /Which note should I delete\?/);
+    delegated(ch, 'new-call-id', 'Delete it');
+    await sleep(80);
+    assert.equal(log.chat.length, 1, 'reconnect cannot dispatch the unresolved request');
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'The left note after making a backup' } });
+    answered(ch, 'Okay.');
+    await until(() => spoken(ch).some(([, value]) => value === 'Clarified request complete.'));
+    assert.equal(log.chat.length, 2);
+    assert.match(userText(log.chat[1]), /Which note should I delete\?/);
+    assert.match(userText(log.chat[1]), /after making a backup/);
+    assert.ok(spoken(ch).some(([id, value]) => id === 'new-call-id' && value === 'Clarified request complete.'));
+    view.endVoice();
+  });
+}
+
+test('The consumed-utterance bound ends the call before another backend dispatch', async () => {
+  const { view, chat } = await voiceSetup();
+  const log = serve();
+  await startListening(view, chat);
+  view.voice.consumed = Array.from({ length: 4096 }, (_, i) => ['Consumed utterance ' + i]);
+  said(channel(), 'Read another note'); delegated(channel(), 'too-long', 'Read another note');
+  await until(() => chat.voice === null);
+  assert.equal(log.chat.length, 0);
+  assert.equal(rtc.mic.track.enabled, false);
+  assert.ok(errorsShown(chat).some(value => /restart voice/.test(value)));
+});
+
+test('An older terminal prefix cannot clear a newer utterance with an added constraint', async () => {
+  const { view, chat } = await voiceSetup();
+  let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('First result.')])) })
+    : response('anthropic', [text('New constrained result.')]) });
+  await startListening(view, chat);
+  const ch = channel();
+  said(ch, 'Read the note'); delegated(ch, 'first', 'Read the note');
+  await until(() => release);
+  said(ch, 'Read the note after checking the title');
+  ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Read the note' } });
+  release();
+  await until(() => spoken(ch).some(([, value]) => value === 'New constrained result.'));
+  assert.equal(log.chat.length, 2);
+  assert.match(userText(log.chat[1]), /Read the note after checking the title$/);
+  view.endVoice();
+});

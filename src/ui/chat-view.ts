@@ -21,7 +21,7 @@ import { catalogModel } from "../api/model-catalog";
 import { voiceTranscriptText } from "../agent/system-prompt";
 import { debugLog } from "../debug";
 import { appLifecycle } from "../platform/lifecycle";
-import { VoiceController, VOICE_TIMING, requestContext, type VoiceTurnHooks, type VoiceViewState } from "../voice/controller";
+import { VoiceController, VOICE_TIMING, requestContext, type VoiceTurnHooks, type VoiceViewState, type VoiceResumeState } from "../voice/controller";
 
 export const VIEW_TYPE_CHAT = "ochatting-view";
 
@@ -631,7 +631,7 @@ export class ObsidianChatView extends ItemView {
   }
 
   /** Start a voice conversation in the current conversation. */
-  startVoice(options: { reconnecting?: boolean; micOn?: boolean; finishedTask?: string } = {}): void {
+  startVoice(options: { reconnecting?: boolean; micOn?: boolean; finishedTask?: string; resume?: VoiceResumeState } = {}): void {
     if (this.voice) return;
     const route = this.plugin.voiceRoute();
     if (!route) {
@@ -648,7 +648,13 @@ export class ObsidianChatView extends ItemView {
       takeSteered: () => this.takeStashed(),
       stopTurn: () => this.handleStop(),
       turnRunning: () => !!this.turn,
-      history: () => options.finishedTask ? [...this.plugin.chatHistory, { type: "user", text: `The voice connection was interrupted while the backend task ran. Its turn has now ended; tell me its latest result below. Do not run the task again.\n\n${options.finishedTask}` }] : this.plugin.chatHistory,
+      history: () => {
+        const history = [...this.plugin.chatHistory];
+        if (options.finishedTask && options.resume?.pending.length) history.push({ type: "assistant", text: `The previous backend task ended: ${options.finishedTask}` });
+        for (const turn of options.resume?.turns ?? []) history.push({ type: turn.role, text: turn.text });
+        if (options.finishedTask && !options.resume?.pending.length) history.push({ type: "user", text: `The voice connection was interrupted while the backend task ran. Its turn has now ended; tell me its latest result below. Do not run the task again.\n\n${options.finishedTask}` });
+        return history;
+      },
       openFile: () => this.plugin.app.workspace.getActiveFile(),
       showError: (message) => {
         this.chatContainer?.addError(message);
@@ -709,12 +715,12 @@ export class ObsidianChatView extends ItemView {
   private reconnectVoice(): void {
     const old = this.voice;
     if (!old) return;
-    void old.prepareReconnect().then((finishedTask) => {
+    void old.prepareReconnect().then(({ result: finishedTask, resume }) => {
       if (this.voice !== old) return;
       this.voice = null;
       this.releaseVoiceScreen?.();
       void old.end();
-      this.startVoice({ reconnecting: true, micOn: old.isMicOn(), finishedTask });
+      this.startVoice({ reconnecting: true, micOn: old.isMicOn(), finishedTask, resume });
     });
   }
 

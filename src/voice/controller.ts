@@ -19,6 +19,14 @@ import { VoiceCancelled, VoiceSession, type VoiceRoute } from "./session";
 
 export type VoiceStatus = "connecting" | "reconnecting" | "listening" | "thinking" | "speaking";
 
+/** Unconsumed voice dialogue; indices preserve which user turns await dispatch. */
+export interface VoiceResumeState {
+  turns: VoiceTurn[];
+  pending: number[];
+  pendingInput: string;
+  clarificationPending: boolean;
+}
+
 /** What the voice bar shows. */
 export interface VoiceViewState {
   status: VoiceStatus;
@@ -124,10 +132,8 @@ export class VoiceController {
   private spoken: VoiceTurn[] = [];
   /** The turn being spoken now, from transcript pieces. */
   private openTurn: VoiceTurn | null = null;
-  /** The request the last delegation took: its late "turn done" isn't kept again. */
-  private lastRequest = "";
-  /** The consumed user transcript, when the delegation rephrased it. */
-  private lastRequestTranscript = "";
+  /** Every consumed utterance until its terminal event, including paraphrases. */
+  private consumed: string[][] = [];
   private lastSpeaker: "user" | "assistant" | null = null;
   private voiceTurnRunning = false;
   /** The newest delegation in the running voice turn: progress and the answer go to it. */
@@ -148,6 +154,8 @@ export class VoiceController {
   private task?: Promise<void>;
   private taskResult = "";
   private reconnecting = false;
+  /** A replacement call needs one of its own delegation IDs before sending results. */
+  private needsDelegation = false;
   /** When each turn's first and last words arrived (ms). */
   private readonly turnTimes = new WeakMap<VoiceTurn, { first: number; last: number }>();
 
@@ -156,11 +164,18 @@ export class VoiceController {
    * "Reconnecting…"; `micOn`: hands-free, the old call's microphone state.
    */
   constructor(private readonly host: VoiceHost, route: VoiceRoute, holdToTalk: boolean,
-    { reconnecting = false, micOn = true }: { reconnecting?: boolean; micOn?: boolean } = {}) {
+    { reconnecting = false, micOn = true, resume }: { reconnecting?: boolean; micOn?: boolean; resume?: VoiceResumeState } = {}) {
     this.state = {
       status: reconnecting ? "reconnecting" : "connecting",
       you: "", assistant: "", micOn: !holdToTalk && micOn, holdToTalk, audioBlocked: false,
     };
+    if (resume) {
+      this.spoken = resume.turns.map(turn => ({ ...turn }));
+      this.pendingSteer = resume.pending.map(index => this.spoken[index]).filter(Boolean);
+      this.pendingInput = resume.pendingInput;
+      this.clarificationPending = resume.clarificationPending;
+      this.needsDelegation = this.pendingSteer.length > 0;
+    }
     this.session = new VoiceSession(route, {
       onMessage: (message) => this.receive(message),
       onEnded: (error) => this.onEnded(error),
@@ -190,14 +205,24 @@ export class VoiceController {
    * Delegation IDs belong to that call, so finish the task first and seed
    * the replacement with its saved result instead of replaying its tools.
    */
-  async prepareReconnect(): Promise<string | undefined> {
+  async prepareReconnect(): Promise<{ result?: string; resume: VoiceResumeState }> {
     this.reconnecting = true;
     this.session.setMicEnabled(false);
     this.update({ status: "reconnecting" });
     void this.session.end();
     const task = this.task;
     if (task) await task;
-    return task ? this.taskResult : undefined;
+    const open = this.closeTurn();
+    if (open?.role === "user" && this.pendingSteer.length) this.pendingSteer.push(open);
+    return {
+      result: task ? this.taskResult : undefined,
+      resume: {
+        turns: this.spoken.map(turn => ({ ...turn })),
+        pending: this.spoken.flatMap((turn, index) => this.pendingSteer.includes(turn) ? [index] : []),
+        pendingInput: this.pendingInput,
+        clarificationPending: this.awaitingReply(),
+      },
+    };
   }
 
   /** End the conversation. A running turn finishes in the chat but isn't spoken. */
@@ -360,9 +385,9 @@ export class VoiceController {
   }
 
   private flushSteer(): void {
-    if (this.ended) return;
+    if (this.ended || this.needsDelegation) return;
     const pending = this.takePendingSteer();
-    if (!pending) return;
+    if (!pending || this.ended) return;
     if (this.voiceTurnRunning || this.host.turnRunning()) {
       if (!this.host.steerTurn(pending.text, pending.context)) this.fallbackLeftovers.push(pending);
     } else {
@@ -402,6 +427,7 @@ export class VoiceController {
     this.pendingInput = "";
     this.clarificationPending = false;
     const text = turns.map((turn) => turn.text).join(" ");
+    this.rememberConsumed(turns.map(turn => turn.text), text);
     this.steeredSpoken.push(...new Set([...turns.map(turn => turn.text), text]));
     this.host.log("VOICE_STEER_SPOKEN", { text });
     return { text, ...(context.length ? { context } : {}) };
@@ -409,14 +435,12 @@ export class VoiceController {
 
   /** A turn is complete (Codex sends its whole text): keep it. */
   private finishTurn(role: VoiceTurn["role"], text: string): void {
-    const consumed = [this.lastRequest, this.lastRequestTranscript].some(request => request && sameWords(text, request));
-    if (role === "user" && (consumed || this.steeredSpoken.some(request => normalizedWords(request) === normalizedWords(text)))) {
+    let consumed = this.consumed.findIndex(variants => variants.some(request => normalizedWords(request) === normalizedWords(text)));
+    if (consumed < 0) consumed = this.consumed.findIndex(variants => variants.some(request => sameWords(text, request)));
+    if (role === "user" && (consumed >= 0 || this.steeredSpoken.some(request => normalizedWords(request) === normalizedWords(text)))) {
       // The request a delegation already took, reported late.
-      if (this.openTurn?.role === "user" && sameWords(this.openTurn.text, text)) this.openTurn = null;
-      if (consumed) {
-        this.lastRequest = "";
-        this.lastRequestTranscript = "";
-      }
+      if (this.openTurn?.role === "user" && normalizedWords(this.openTurn.text) === normalizedWords(text)) this.openTurn = null;
+      if (consumed >= 0) this.consumed.splice(consumed, 1);
       return;
     }
     if (role === "user" && text.trim()) this.clarificationPending = false;
@@ -465,6 +489,7 @@ export class VoiceController {
     this.pendingSteer = [];
     this.clarificationPending = false;
     const turns = this.spoken.splice(0);
+    const utterances = turns.filter(turn => turn.role === "user").map(turn => turn.text);
     let request = text.trim();
     let last = -1;
     for (let i = turns.length - 1; i >= 0; i--) {
@@ -473,7 +498,6 @@ export class VoiceController {
         break;
       }
     }
-    this.lastRequestTranscript = last >= 0 ? turns[last].text : "";
     if (last >= 0 && (!request || sameWords(turns[last].text, request))) {
       const taken = !request;
       let first = this.turnTimes.get(turns[last])?.first ?? 0;
@@ -496,7 +520,7 @@ export class VoiceController {
     }
     request ||= this.pendingInput.trim();
     this.pendingInput = "";
-    this.lastRequest = request;
+    this.rememberConsumed(utterances, request);
     // The agent gets all of it: a request the voice only took up late
     // ("Then do it") needs what was asked before. The chat shows less (`requestContext`).
     return { request, context: turns };
@@ -504,8 +528,17 @@ export class VoiceController {
 
   /** A delegation: run the request as a chat turn and send the answer back to speak. */
   private async delegate(id: string, text: string): Promise<void> {
+    if (this.needsDelegation) {
+      this.needsDelegation = false;
+      this.answerTo = id;
+    }
+    if (this.pendingSteer.length && this.awaitingReply()) {
+      this.sendAll(speakEvents(id, "Wait for the user's answer to the pending clarification before delegating the request."));
+      return;
+    }
     // As Codex does: the request plus what was said since the last one.
     const { request, context } = this.takeRequest(text);
+    if (this.ended) return;
     this.host.log("VOICE_REQUEST", { delegation: id, request, context });
     if (!request) {
       this.sendAll(speakEvents(id, "I didn't catch the request. Ask the user to say it again."));
@@ -515,7 +548,7 @@ export class VoiceController {
     // apps: the agent takes it in after its current step, nothing is
     // stopped, and the answer goes to this newest delegation.
     // Already passed to the task as the user said it (`queueSteer`): not twice.
-    if (this.steeredSpoken.some((said) => normalizedWords(said) === normalizedWords(request))) {
+    if (this.steeredSpoken.some((said) => sameWords(said, request) && normalizedWords(request).length <= normalizedWords(said).length)) {
       if (this.voiceTurnRunning) {
         this.answerTo = id;
         this.sendAll(progressEvents(id, ADDED_TO_TASK));
@@ -534,6 +567,20 @@ export class VoiceController {
     // A new task: what was added to the last one no longer counts as taken.
     this.steeredSpoken = [];
     await this.startTask(id, request, context);
+  }
+
+  private rememberConsumed(utterances: string[], request: string): void {
+    const entries = utterances.map(text => [text]);
+    if (request) {
+      if (entries.length) entries[entries.length - 1].push(request);
+      else entries.push([request]);
+    }
+    if (this.consumed.length + entries.length > 4096) {
+      this.host.showError("Please restart voice to continue this long call.");
+      void this.end();
+      return;
+    }
+    this.consumed.push(...entries);
   }
 
   private async startTask(id: string, request: string, context: VoiceTurn[] = []): Promise<void> {
@@ -596,6 +643,7 @@ export class VoiceController {
     // Added after the turn's last step: it needs a turn of its own.
     // Words still waiting to be added when the task ended run as the next turn.
     const pending = this.takePendingSteer();
+    if (this.ended) return;
     const later = [...this.host.takeSteered(), ...this.fallbackLeftovers.splice(0), ...(pending ? [pending] : [])];
     this.taskResult = failed ? `The task failed: ${failed}. Do not claim it succeeded.` : answer ? spokenAnswer(answer) : "The task ended without a final answer; check the chat for details.";
     // Said first, so a request the user makes while the result is spoken

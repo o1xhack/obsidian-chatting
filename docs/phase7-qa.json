@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 786,
-    "passed": 786,
+    "tests": 794,
+    "passed": 794,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -119,6 +119,18 @@
       "migration-chat-present-chat-mvhaa0ok-uks1za",
       "migration-visible-chat-mvhaa0ok-uks1za",
       "migration-api-chat-mvhaa0ok-uks1za",
+      "migration-chat-present-chat-mvhabxg5-r36rx1",
+      "migration-visible-chat-mvhabxg5-r36rx1",
+      "migration-api-chat-mvhabxg5-r36rx1",
+      "migration-chat-present-chat-mvhac7yb-ylv6oo",
+      "migration-visible-chat-mvhac7yb-ylv6oo",
+      "migration-api-chat-mvhac7yb-ylv6oo",
+      "migration-chat-present-chat-mvhawoog-76gi31",
+      "migration-visible-chat-mvhawoog-76gi31",
+      "migration-api-chat-mvhawoog-76gi31",
+      "migration-chat-present-chat-mvhawznb-mj74eh",
+      "migration-visible-chat-mvhawznb-mj74eh",
+      "migration-api-chat-mvhawznb-mj74eh",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -152,7 +164,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020",
+    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -188,6 +200,11 @@
       "native-reconnect-mutes-immediately",
       "held-microphone-muted-during-connect",
       "native-reconnect-task-finishes-without-replay",
+      "held-microphone-muted-during-connect",
+      "native-reconnect-seeds-pending-question",
+      "native-reconnect-waits-for-clarification",
+      "native-resumed-clarification-keeps-context",
+      "native-resumed-result-uses-new-call-id",
       "voice-375px-no-overflow",
       "end-mutes-microphone-immediately",
       "end-removes-bar",
@@ -198,10 +215,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020"
+    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939"
   },
   "liveVoice": {
-    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020",
+    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -215,7 +232,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhabxg5-r36rx1",
+    "conversationId": "chat-mvhayj84-cf69oy",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
@@ -276,10 +293,22 @@
     {
       "comment": 4331165172,
       "fix": "Preserve the longer normalized utterance when a delegation matches only its prefix; terminal-event deduplication remains."
+    },
+    {
+      "comment": 4331298841,
+      "fix": "Keep a bounded ledger of all consumed utterances/paraphrases until their terminal events, without overwriting previous requests; exact open-turn clearing preserves newer constraints."
+    },
+    {
+      "comment": 4331298846,
+      "fix": "Deduplicate a shorter matching delegation after fallback steering while still accepting longer requests."
+    },
+    {
+      "comment": 4331298849,
+      "fix": "Transfer pending clarification dialogue and state into the replacement controller and service seed; wait for its own delegation ID and actual user reply before dispatch."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "5d88c12d24b0e092614ea384db37563f5ec9da590133e1d1dbef0e957d258020",
+    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -293,10 +322,13 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhac7yb-ylv6oo",
+    "conversationId": "chat-mvhayunm-hz6yk7",
     "connected": true,
+    "syntheticPendingTranscript": true,
     "retainedController": true,
     "reconnected": true,
+    "pendingClarificationSeeded": true,
+    "pendingClarificationRetained": true,
     "noReplay": true,
     "answerReadNote": true,
     "delegated": true,
