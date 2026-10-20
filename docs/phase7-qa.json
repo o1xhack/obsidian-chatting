@@ -74,6 +74,9 @@
       "migration-chat-present-chat-mvh70s0c-w5j99w",
       "migration-visible-chat-mvh70s0c-w5j99w",
       "migration-api-chat-mvh70s0c-w5j99w",
+      "migration-chat-present-chat-mvh77wud-meq70z",
+      "migration-visible-chat-mvh77wud-meq70z",
+      "migration-api-chat-mvh77wud-meq70z",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -107,7 +110,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "a8fabe7913a28d7589ad1c3c1ca191f7b51e985c8db3ff31441e9d897d688560",
+    "mainSha256": "fc0dc56317c354d13c0e1ef789846f4ae89fa3fb228cd69a99e7944635033655",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -122,6 +125,7 @@
       "typed-composer-hidden-in-call",
       "hold-key-enables-microphone",
       "blur-releases-held-microphone",
+      "window-blur-releases-held-microphone",
       "delegated-answer-rendered",
       "answer-returned-to-voice",
       "duplicate-delegation-no-second-request",
@@ -132,10 +136,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "a8fabe7913a28d7589ad1c3c1ca191f7b51e985c8db3ff31441e9d897d688560"
+    "mainSha256": "fc0dc56317c354d13c0e1ef789846f4ae89fa3fb228cd69a99e7944635033655"
   },
   "liveVoice": {
-    "mainSha256": "a8fabe7913a28d7589ad1c3c1ca191f7b51e985c8db3ff31441e9d897d688560",
+    "mainSha256": "fc0dc56317c354d13c0e1ef789846f4ae89fa3fb228cd69a99e7944635033655",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -149,7 +153,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh77wud-meq70z",
+    "conversationId": "chat-mvh7d2si-sj2qft",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,

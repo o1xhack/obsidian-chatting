@@ -1195,7 +1195,7 @@
   </div>
 {/snippet}
 
-<svelte:window onclick={closeUsageOutside} onkeydown={(e) => { if (e.key === "Escape") usageOpen = false; }} />
+<svelte:window onclick={closeUsageOutside} onblur={() => onVoice("talk-end")} onkeydown={(e) => { if (e.key === "Escape") usageOpen = false; }} />
 
 <div class="ochatting-container">
   <!-- Header -->
