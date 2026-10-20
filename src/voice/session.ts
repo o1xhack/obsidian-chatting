@@ -150,18 +150,20 @@ export class VoiceSession {
   }
 
   /** Send a client event over the data channel (dropped when it isn't open). */
-  send(event: Record<string, unknown>): void {
+  send(event: Record<string, unknown>): boolean {
     const open = this.channel?.readyState === "open";
     this.handlers.log("VOICE_SEND", { ...event, sent: open });
     if (open) {
       try {
         this.channel!.send(JSON.stringify(event));
+        return true;
       } catch {
         // readyState can change between the check and the send. Ending a
         // call must still release the microphone and peer connection.
         this.finish("The voice connection could not send data.");
       }
     }
+    return false;
   }
 
   /** The peer connection is up and the data channel open. */

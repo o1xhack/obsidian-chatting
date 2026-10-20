@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 794,
-    "passed": 794,
+    "tests": 803,
+    "passed": 803,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -131,6 +131,48 @@
       "migration-chat-present-chat-mvhawznb-mj74eh",
       "migration-visible-chat-mvhawznb-mj74eh",
       "migration-api-chat-mvhawznb-mj74eh",
+      "migration-chat-present-chat-mvhayj84-cf69oy",
+      "migration-visible-chat-mvhayj84-cf69oy",
+      "migration-api-chat-mvhayj84-cf69oy",
+      "migration-chat-present-chat-mvhayunm-hz6yk7",
+      "migration-visible-chat-mvhayunm-hz6yk7",
+      "migration-api-chat-mvhayunm-hz6yk7",
+      "migration-chat-present-chat-mvhbicfq-c11s5c",
+      "migration-visible-chat-mvhbicfq-c11s5c",
+      "migration-api-chat-mvhbicfq-c11s5c",
+      "migration-chat-present-chat-mvhbjaq0-wmy0bg",
+      "migration-visible-chat-mvhbjaq0-wmy0bg",
+      "migration-api-chat-mvhbjaq0-wmy0bg",
+      "migration-chat-present-chat-mvhbmilk-r33fe5",
+      "migration-visible-chat-mvhbmilk-r33fe5",
+      "migration-api-chat-mvhbmilk-r33fe5",
+      "migration-chat-present-chat-mvhbnhwz-8mp20j",
+      "migration-visible-chat-mvhbnhwz-8mp20j",
+      "migration-api-chat-mvhbnhwz-8mp20j",
+      "migration-chat-present-chat-mvhbolr0-lqqrup",
+      "migration-visible-chat-mvhbolr0-lqqrup",
+      "migration-api-chat-mvhbolr0-lqqrup",
+      "migration-chat-present-chat-mvhbrbd7-blpqtj",
+      "migration-visible-chat-mvhbrbd7-blpqtj",
+      "migration-api-chat-mvhbrbd7-blpqtj",
+      "migration-chat-present-chat-mvhbs9la-7cxv9d",
+      "migration-visible-chat-mvhbs9la-7cxv9d",
+      "migration-api-chat-mvhbs9la-7cxv9d",
+      "migration-chat-present-chat-mvhbufov-c7j0ha",
+      "migration-visible-chat-mvhbufov-c7j0ha",
+      "migration-api-chat-mvhbufov-c7j0ha",
+      "migration-chat-present-chat-mvhbutb8-lgz5e9",
+      "migration-visible-chat-mvhbutb8-lgz5e9",
+      "migration-api-chat-mvhbutb8-lgz5e9",
+      "migration-chat-present-chat-mvhbvomq-1g8a3t",
+      "migration-visible-chat-mvhbvomq-1g8a3t",
+      "migration-api-chat-mvhbvomq-1g8a3t",
+      "migration-chat-present-chat-mvhc0kwj-eatzao",
+      "migration-visible-chat-mvhc0kwj-eatzao",
+      "migration-api-chat-mvhc0kwj-eatzao",
+      "migration-chat-present-chat-mvhc11rn-487jzh",
+      "migration-visible-chat-mvhc11rn-487jzh",
+      "migration-api-chat-mvhc11rn-487jzh",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -164,7 +206,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939",
+    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -185,6 +227,7 @@
       "duplicate-delegation-no-second-request",
       "completed-user-turn-queued-native",
       "completed-correction-sent-to-native-backend",
+      "native-fresh-repetition-runs-again",
       "native-open-last-second-correction-runs-next",
       "native-spoken-question-keeps-queued-addition",
       "native-late-addition-context-preserved",
@@ -205,6 +248,11 @@
       "native-reconnect-waits-for-clarification",
       "native-resumed-clarification-keeps-context",
       "native-resumed-result-uses-new-call-id",
+      "native-background-result-waits-for-return",
+      "held-microphone-muted-during-connect",
+      "native-completed-result-seeded-for-announcement",
+      "native-quiet-service-shows-completed-result-notice",
+      "native-completed-result-does-not-replay-work",
       "voice-375px-no-overflow",
       "end-mutes-microphone-immediately",
       "end-removes-bar",
@@ -215,11 +263,12 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939"
+    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac"
   },
   "liveVoice": {
-    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939",
+    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
+    "audioClock": "continuous silent WebAudio source",
     "events": [
       "session.started",
       "input_transcript.added",
@@ -232,11 +281,27 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhayj84-cf69oy",
+    "conversationId": "chat-mvhc5naa-yaqn50",
     "connected": true,
+    "completedBeforeReconnect": true,
+    "reconnectedAfterCompletion": true,
+    "completedResultSeeded": true,
+    "recoveredNotice": "Previous task ended — see the result in chat",
+    "recoveredNoticeVisible": true,
+    "reconnectAudioContext": "running",
+    "reconnectedTurnDone": true,
+    "reconnectedResultSpoken": true,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
+    "reconnectTranscript": " It's simple: SAFE — change TARGET to VERIFIED.",
+    "finalAudioContext": "running",
+    "audioStats": [
+      {
+        "packets": 262,
+        "bytes": 9166
+      }
+    ],
     "peerClosed": true,
     "tools": [
       "read_document"
@@ -246,7 +311,8 @@
     "The Mac exposed only Splashtop virtual audio inputs; physical microphone sampling did not complete.",
     "Physical iOS/Android and Bluetooth have not been accepted in this maintainer run.",
     "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account.",
-    "The available phone control service showed concurrent active operations; this task did not take over the phone."
+    "The available phone control service showed concurrent active operations; this task did not take over the phone.",
+    "Automatic speech after reconnect is best effort. Current-bundle full speech passed; an earlier consecutive run on the readiness-gated candidate stayed quiet. The result remains in chat/seed and the mounted recovery notice provides a deterministic indication. This is not stable automatic-spoken acceptance."
   ],
   "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready.",
   "reviewFixes": [
@@ -305,11 +371,24 @@
     {
       "comment": 4331298849,
       "fix": "Transfer pending clarification dialogue and state into the replacement controller and service seed; wait for its own delegation ID and actual user reply before dispatch."
+    },
+    {
+      "comment": 4331408186,
+      "fix": "Retain undelivered outcomes independently of the task promise; seed the replacement, request speech after server readiness and display a recovery notice even when the service stays quiet."
+    },
+    {
+      "comment": 4331408194,
+      "fix": "Fresh user speech after completion clears fallback suppression, while stale late delegation events remain deduplicated."
+    },
+    {
+      "comment": 4331408201,
+      "fix": "Read the cached/fallback client version immediately and refresh GitHub metadata in the background without blocking call startup."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "7d50cb37bc4907244fd52ae2c38dd91ebf0a07b93796eebf4fe1a7caa2a6c939",
+    "mainSha256": "b0f908e2daa8b47065696853f43c86284913fed083265830d1eceb80ff723aac",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
+    "audioClock": "continuous silent WebAudio source",
     "events": [
       "session.started",
       "input_transcript.added",
@@ -322,7 +401,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhayunm-hz6yk7",
+    "conversationId": "chat-mvhc62ak-accasu",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,

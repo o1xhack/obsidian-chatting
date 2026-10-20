@@ -33,9 +33,9 @@ export interface CodexVoiceAuth {
 }
 
 /** A route that creates calls on Codex's voice service. */
-export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersion: () => Promise<string>): VoiceRoute {
-  // The sign-in (refreshed if it expires soon) and the Codex version don't
-  // depend on the offer: fetched while the microphone and offer are prepared.
+export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersion: () => string): VoiceRoute {
+  // Refresh sign-in while preparing the offer. Version metadata is a
+  // synchronous cached/fallback read, never a network prerequisite.
   let ready: Promise<[{ accessToken: string; accountId?: string } | null, string]> | null = null;
   const prepared = () => ready ??= Promise.all([auth.getUsableCredential(), clientVersion()]);
   return {

@@ -12,6 +12,7 @@ import {
   progressEvents,
   seedItems,
   speakEvents,
+  sessionSpeakEvents,
   spokenAnswer,
   type OpenFile,
 } from "./protocol";
@@ -34,6 +35,8 @@ export interface VoiceViewState {
   you: string;
   /** The voice's latest words. */
   assistant: string;
+  /** Retained outcome/clarification, visible even if the voice service stays quiet. */
+  resumeNotice?: string;
   micOn: boolean;
   holdToTalk: boolean;
   /** Autoplay was blocked: show "Tap to play audio". */
@@ -153,9 +156,13 @@ export class VoiceController {
   private steerTimer?: number;
   private task?: Promise<void>;
   private taskResult = "";
+  private undeliveredResults: string[] = [];
   private reconnecting = false;
   /** A replacement call needs one of its own delegation IDs before sending results. */
   private needsDelegation = false;
+  private readonly resumeSpeech: string;
+  private sessionReady = false;
+  private resumeAnnounced = false;
   /** When each turn's first and last words arrived (ms). */
   private readonly turnTimes = new WeakMap<VoiceTurn, { first: number; last: number }>();
 
@@ -164,7 +171,7 @@ export class VoiceController {
    * "Reconnecting…"; `micOn`: hands-free, the old call's microphone state.
    */
   constructor(private readonly host: VoiceHost, route: VoiceRoute, holdToTalk: boolean,
-    { reconnecting = false, micOn = true, resume }: { reconnecting?: boolean; micOn?: boolean; resume?: VoiceResumeState } = {}) {
+    { reconnecting = false, micOn = true, resume, finishedTask }: { reconnecting?: boolean; micOn?: boolean; resume?: VoiceResumeState; finishedTask?: string } = {}) {
     this.state = {
       status: reconnecting ? "reconnecting" : "connecting",
       you: "", assistant: "", micOn: !holdToTalk && micOn, holdToTalk, audioBlocked: false,
@@ -176,6 +183,14 @@ export class VoiceController {
       this.clarificationPending = resume.clarificationPending;
       this.needsDelegation = this.pendingSteer.length > 0;
     }
+    const question = resume?.pending.length && resume.clarificationPending
+      ? [...resume.turns].reverse().find(turn => turn.role === "assistant" && isQuestion(turn.text))?.text
+      : undefined;
+    this.resumeSpeech = [
+      finishedTask ? `Tell the user this completed result now. Do not delegate or run more work:\n${finishedTask}` : "",
+      question ? `Ask this pending clarification again, then wait for the user's reply before doing any work:\n${question}` : "",
+    ].filter(Boolean).join("\n\n");
+    this.state.resumeNotice = question || (finishedTask ? "Previous task ended — see the result in chat" : undefined);
     this.session = new VoiceSession(route, {
       onMessage: (message) => this.receive(message),
       onEnded: (error) => this.onEnded(error),
@@ -193,6 +208,7 @@ export class VoiceController {
       if (this.ended) return;
       this.session.setMicEnabled(this.state.micOn && !this.background);
       this.update({ status: "listening" });
+      this.announceResume();
     } catch (error) {
       if (error instanceof VoiceCancelled || this.ended) return;
       this.ended = true;
@@ -215,7 +231,7 @@ export class VoiceController {
     const open = this.closeTurn();
     if (open?.role === "user" && this.pendingSteer.length) this.pendingSteer.push(open);
     return {
-      result: task ? this.taskResult : undefined,
+      result: this.undeliveredResults.length ? this.undeliveredResults.join("\n\n") : task ? this.taskResult : undefined,
       resume: {
         turns: this.spoken.map(turn => ({ ...turn })),
         pending: this.spoken.flatMap((turn, index) => this.pendingSteer.includes(turn) ? [index] : []),
@@ -275,7 +291,7 @@ export class VoiceController {
    */
   leaveBackground(hiddenMs: number): boolean {
     this.background = false;
-    if (this.ended || hiddenMs > VOICE_TIMING.reconnectAfter || !this.session.isConnected()) return false;
+    if (this.ended || hiddenMs > VOICE_TIMING.reconnectAfter || this.undeliveredResults.length || !this.session.isConnected()) return false;
     this.setMic(this.state.micOn && !this.state.holdToTalk);
     return true;
   }
@@ -289,7 +305,13 @@ export class VoiceController {
     if (this.ended) return;
     const event = parseVoiceEvent(message);
     switch (event.kind) {
+      case "ready":
+        this.sessionReady = true;
+        this.announceResume();
+        break;
       case "input":
+        if (event.text.trim()) this.update({ resumeNotice: undefined });
+        if (!this.voiceTurnRunning && !this.pendingSteer.length && event.text.trim()) this.steeredSpoken = [];
         // Still speaking: words waiting to be added to the task wait for the rest.
         if (this.pendingSteer.length) this.restartSteerTimer();
         if (event.text.trim()) this.clarificationPending = false;
@@ -298,6 +320,7 @@ export class VoiceController {
         this.caption("user", event.text);
         break;
       case "output":
+        if (event.text.trim()) this.update({ resumeNotice: undefined });
         this.addSpoken("assistant", event.text);
         this.caption("assistant", event.text);
         break;
@@ -636,7 +659,7 @@ export class VoiceController {
       this.spoken = [];
       this.openTurn = null;
       this.taskResult = "The task was stopped. Any changes already made are shown in the chat.";
-      this.sendAll(speakEvents(this.answerTo, this.taskResult));
+      this.sendTaskResult(this.taskResult);
       this.update({ status: "listening" });
       return;
     }
@@ -649,8 +672,9 @@ export class VoiceController {
     // Said first, so a request the user makes while the result is spoken
     // isn't taken for part of this task (the voice then claimed it was "on the way").
     if (!later.length) this.sendAll(progressEvents(this.answerTo, failed ? "The request failed. Do not claim the requested work succeeded." : TASK_DONE));
-    if (failed) this.sendAll(speakEvents(this.answerTo, "That didn't work; the error is shown in the chat."));
-    else if (answer) this.sendAll(speakEvents(this.answerTo, spokenAnswer(answer)));
+    if (failed) this.sendTaskResult("That didn't work; the error is shown in the chat.");
+    else if (answer) this.sendTaskResult(spokenAnswer(answer));
+    else if (this.background || this.reconnecting) this.undeliveredResults.push(this.taskResult);
     if (later.length) {
       await this.runVoiceTurn(this.answerTo, later.map(item => item.text).join("\n"), later.flatMap(item => item.context ?? []));
       return;
@@ -658,9 +682,18 @@ export class VoiceController {
     if (this.state.status === "thinking") this.update({ status: "listening" });
   }
 
-  private sendAll(events: Record<string, unknown>[]): void {
-    if (this.reconnecting) return;
-    for (const event of events) this.session.send(event);
+  private sendTaskResult(text: string): void {
+    if (this.background || this.reconnecting || !this.sendAll(speakEvents(this.answerTo, text))) this.undeliveredResults.push(this.taskResult);
+  }
+
+  private announceResume(): void {
+    if (!this.sessionReady || this.resumeAnnounced || !this.resumeSpeech || this.ended) return;
+    if (this.sendAll(sessionSpeakEvents(spokenAnswer(this.resumeSpeech)))) this.resumeAnnounced = true;
+  }
+
+  private sendAll(events: Record<string, unknown>[]): boolean {
+    if (this.reconnecting) return false;
+    return events.every(event => this.session.send(event));
   }
 
   private onEnded(error?: string): void {

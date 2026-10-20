@@ -650,9 +650,8 @@ export class ObsidianChatView extends ItemView {
       turnRunning: () => !!this.turn,
       history: () => {
         const history = [...this.plugin.chatHistory];
-        if (options.finishedTask && options.resume?.pending.length) history.push({ type: "assistant", text: `The previous backend task ended: ${options.finishedTask}` });
+        if (options.finishedTask) history.push({ type: "assistant", text: `The previous backend task ended: ${options.finishedTask}` });
         for (const turn of options.resume?.turns ?? []) history.push({ type: turn.role, text: turn.text });
-        if (options.finishedTask && !options.resume?.pending.length) history.push({ type: "user", text: `The voice connection was interrupted while the backend task ran. Its turn has now ended; tell me its latest result below. Do not run the task again.\n\n${options.finishedTask}` });
         return history;
       },
       openFile: () => this.plugin.app.workspace.getActiveFile(),

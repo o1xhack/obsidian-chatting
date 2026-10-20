@@ -9,6 +9,7 @@ import { isRecord } from "../json";
 
 /** A server event, reduced to what the controller needs. */
 export type VoiceEvent =
+  | { kind: "ready" }
   | { kind: "input"; text: string }
   | { kind: "output"; text: string }
   | { kind: "turn-done"; role: "user" | "assistant"; text: string }
@@ -79,6 +80,8 @@ const str = (value: unknown): string => typeof value === "string" ? value : "";
 export function parseVoiceEvent(message: unknown): VoiceEvent {
   if (!isRecord(message)) return { kind: "other" };
   switch (message.type) {
+    case "session.started":
+      return { kind: "ready" };
     case "input_transcript.added":
       return { kind: "input", text: isRecord(message.item) ? str(message.item.text) : "" };
     case "output_transcript.added":
@@ -118,13 +121,17 @@ export function progressEvents(delegationId: string, text: string): Record<strin
   return append(delegationId, "commentary", text);
 }
 
+/** Announce retained results in a replacement call, with no old delegation ID. */
+export function sessionSpeakEvents(text: string): Record<string, unknown>[] {
+  return append(undefined, "speakable", text);
+}
+
 export const CLOSE_EVENT = { type: "session.close" };
 
-function append(delegationId: string, channel: "speakable" | "commentary", text: string): Record<string, unknown>[] {
+function append(delegationId: string | undefined, channel: "speakable" | "commentary", text: string): Record<string, unknown>[] {
   const encoder = new TextEncoder();
   return chunks(text, (part) => encoder.encode(part).length <= CHUNK_BYTES).map((part) => ({
-    type: "delegation.context.append",
-    delegation_item_id: delegationId,
+    ...(delegationId === undefined ? { type: "session.context.append" } : { type: "delegation.context.append", delegation_item_id: delegationId }),
     channel,
     content: [{ type: "input_text", text: part }],
   }));

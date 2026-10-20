@@ -22,7 +22,7 @@ class FakeChannel {
   sent = [];
   send(data) { this.sent.push(JSON.parse(data)); }
   close() { if (this.readyState === 'closed') return; this.readyState = 'closed'; queueMicrotask(() => this.onclose?.()); }
-  open() { this.readyState = 'open'; this.onopen?.(); }
+  open() { this.readyState = 'open'; this.onopen?.(); this.receive({ type: 'session.started' }); }
   /** A server event arriving. */
   receive(event) { this.onmessage?.({ data: JSON.stringify(event) }); }
 }
@@ -409,7 +409,7 @@ test('Ending a session immediately ignores queued delegations and cannot unmute 
   session.setMicEnabled(true);
   delegated(ch, 'late', 'Create a note');
   assert.equal(rtc.mic.track.enabled, false);
-  assert.deepEqual(events, []);
+  assert.deepEqual(events, [{ type: 'session.started' }]);
   ch.receive({ type: 'session.closed' });
   await ending;
   assert.equal(pc().closed, true);
@@ -556,14 +556,14 @@ test('The voice model knows the note or canvas open when the call starts', async
 test('Device check: one call starts and is closed at once; signed out, it is skipped', async () => {
   assert.deepEqual(await api.checkLiveVoice(null), ['skip', 'needs the ChatGPT account sign-in']);
   globalThis.__providerRequest = async () => codexAnswer();
-  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'a', accountId: 'acct_1' }) }, 'cove', async () => '1.2.3');
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'a', accountId: 'acct_1' }) }, 'cove', () => '1.2.3');
   const checking = api.checkLiveVoice(route);
   await until(() => pc()?.channel?.readyState === 'open');
   await until(() => channel().sent.some((event) => event.type === 'session.close'));
   channel().receive({ type: 'session.closed' });
   const result = await checking;
   assert.equal(result[0], 'ok');
-  assert.match(result[1], /call rtc_1 started .* then closed; events: session\.closed/);
+  assert.match(result[1], /call rtc_1 started .* then closed; events: session\.started, session\.closed/);
   assert.equal(pc().closed, true);
   assert.equal(rtc.mic.track.stopped, true);
 });
@@ -587,7 +587,7 @@ test('Codex route: prepare() starts the sign-in check and version lookup at once
   let versionLookups = 0;
   const auth = { getUsableCredential: async () => { credentialChecks++; return { accessToken: 'a', accountId: 'acct_1' }; } };
   globalThis.__providerRequest = async () => codexAnswer();
-  const route = X.codexVoiceRoute(auth, 'ember', async () => { versionLookups++; return '1.2.3'; });
+  const route = X.codexVoiceRoute(auth, 'ember', () => { versionLookups++; return '1.2.3'; });
 
   route.prepare();
   assert.equal(credentialChecks, 1);
@@ -606,7 +606,7 @@ test('Codex route: POST to the realtime calls route with Codex headers and the C
     requests.push(request);
     return { status: 201, text: 'answer-sdp', headers: { location: '/v1/live/rtc_abc123' } };
   };
-  const route = X.codexVoiceRoute(auth, 'ember', async () => '1.2.3');
+  const route = X.codexVoiceRoute(auth, 'ember', () => '1.2.3');
   const items = P.seedItems([{ type: 'user', text: 'Hi' }]);
   // As in a mobile WebView without crypto.randomUUID().
   const randomUUID = crypto.randomUUID;
@@ -638,9 +638,9 @@ test('Codex route: POST to the realtime calls route with Codex headers and the C
   });
 
   // Signed out, or a sign-in without an account: no call.
-  const signedOut = X.codexVoiceRoute({ getUsableCredential: async () => null }, 'ember', async () => '1.2.3');
+  const signedOut = X.codexVoiceRoute({ getUsableCredential: async () => null }, 'ember', () => '1.2.3');
   await assert.rejects(signedOut.connect({ sdp: 'o', instructions: '', items: [] }), /Connect your ChatGPT account/);
-  const noAccount = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'a' }) }, 'ember', async () => '1.2.3');
+  const noAccount = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'a' }) }, 'ember', () => '1.2.3');
   await assert.rejects(noAccount.connect({ sdp: 'o', instructions: '', items: [] }), /no account ID/);
   assert.equal(requests.length, 1);
 });
@@ -987,9 +987,9 @@ test('Said during a running task without a delegation: it still reaches the task
   assert.match(log.chat[1].messages.at(-1).content.findLast(part => part.type === 'text').text, /^\[The user added while you were working:[^\]]*\] Also, add a card to the right$/);
   assert.deepEqual(plugin.chatHistory.filter((e) => e.type === 'user').map((e) => e.text), ['Add a card to the left', 'Also, add a card to the right']);
 
-  // The voice delegates it after all, late: said done, not run again.
-  said(ch, 'Also, add a card to the right');
-  delegated(ch, 'del_2');
+  // The old terminal/delegation arrives late, without a fresh user utterance.
+  ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Also, add a card to the right' } });
+  delegated(ch, 'del_2', 'Also, add a card to the right');
   await until(() => spoken(ch).some(([id]) => id === 'del_2'));
   assert.equal(log.chat.length, 2);
   view.endVoice();
@@ -1426,7 +1426,8 @@ for (const lost of [false, true]) {
     assert.equal(plugin.chatHistory.filter(e => e.type === 'assistant' && e.text === 'Preserved running result.').length, 1);
     const seed = JSON.parse(log.live[1].body).session.initial_items;
     assert.ok(seed.some(e => e.content[0].text === 'Preserved running result.'));
-    assert.match(seed.at(-1).content[0].text, /tell me its latest result.*Do not run the task again/);
+    const announcement = channel().sent.filter(e => e.type === 'session.context.append' && e.channel === 'speakable').map(e => e.content[0].text).join('');
+    assert.match(announcement, /Preserved running result/);
     delegated(channel(), 'new-call', 'Read another note');
     await until(() => spoken(channel()).some(([, value]) => value === 'Next request done.'));
     assert.equal(log.chat.length, 2);
@@ -1743,4 +1744,120 @@ test('An older terminal prefix cannot clear a newer utterance with an added cons
   assert.equal(log.chat.length, 2);
   assert.match(userText(log.chat[1]), /Read the note after checking the title$/);
   view.endVoice();
+});
+
+for (const outcome of ['success-lost', 'success-connected', 'failed', 'stopped']) {
+  test(`A task completed before mobile return retains its undelivered ${outcome} result`, async () => {
+    api.Platform.isMobileApp = true;
+    const { view, chat, plugin } = await voiceSetup();
+    const log = serve();
+    plugin.chatHistory.push({ type: 'assistant', text: 'Old unrelated success.' });
+    await startListening(view, chat);
+    pc().connectionState = 'connected';
+    const controller = view.voice, first = pc();
+    let release, runs = 0;
+    controller.host.runTurn = async (_request, hooks) => {
+      runs++;
+      await new Promise(resolve => { release = resolve; });
+      if (outcome === 'failed') hooks.onError('Undelivered failure');
+      else if (outcome === 'stopped') hooks.onStopped();
+      else hooks.onText('Undelivered completed answer.');
+    };
+    delegated(channel(), 'task', 'Read the note');
+    await until(() => release);
+    appLifecycle.markHidden();
+    if (outcome !== 'success-connected') { first.connectionState = 'failed'; first.onconnectionstatechange(); }
+    release();
+    await until(() => !controller.task && !controller.voiceTurnRunning);
+    assert.equal(view.voice, controller);
+    appLifecycle.markVisible();
+    await until(() => rtc.pcs.length === 2 && chat.voice?.status === 'listening');
+    const prompt = JSON.parse(log.live[1].body).session.initial_items.at(-1).content[0].text;
+    assert.match(prompt, outcome === 'failed' ? /Undelivered failure/ : outcome === 'stopped' ? /task was stopped/ : /Undelivered completed answer/);
+    assert.doesNotMatch(prompt, /Old unrelated success/);
+    assert.equal(runs, 1, 'completed work is not rerun');
+    view.endVoice();
+  });
+}
+
+test('A fresh spoken repetition after a fallback result is an intentional new request', async () => {
+  const { view, chat, plugin } = await voiceSetup();
+  let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')) })
+    : response('anthropic', [text(i === 1 ? 'First fallback done.' : 'Repeated request done.')]) });
+  await startListening(view, chat);
+  const ch = channel(), full = 'Read the note after checking its title';
+  delegated(ch, 'first', 'Read the first note');
+  await until(() => release);
+  said(ch, full); answered(ch, 'Okay.');
+  await until(() => chat.queued.includes(full));
+  release();
+  await until(() => spoken(ch).some(([, value]) => value === 'First fallback done.'));
+  said(ch, full); delegated(ch, 'intentional-repeat', full);
+  await until(() => spoken(ch).some(([id, value]) => id === 'intentional-repeat' && value === 'Repeated request done.'));
+  assert.equal(log.chat.length, 3);
+  assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === full).length, 2);
+  view.endVoice();
+});
+
+for (const cached of [false, true]) {
+  test(`Voice starts before a stalled GitHub version refresh (${cached ? 'stale cache' : 'no cache'})`, async () => {
+    const now = Date.now;
+    Date.now = () => now() + (cached ? 20 : 10) * 60_000;
+    let releaseMetadata;
+    const calls = [];
+    try {
+      const { view, chat, plugin } = await voiceSetup();
+      const expected = cached ? '9.8.7' : api.getCodexClientVersion();
+      plugin.settings.modelCatalog = { entries: [], ...(cached ? { clientVersion: { value: expected, checkedAt: Date.now() - 2 * 86400_000 } } : {}) };
+      globalThis.__providerRequest = request => {
+        if (request.url.includes('api.github.com')) return new Promise(resolve => { releaseMetadata = () => resolve({ status: 200, json: { tag_name: 'rust-v9.8.8', prerelease: false, draft: false } }); });
+        calls.push(request);
+        return codexAnswer();
+      };
+      await startListening(view, chat);
+      assert.equal(typeof releaseMetadata, 'function');
+      assert.equal(calls.length, 1, 'call creation does not await the metadata response');
+      assert.equal(calls[0].headers.version, expected);
+      releaseMetadata(); releaseMetadata = undefined;
+      await until(() => plugin.settings.modelCatalog.clientVersion?.value === '9.8.8');
+      view.endVoice();
+    } finally { releaseMetadata?.(); Date.now = now; }
+  });
+}
+
+
+test('Replacement-call announcements use the session speakable stream with exact chunk separators', () => {
+  const result = 'Recovered result: ' + 'café 🌍 and a safe note.\n'.repeat(80);
+  const events = P.sessionSpeakEvents(result);
+  assert.ok(events.length > 1);
+  assert.ok(events.every(e => e.type === 'session.context.append' && e.channel === 'speakable' && !('delegation_item_id' in e)));
+  assert.equal(events.map(e => e.content[0].text).join(''), result);
+  assert.ok(events.every(e => new TextEncoder().encode(e.content[0].text).length <= 500));
+});
+
+
+test('A replacement waits for server readiness and announces its result only once', async () => {
+  const original = FakePeerConnection.prototype.setRemoteDescription;
+  FakePeerConnection.prototype.setRemoteDescription = async function () {
+    this.channel.readyState = 'open'; this.channel.onopen?.();
+  };
+  const { view, chat } = await voiceSetup();
+  serve();
+  try {
+    view.startVoice({ reconnecting: true, finishedTask: 'Recovered result SAFE.' });
+    await until(() => chat.voice?.status === 'listening');
+    const ch = channel();
+    assert.match(chat.voice.resumeNotice, /Previous task ended/);
+    assert.equal(ch.sent.filter(e => e.type === 'session.context.append').length, 0);
+    ch.receive({ type: 'session.started' });
+    assert.equal(ch.sent.filter(e => e.type === 'session.context.append').length, 1);
+    ch.receive({ type: 'session.started' });
+    assert.equal(ch.sent.filter(e => e.type === 'session.context.append').length, 1);
+    assert.match(ch.sent[0].content[0].text, /Recovered result SAFE/);
+    assert.match(chat.voice.resumeNotice, /Previous task ended/, 'a quiet service still leaves a visible outcome notice');
+    ch.receive({ type: 'input_transcript.added', item: { text: 'What happened?' } });
+    assert.equal(chat.voice.resumeNotice, undefined);
+  } finally { view.endVoice(); FakePeerConnection.prototype.setRemoteDescription = original; }
 });

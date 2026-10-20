@@ -150,6 +150,7 @@
 
   /** The voice bar's one line: the user's words while they speak, else the state. */
   function voiceLine(state: VoiceViewState): string {
+    if (state.status === "listening" && state.resumeNotice) return state.resumeNotice;
     if (state.you && (state.status === "listening" || state.status === "thinking")) return captionTail(state.you);
     if (state.status === "listening" && !state.micOn) return state.holdToTalk ? "Hold the microphone to talk" : "Microphone off";
     return VOICE_STATUS[state.status];
