@@ -58,13 +58,13 @@ async function chatSetup(provider) {
 }
 
 /** An Anthropic answer that compacted first: its compaction block (streamed in one delta), then the text. */
-function compactedAnthropicAnswer(summary, answer) {
+function compactedAnthropicAnswer(summary, answer, options = {}) {
   const events = streamEvents('anthropic', [text(answer)]);
   // The text block moves to index 1; the compaction block goes first.
   for (const event of events) if (typeof event.index === 'number') event.index += 1;
   events.splice(1, 0,
-    { type: 'content_block_start', index: 0, content_block: { type: 'compaction', content: '' } },
-    { type: 'content_block_delta', index: 0, delta: { type: 'compaction_delta', content: summary } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'compaction', content: '', ...options.start } },
+    ...(options.deltas ?? [{ type: 'compaction_delta', content: summary }]).map(delta => ({ type: 'content_block_delta', index: 0, delta })),
     { type: 'content_block_stop', index: 0 });
   return sse(events);
 }
@@ -433,4 +433,55 @@ test('A failure partway through a rolling summary retains the whole original his
   await assert.rejects(agent.compact(), /Summary rejected/);
   assert.equal(requests.length, 2);
   assert.deepEqual(agent.exportMessages(), original);
+});
+
+for (const mode of ['set', 'preserve-start', 'null']) test(`Anthropic compaction round-trips final encrypted metadata (${mode}) through restore and follow-up`, async () => {
+  const loopSettings = await withCatalog('anthropic', [{ value: 'claude-sonnet-4-6', label: 'Claude', contextWindow: 200000, compaction: true }]);
+  const encrypted = mode === 'null' ? null : mode === 'preserve-start' ? 'opaque-start' : 'opaque-final';
+  const finalDelta = { type: 'compaction_delta', content: 'Final complete summary', ...(mode === 'preserve-start' ? {} : { encrypted_content: encrypted }) };
+  const requests = transport((_body, index) => index === 0 ? compactedAnthropicAnswer(null, 'A1', {
+    start: { content: null, encrypted_content: 'opaque-start' },
+    deltas: [...mode === 'preserve-start' ? [] : [{ type: 'compaction_delta', content: 'Interim snapshot', encrypted_content: 'opaque-interim' }], finalDelta],
+  }) : sse(streamEvents('anthropic', [text('A2')])));
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  await agent.run('Q1', callbacks());
+  const saved = JSON.parse(JSON.stringify(agent.exportMessages()));
+  assert.equal(saved.at(-1).replay.items[0].encrypted_content, encrypted);
+  assert.equal(saved.at(-1).compaction.summary, 'Final complete summary');
+  agent.importMessages(saved);await agent.run('Q2', callbacks());
+  assert.deepEqual(requests[1].messages[0].content[0], { type: 'compaction', content: 'Final complete summary', encrypted_content: encrypted });
+});
+
+for (const mode of ['null', 'empty', 'failed-after-draft']) test(`An Anthropic ${mode} compaction is a no-op and cannot cut prior history`, async () => {
+  const loopSettings = await withCatalog('anthropic', [{ value: 'claude-sonnet-4-6', label: 'Claude', contextWindow: 200000, compaction: true }]);
+  const requests = transport((_body, index) => index === 1 ? compactedAnthropicAnswer(mode === 'empty' ? '' : null, 'A2', {
+    start: { content: null, encrypted_content: 'opaque-start' },
+    deltas: [...mode === 'failed-after-draft' ? [{ type: 'compaction_delta', content: 'Invalid draft', encrypted_content: 'draft' }] : [], { type: 'compaction_delta', content: mode === 'empty' ? '' : null, encrypted_content: null }],
+  }) : sse(streamEvents('anthropic', [text(`A${index}`)])));
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);let compacted = 0;
+  await agent.run('EARLIEST-FACT', callbacks(), null, [], 't1');
+  await agent.run('Q2', callbacks({ onCompacted: () => compacted++ }));
+  agent.importMessages(JSON.parse(JSON.stringify(agent.exportMessages())));
+  await agent.run('Q3', callbacks());
+  assert.equal(compacted, 0);
+  assert.equal(agent.exportMessages().some(m=>m.compaction), false);
+  assert.match(JSON.stringify(requests[2].messages), /EARLIEST-FACT/);
+  assert.equal(agent.canEditTurn('t1'), true);
+});
+
+test('A provider handoff ignores the previous provider token count after installing its portable summary', async () => {
+  const first = settings('openai');
+  transport((_body,index)=>compactedResponsesAnswer('openai', `A${index}`, index));
+  const agent = new api.AgentLoop(vaultApp().app, first);
+  await agent.run('EarliestOriginal', callbacks());
+  const next = await withCatalog('anthropic', [{ value: 'claude-sonnet-4-6', label: 'Claude', contextWindow: 100000, compaction: false }]);
+  transport(()=>sse(streamEvents('anthropic', [text('Primed')])));
+  await api.sendAnthropicMessage(next, [{role:'user',content:'Prime catalog'}], [], 'System');
+  const switched = new api.AgentLoop(vaultApp().app, next);switched.importMessages(agent.exportMessages());
+  const requests = transport((body,index)=>sse(streamEvents('anthropic', [text(isSummaryRequest(body)?'Portable handoff summary.':`Answer ${index}`)])));
+  const cb=callbacks();await switched.run('Q2',cb,null,[],'next',null,[],[],90000);
+  assert.deepEqual(cb.errors,[]);
+  assert.equal(requests.filter(isSummaryRequest).length,1);
+  assert.equal(requests.length,2);
+  assert.match(firstUserText(requests[1]),/Portable handoff summary/);
 });

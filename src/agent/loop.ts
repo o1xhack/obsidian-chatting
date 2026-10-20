@@ -298,6 +298,7 @@ export class AgentLoop {
    */
   private async prepareContext(settings: ChatSettings, contextTokens: number, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
     try {
+      let handedOff = false;
       const index = this.messages.map((message) => !!message.compaction).lastIndexOf(true);
       const marker = this.messages[index];
       const replay = marker?.replay;
@@ -312,11 +313,12 @@ export class AgentLoop {
         const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
         if (isStopped()) return;
         marker.compaction = { summary };
+        handedOff = true;
         debugLog(this.app, "COMPACTED", { reason: "provider switch" });
       }
       const option = catalogModel(settings.provider, settings.model);
       const threshold = compactThreshold(settings.provider, option, settings);
-      if (!isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
+      if (!handedOff && !isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
         const summary = await this.summarize(settings, this.messages, isStopped, callbacks.onUsage);
         if (isStopped()) return;
         this.messages = [summaryMessage(summary, summaryTurnId())];

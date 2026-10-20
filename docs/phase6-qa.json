@@ -13,8 +13,8 @@
     "chatStateVersion": 4
   },
   "automated": {
-    "tests": 700,
-    "passed": 700,
+    "tests": 707,
+    "passed": 707,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -98,7 +98,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "8dc1bb6c906d2c897c8dd375b2ea2e2b1b444a47fca4bf0b0ecc54a470c3b8d3",
+    "mainSha256": "5317e63d7479ecdab06631744543edf229fe5cdbc9ba122e5f7e637acf692c91",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -229,11 +229,29 @@
       "issue": "Retained raw history incorrectly suppressed folder instructions after opaque compaction.",
       "resolution": "Initial linked-file and selection rules use actual post-compaction request history rather than persistence retention history.",
       "regressions": 4
+    },
+    {
+      "priority": "P1",
+      "issue": "Anthropic compaction deltas discarded encrypted metadata.",
+      "resolution": "Replay complete final compaction snapshots, including nullable encrypted metadata, following the official SDK.",
+      "regressions": 3
+    },
+    {
+      "priority": "P1",
+      "issue": "Failed null-content compactions incorrectly marked a new context boundary.",
+      "resolution": "Only nonempty readable summaries mark successful Anthropic compaction; failed blocks retain the entire prior history.",
+      "regressions": 3
+    },
+    {
+      "priority": "P2",
+      "issue": "Provider handoff reused stale token counts to summarize twice.",
+      "resolution": "Skip threshold summarization after installing the portable handoff summary.",
+      "regressions": 1
     }
   ],
   "finalNativeUpgrade": {
     "version": "0.10.0",
-    "mainSha256": "8dc1bb6c906d2c897c8dd375b2ea2e2b1b444a47fca4bf0b0ecc54a470c3b8d3",
+    "mainSha256": "5317e63d7479ecdab06631744543edf229fe5cdbc9ba122e5f7e637acf692c91",
     "scope": "final native production Plugin class, real filesystem, isolated original 0.9.0 chat-state copy",
     "migratedChats": 9,
     "visibleAndApiHistoryIdentical": true,
@@ -245,7 +263,7 @@
     "passed": true,
     "testFactRetained": true,
     "reloadReply": true,
-    "mainSha256": "8dc1bb6c906d2c897c8dd375b2ea2e2b1b444a47fca4bf0b0ecc54a470c3b8d3"
+    "mainSha256": "5317e63d7479ecdab06631744543edf229fe5cdbc9ba122e5f7e637acf692c91"
   },
   "additionalRegression": "Deleting the active chat cannot steal focus after a newer navigation during a lazy fallback read."
 }

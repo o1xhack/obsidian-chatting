@@ -210,9 +210,8 @@ export async function sendAnthropicMessage(
 
 /** A `compaction` block in the answer: the context was summarized, readably. */
 function compactionOf(blocks: AnthropicContentBlock[]): Pick<UnifiedResponse, "compaction"> {
-  const block = [...blocks].reverse().find((item) => item.type === "compaction");
-  if (!block) return {};
-  return { compaction: typeof block.content === "string" && block.content ? { summary: block.content } : {} };
+  const block = [...blocks].reverse().find((item) => item.type === "compaction" && typeof item.content === "string" && item.content.length > 0);
+  return block ? { compaction: { summary: block.content as string } } : {};
 }
 
 /**
@@ -292,9 +291,13 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
             block.signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
           } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
             inputJson.set(index, (inputJson.get(index) ?? "") + delta.partial_json);
-          } else if (delta.type === "compaction_delta" && typeof delta.content === "string") {
-            // The whole summary of a compaction, in one delta.
-            block.content = (typeof block.content === "string" ? block.content : "") + delta.content;
+          } else if (delta.type === "compaction_delta" && block.type === "compaction") {
+            // As in Anthropic's SDK, these are whole final values, not text
+            // fragments. Null content is a failed compaction (a no-op).
+            if (typeof delta.content === "string" || delta.content === null) block.content = delta.content;
+            if ("encrypted_content" in delta && (typeof delta.encrypted_content === "string" || delta.encrypted_content === null)) {
+              block.encrypted_content = delta.encrypted_content;
+            }
           } else if (delta.type === "citations_delta" && delta.citation !== undefined) {
             block.citations = [...(Array.isArray(block.citations) ? block.citations as unknown[] : []), delta.citation];
           }
