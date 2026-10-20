@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 758,
-    "passed": 758,
+    "tests": 759,
+    "passed": 759,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -71,6 +71,9 @@
       "migration-chat-present-chat-mvh6xdi7-3cm6mg",
       "migration-visible-chat-mvh6xdi7-3cm6mg",
       "migration-api-chat-mvh6xdi7-3cm6mg",
+      "migration-chat-present-chat-mvh70s0c-w5j99w",
+      "migration-visible-chat-mvh70s0c-w5j99w",
+      "migration-api-chat-mvh70s0c-w5j99w",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -104,7 +107,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "627d14ab572901886c4dbfd03cbd487b523af00afc0ebdb651424d15a064ae0b",
+    "mainSha256": "a8fabe7913a28d7589ad1c3c1ca191f7b51e985c8db3ff31441e9d897d688560",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -129,10 +132,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "627d14ab572901886c4dbfd03cbd487b523af00afc0ebdb651424d15a064ae0b"
+    "mainSha256": "a8fabe7913a28d7589ad1c3c1ca191f7b51e985c8db3ff31441e9d897d688560"
   },
   "liveVoice": {
-    "mainSha256": "627d14ab572901886c4dbfd03cbd487b523af00afc0ebdb651424d15a064ae0b",
+    "mainSha256": "a8fabe7913a28d7589ad1c3c1ca191f7b51e985c8db3ff31441e9d897d688560",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -146,7 +149,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh70s0c-w5j99w",
+    "conversationId": "chat-mvh77wud-meq70z",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
@@ -159,7 +162,8 @@
   "limitations": [
     "The Mac exposed only Splashtop virtual audio inputs; physical microphone sampling did not complete.",
     "Physical iOS/Android and Bluetooth have not been accepted in this maintainer run.",
-    "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account."
+    "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account.",
+    "The available phone control service showed concurrent active operations; this task did not take over the phone."
   ],
   "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready."
 }

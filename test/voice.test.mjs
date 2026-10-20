@@ -207,6 +207,19 @@ test('The capability microphone probe times out and closes a stream granted afte
   } finally { navigator.mediaDevices.getUserMedia = original; }
 });
 
+test('A data-channel send failure during End still releases the microphone and peer', async () => {
+  const ended = [];
+  const session = new S.VoiceSession({ name: 'test', connect: async () => ({ sdp: 'answer' }) }, {
+    onMessage() {}, onEnded: e => ended.push(e), onAudioBlocked() {}, log() {},
+  });
+  await session.start('test', []);
+  channel().send = () => { throw Error('Channel closed during send'); };
+  await session.end();
+  assert.equal(rtc.mic.track.stopped, true);
+  assert.equal(pc().closed, true);
+  assert.equal(ended.length, 1);
+});
+
 test('Hold mode is muted before SDP exchange, including reconnects', async () => {
   const { view, chat } = await voiceSetup({ micMode: 'hold' });
   serve({ live: () => {
