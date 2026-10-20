@@ -63,7 +63,7 @@ Skills use the Claude Code / Codex folder format. Their instructions and support
 
 ### Talk to it
 
-Press the voice button and say what you want: the assistant answers aloud, you can interrupt it or add to a running task, and the work is done by the chat model you selected, with its steps in the chat. Voice uses your ChatGPT account sign-in (Codex's voice service, included in the plan). See [Voice](docs/user-guide.md#-voice).
+Press the voice button and say what you want: the assistant answers aloud, you can interrupt it or add to a running task, and the work is done by the chat model you selected, with its steps in the chat. Voice uses your ChatGPT account sign-in (Codex's voice service; availability depends on the account). See [Voice](docs/user-guide.md#-voice).
 
 ### Review changes and undo vault work
 

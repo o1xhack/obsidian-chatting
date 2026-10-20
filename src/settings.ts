@@ -468,7 +468,7 @@ export class ChatSettingTab extends PluginSettingTab {
   private renderVoiceAccount(setting: Setting): void {
     setting.setName("ChatGPT account for voice");
     const credential = this.plugin.chatgptOAuth.getCredential();
-    const what = "Voice talks through Codex's voice service, included in the ChatGPT plan; the work runs on the chat model you selected.";
+    const what = "Voice uses your ChatGPT sign-in; availability and limits depend on the account. The work runs on the chat model you selected.";
     if (credential) {
       setting.setDesc(`${what} Connected (account ${credential.accountId ? maskAccountId(credential.accountId) : "without an ID"}), the same sign-in as the ChatGPT provider.`);
       return;

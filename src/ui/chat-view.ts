@@ -225,6 +225,7 @@ interface RunningTurn {
   /** Puts the unsent message back in the input, until the turn has started. */
   /** Puts the unsent message back in the input, with `queued` texts typed meanwhile, until the turn has started (an edit: until answered). */
   restoreDraft?: (queued: string[]) => void;
+  onStopped?: () => void;
 }
 
 /**
@@ -618,7 +619,9 @@ export class ObsidianChatView extends ItemView {
 
   /** Show or hide the voice button (signed in to ChatGPT or not). */
   updateVoiceAvailable(): void {
-    this.chatContainer?.setVoiceAvailable(this.plugin.voiceRoute() !== null);
+    const available = this.plugin.voiceRoute() !== null;
+    if (!available) this.endVoice();
+    this.chatContainer?.setVoiceAvailable(available);
   }
 
   /** Start a voice conversation in the current conversation. */
@@ -633,12 +636,12 @@ export class ObsidianChatView extends ItemView {
     const releaseScreen = screenAwake.hold();
     this.releaseVoiceScreen = releaseScreen;
     const controller: VoiceController = new VoiceController({
-      runTurn: (text, hooks, context) => this.handleUserMessage(text, null, [], [], undefined, undefined, hooks, context),
+      runTurn: (text, hooks, context) => this.handleUserMessage(text, this.chatContainer?.getSelection() ?? null, [], [], undefined, undefined, hooks, context),
       // A spoken request while the voice turn runs is added to it.
       steerTurn: (text, context) => this.running && this.steerByVoice(text, context),
       takeSteered: () => this.takeStashed(),
       stopTurn: () => this.handleStop(),
-      turnRunning: () => this.running,
+      turnRunning: () => !!this.turn,
       history: () => this.plugin.chatHistory,
       openFile: () => this.plugin.app.workspace.getActiveFile(),
       showError: (message) => {
@@ -664,7 +667,7 @@ export class ObsidianChatView extends ItemView {
   /**
    * Mobile: in the background the microphone records only silence and
    * the call may drop. Leaving turns the microphone off and ends the call
-   * after `endAfter` (nobody hears it, and it is billed by the minute).
+   * after `endAfter` while nobody is listening.
    * Back sooner, a working call gets its microphone back; one that
    * dropped, or after more than `reconnectAfter`, is replaced. Desktop: a
    * minimised window keeps the call. Returns the unsubscribe.
@@ -894,8 +897,13 @@ export class ObsidianChatView extends ItemView {
   ): Promise<void> {
     // An undo is running: the message waits in the input.
     if (this.undoing || this.compactions.has(this.plugin.activeConversationId)) {
-      this.chatContainer?.restoreDraft?.(text, selection, images, files);
-      new Notice("Please wait for the current response to complete.");
+      const error = "Please wait for the current response to complete.";
+      if (voice) {
+        voice.onError(error);
+        this.chatContainer?.addError(error);
+        this.plugin.chatHistory.push({ type: "error", text: error });
+      } else this.chatContainer?.restoreDraft?.(text, selection, images, files);
+      new Notice(error);
       return;
     }
     // While a turn runs, a typed message is added to it (steering).
@@ -908,6 +916,7 @@ export class ObsidianChatView extends ItemView {
     if (!chat) {
       // No UI (mounting it failed): nothing to show the turn in.
       new Notice("The chat panel couldn't be shown, so the message wasn't sent.");
+      voice?.onError("The chat panel couldn't be shown, so the message wasn't sent.");
       return;
     }
     const conversation = this.plugin.activeConversation;
@@ -931,6 +940,7 @@ export class ObsidianChatView extends ItemView {
         : linked;
       const budgetError = attachmentBudgetError([...images, ...mentioned?.images ?? []], [...files, ...mentioned?.files ?? []]);
       if (budgetError) {
+        voice?.onError(budgetError);
         chat.addError(budgetError);
         conversation.chatHistory.push({ type: "error", text: budgetError });
         return;
@@ -997,6 +1007,7 @@ export class ObsidianChatView extends ItemView {
       // The screen stays on while the answer is generated.
       releaseScreen: screenAwake.hold(),
       started: !draft, rollback: draft?.rollback,
+      onStopped: voice?.onStopped,
     };
     this.turns.set(conversation.id, turn);
     chat.updateConversations();
@@ -1005,6 +1016,7 @@ export class ObsidianChatView extends ItemView {
     const isCurrent = () => this.turns.get(conversation.id) === turn;
     const ui = () => this.shownChat(turn);
     const history = turn.history;
+    const visibleStart = history.length;
     // Saved with the chat when the app goes to the background; still there
     // at the next start, the turn was cut off. A new message only once it
     // is sent (`begin`).
@@ -1022,7 +1034,7 @@ export class ObsidianChatView extends ItemView {
     if (draft) {
       turn.restoreDraft = (queued) => {
         restoreNotes();
-        chat.restoreDraft?.([draft.text, ...queued].join("\n\n"), draft.selection, draft.images, draft.files);
+        if (!voice) chat.restoreDraft?.([draft.text, ...queued].join("\n\n"), draft.selection, draft.images, draft.files);
       };
     }
     const begin = () => {
@@ -1050,11 +1062,11 @@ export class ObsidianChatView extends ItemView {
           let pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);
           // What was said before a voice request (rows without a turn ID right before it) goes with it.
           const spoken = pending;
-          while (pending > 0 && history[pending - 1].type === "user" && !history[pending - 1].turnId) pending--;
+          while (voice && pending > visibleStart && history[pending - 1].type === "user" && !history[pending - 1].turnId) pending--;
           if (pending !== -1) history.splice(pending);
           const shown = ui();
           if (shown) {
-            if (pending !== spoken) this.renderHistory();
+            if (pending !== spoken) this.renderHistory(true);
             else shown.cutMessages(turnId);
             this.plugin.touchConversation();
             shown.setTitle(conversation.title);
@@ -1176,6 +1188,7 @@ export class ObsidianChatView extends ItemView {
       if (!isCurrent()) return;
       if (turn.rollback) turn.started = false;
       const msg = e instanceof Error ? e.message : String(e);
+      voice?.onError(msg);
       ui()?.addError(`Unexpected error: ${msg}`);
       history.push({ type: "error", text: `Unexpected error: ${msg}` });
     } finally {
@@ -1189,7 +1202,7 @@ export class ObsidianChatView extends ItemView {
         // Rollback renders history, which clears attachment chips. Restore after it.
         // Typed meanwhile, added to a message that was never sent: back in the input with it.
         const unsent = [draft.text, ...this.takeLeftovers(turn)].join("\n\n");
-        if (ui()) chat.restoreDraft?.(unsent, draft.selection, draft.images, draft.files);
+        if (ui() && !voice) chat.restoreDraft?.(unsent, draft.selection, draft.images, draft.files);
         else conversation.chatHistory.push({ type: "error", text: `This message wasn't sent: "${unsent}"` });
       }
       turn.releaseScreen();
@@ -1423,6 +1436,7 @@ export class ObsidianChatView extends ItemView {
    * the returned function instead (after the next conversation rendered).
    */
   private stopTurn(turn: RunningTurn, deferRestore = false): (() => void) | undefined {
+    turn.onStopped?.();
     const restoreDraft = turn.restoreDraft;
     const rollback = turn.rollback;
     turn.restoreDraft = undefined;

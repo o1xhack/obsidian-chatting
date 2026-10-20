@@ -60,6 +60,8 @@ export class VoiceSession {
   private mic?: MediaStream;
   private audio?: HTMLAudioElement;
   private ended = false;
+  private closing = false;
+  private micEnabled = false;
   /** `onEnded` was called, or `start()` failed (its caller got the error). */
   private endNotified = false;
   private started = false;
@@ -90,6 +92,7 @@ export class VoiceSession {
       });
       step("microphoneMs");
       this.checkEnded();
+      this.setMicEnabled(this.micEnabled);
 
       const pc = this.pc = new RTCPeerConnection();
       pc.ontrack = (event) => this.playRemote(event.streams[0] ?? new MediaStream([event.track]));
@@ -101,6 +104,7 @@ export class VoiceSession {
 
       const channel = this.channel = pc.createDataChannel("oai-events");
       channel.onopen = () => {
+        if (this.ended || this.closing) return;
         this.handlers.log("VOICE_CHANNEL", { state: "open" });
         this.quietTimer = window.setTimeout(() => {
           if (!this.messageCount) this.handlers.log("VOICE_NO_EVENTS", { route: this.route.name, afterMs: SESSION_TIMING.quietLog });
@@ -153,7 +157,8 @@ export class VoiceSession {
 
   /** Microphone on or off (mute, hold to talk): the track sends silence when off. */
   setMicEnabled(enabled: boolean): void {
-    for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = enabled;
+    this.micEnabled = enabled && !this.ended && !this.closing;
+    for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = this.micEnabled;
   }
 
   /** Start the remote audio after a tap, when autoplay was blocked. */
@@ -166,9 +171,11 @@ export class VoiceSession {
    * `session.closed`, then release the connection and the microphone.
    */
   async end(): Promise<void> {
-    if (this.ended) return;
+    if (this.ended || this.closing) return;
+    this.closing = true;
     // Nothing more is heard once the user ended the call, also while it closes.
     this.setMicEnabled(false);
+    this.audio?.pause();
     if (this.started && this.channel?.readyState === "open") {
       let timer = 0;
       const closed = new Promise<void>((resolve) => {
@@ -183,6 +190,7 @@ export class VoiceSession {
   }
 
   private receive(data: unknown): void {
+    if (this.ended) return;
     this.messageCount++;
     let parsed: unknown;
     try {
@@ -195,7 +203,11 @@ export class VoiceSession {
     const event = parsed as Record<string, unknown>;
     // Every event as it arrives (transcripts, delegations, errors); no audio comes this way.
     this.handlers.log("VOICE_EVENT", event);
-    if (event.type === "session.closed") this.onClosed?.();
+    if (event.type === "session.closed") {
+      this.onClosed?.();
+      if (this.closing) this.handlers.onMessage(event);
+    }
+    if (this.closing) return;
     this.handlers.onMessage(event);
     if (event.type === "session.closed") this.finish();
   }
@@ -219,6 +231,7 @@ export class VoiceSession {
   }
 
   private playRemote(stream: MediaStream): void {
+    if (this.ended || this.closing) return;
     const audio = this.audio ??= createEl("audio");
     audio.autoplay = true;
     audio.srcObject = stream;
@@ -226,7 +239,7 @@ export class VoiceSession {
   }
 
   private checkEnded(): void {
-    if (this.ended) throw new VoiceCancelled();
+    if (this.ended || this.closing) throw new VoiceCancelled();
   }
 
   /** Release everything; tell the handlers once. */

@@ -38,6 +38,7 @@ export interface VoiceTurnHooks {
   /** Answer text the loop delivered (text before tool calls, then the final answer). */
   onText(text: string): void;
   onError(message: string): void;
+  onStopped?(): void;
   /** The conversation still runs: it takes the turn's leftovers itself (else the view runs them). */
   active(): boolean;
 }
@@ -129,6 +130,8 @@ export class VoiceController {
   private voiceTurnRunning = false;
   /** The newest delegation in the running voice turn: progress and the answer go to it. */
   private answerTo = "";
+  /** A delegation ID can never dispatch vault work twice in this call. */
+  private readonly delegations = new Set<string>();
   private speakingTimer?: number;
   /** Obsidian is in the background (mobile): microphone off, a lost call not reported. */
   private background = false;
@@ -162,6 +165,7 @@ export class VoiceController {
   async start(): Promise<void> {
     this.render();
     try {
+      this.session.setMicEnabled(this.state.micOn && !this.background);
       await this.session.start(`${VOICE_INSTRUCTIONS}\n\n${openFileNote(this.host.openFile())}`, seedItems(this.host.history()));
       if (this.ended) return;
       this.session.setMicEnabled(this.state.micOn && !this.background);
@@ -257,7 +261,17 @@ export class VoiceController {
         this.finishTurn(event.role, event.text);
         break;
       case "delegation":
-        void this.delegate(event.id, event.text);
+        if (this.delegations.has(event.id)) break;
+        // End rather than forget old IDs and risk repeating an external action.
+        if (this.delegations.size >= 1024) {
+          this.host.showError("Please restart voice to continue this long call.");
+          void this.end();
+          break;
+        }
+        this.delegations.add(event.id);
+        void this.delegate(event.id, event.text).catch((error: unknown) => {
+          if (!this.ended) this.host.showError(error instanceof Error ? error.message : String(error));
+        });
         break;
       case "error":
         this.host.showError(`Voice: ${event.message}`);
@@ -433,7 +447,7 @@ export class VoiceController {
     // apps: the agent takes it in after its current step, nothing is
     // stopped, and the answer goes to this newest delegation.
     // Already passed to the task as the user said it (`queueSteer`): not twice.
-    if (this.steeredSpoken.some((said) => sameWords(said, request))) {
+    if (this.steeredSpoken.some((said) => normalizedWords(said) === normalizedWords(request))) {
       if (this.voiceTurnRunning) {
         this.answerTo = id;
         this.sendAll(progressEvents(id, ADDED_TO_TASK));
@@ -459,6 +473,7 @@ export class VoiceController {
     this.answerTo = id;
     let answer = "";
     let failed = "";
+    let stopped = false;
     const progress = (value: string) => {
       if (!this.ended) this.sendAll(progressEvents(this.answerTo, value));
     };
@@ -473,22 +488,31 @@ export class VoiceController {
         },
         onText: (value) => { answer = value; },
         onError: (message) => { failed = message; },
+        onStopped: () => { stopped = true; },
         active: () => !this.ended,
       }, context);
+    } catch (error) {
+      failed = error instanceof Error ? error.message : String(error);
+      if (!this.ended) this.host.showError(failed);
     } finally {
       this.voiceTurnRunning = false;
     }
     // Ended meanwhile: the view ran what was added (as typed turns).
     if (this.ended) return;
+    if (stopped) {
+      this.sendAll(speakEvents(this.answerTo, "The task was stopped. Any changes already made are shown in the chat."));
+      this.update({ status: "listening" });
+      return;
+    }
     // Added after the turn's last step: it needs a turn of its own.
     // Words still waiting to be added when the task ended run as the next turn.
     const pending = this.takePendingSteer();
     const later = [...this.host.takeSteered(), ...(pending ? [pending] : [])];
     // Said first, so a request the user makes while the result is spoken
     // isn't taken for part of this task (the voice then claimed it was "on the way").
-    if (!later.length) this.sendAll(progressEvents(this.answerTo, TASK_DONE));
-    if (answer) this.sendAll(speakEvents(this.answerTo, spokenAnswer(answer)));
-    else if (failed) this.sendAll(speakEvents(this.answerTo, "That didn't work; the error is shown in the chat."));
+    if (!later.length) this.sendAll(progressEvents(this.answerTo, failed ? "The request failed. Do not claim the requested work succeeded." : TASK_DONE));
+    if (failed) this.sendAll(speakEvents(this.answerTo, "That didn't work; the error is shown in the chat."));
+    else if (answer) this.sendAll(speakEvents(this.answerTo, spokenAnswer(answer)));
     if (later.length) {
       await this.runVoiceTurn(this.answerTo, later.join("\n"));
       return;
@@ -518,6 +542,10 @@ export class VoiceController {
   private render(): void {
     if (!this.ended) this.host.render({ ...this.state });
   }
+}
+
+function normalizedWords(text: string): string {
+  return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(" ");
 }
 
 /** A short interjection of the voice while the user speaks ("Okay,", "Mhm."), not an answer or a question. */

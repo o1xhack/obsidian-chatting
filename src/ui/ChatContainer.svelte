@@ -1709,6 +1709,8 @@
           onpointerdown={talkStart}
           onpointerup={() => onVoice("talk-end")}
           onpointercancel={() => onVoice("talk-end")}
+          onlostpointercapture={() => onVoice("talk-end")}
+          onblur={() => onVoice("talk-end")}
           onkeydown={(event) => talkKey(event, true)}
           onkeyup={(event) => talkKey(event, false)}
           oncontextmenu={(event) => event.preventDefault()}

@@ -882,6 +882,9 @@ ${mentioned.text}` : buildContextMessage(context);
         debugLog(this.app, "TOOL_CALL", { name: tc.name, input: tc.input, result: result.result, isError: result.isError });
         const { instructionPaths: _paths, ...visibleResult } = result;
         callbacks.onToolResult(tc.name!, displayResult(visibleResult));
+        // The spoken reply arrives in the next turn. Later calls in this
+        // batch keep their cancellation results and cannot act before it.
+        if (voiceQuestion) break;
       }
 
       if (isStopped()) return;

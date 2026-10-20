@@ -160,6 +160,128 @@ const spoken = (ch) => appended(ch, 'speakable');
 /** Progress notes for the voice model, not to be said. */
 const notes = (ch) => appended(ch, 'commentary');
 
+test('Hold mode is muted before SDP exchange, including reconnects', async () => {
+  const { view, chat } = await voiceSetup({ micMode: 'hold' });
+  serve({ live: () => {
+    assert.equal(rtc.mic.track.enabled, false, 'no microphone audio during negotiation');
+    return codexAnswer();
+  } });
+  await startListening(view, chat);
+  view.endVoice();
+});
+
+test('Ending a session immediately ignores queued delegations and cannot unmute or play late audio', async () => {
+  const events = [];
+  const session = new S.VoiceSession({ name: 'test', connect: async () => codexAnswer() && ({ sdp: 'answer' }) }, {
+    onMessage: value => events.push(value), onEnded() {}, onAudioBlocked() {}, log() {},
+  });
+  session.setMicEnabled(true);
+  await session.start('Test', []);
+  const ch = channel();
+  const ending = session.end();
+  session.setMicEnabled(true);
+  delegated(ch, 'late', 'Create a note');
+  assert.equal(rtc.mic.track.enabled, false);
+  assert.deepEqual(events, []);
+  ch.receive({ type: 'session.closed' });
+  await ending;
+  assert.equal(pc().closed, true);
+});
+
+test('A repeated delegation ID never dispatches the same request twice after completion', async () => {
+  const { view, chat } = await voiceSetup();
+  const log = serve();
+  await startListening(view, chat);
+  const ch = channel();
+  delegated(ch, 'unique', 'Create a note');
+  await until(() => spoken(ch).length > 0);
+  delegated(ch, 'unique', 'Create a note');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(log.chat.length, 1);
+  view.endVoice();
+});
+
+test('Voice refused during compaction reports failure and preserves the unsent typed composer', async () => {
+  const { view, plugin, chat } = await voiceSetup();
+  const log = serve();
+  const restored = [];
+  chat.restoreDraft = (...args) => restored.push(args);
+  await startListening(view, chat);
+  view.compactions.set(plugin.activeConversationId, { agent: plugin.agent });
+  const ch = channel();
+  delegated(ch, 'busy', 'Edit my note');
+  await until(() => spoken(ch).length > 0);
+  assert.equal(log.chat.length, 0);
+  assert.equal(restored.length, 0);
+  assert.match(spoken(ch).map(([, s]) => s).join(''), /didn't work/);
+  assert.ok(!notes(ch).some(([, s]) => s === C.TASK_DONE));
+  assert.ok(chat.shown.some(row => row.type === 'error'));
+  view.compactions.clear();
+  view.endVoice();
+});
+
+test('Disconnecting ChatGPT ends an active call and releases the microphone', async () => {
+  const { view, plugin, chat } = await voiceSetup();
+  serve();
+  await startListening(view, chat);
+  plugin.chatgptOAuth.clearCredential();
+  view.updateVoiceAvailable();
+  assert.equal(chat.voice, null);
+  assert.equal(rtc.mic.track.enabled, false);
+  assert.equal(chat.voiceAvailable, false);
+});
+
+test('A voice clarification prevents later writes in the same tool batch', async () => {
+  const { view, chat, app } = await voiceSetup();
+  let creations = 0;
+  app.vault.create = async () => { creations++; };
+  serve({ chat: () => response('anthropic', [
+    call('q', 'ask_user', { question: 'Which folder?' }),
+    call('w', 'create_file', { path: 'Wrong.md', content: 'premature' }),
+  ], 'tool_use') });
+  await startListening(view, chat);
+  delegated(channel(), 'question', 'Create a note');
+  await until(() => spoken(channel()).length > 0);
+  assert.equal(creations, 0);
+  assert.match(spoken(channel())[0][1], /Which folder/);
+  view.endVoice();
+});
+
+test('Voice work enforces the selection displayed in the composer', async () => {
+  const { view, chat, app, plugin } = await voiceSetup();
+  const note = 'before\nselected\nafter';
+  chat.getSelection = () => ({ filePath: 'Untitled.md', text: 'selected', from: 7, sourceText: note, occurrence: 0 });
+  let writes = 0;
+  app.vault.cachedRead = async () => note;
+  app.vault.process = async () => { writes++; };
+  const log = serve({ chat: (body, i) => i === 0 ? response('anthropic', [
+    call('edit', 'edit_document', { path: 'Untitled.md', operation: 'replace', content: 'overwrite all' }),
+  ], 'tool_use') : response('anthropic', [text('The edit was refused.')]) });
+  await startListening(view, chat);
+  delegated(channel(), 'scoped', 'Change this');
+  await until(() => spoken(channel()).length > 0);
+  assert.equal(writes, 0);
+  assert.match(JSON.stringify(log.chat[1]), /selection/i);
+  assert.equal(plugin.chatHistory.find(row => row.turnId)?.selection.filePath, 'Untitled.md');
+  view.endVoice();
+});
+
+test('Stopping delegated work reports stopped rather than reading an earlier intermediate answer', async () => {
+  const { view, chat } = await voiceSetup();
+  let release;
+  const log = serve({ chat: () => new Promise(resolve => { release = () => resolve(response('anthropic', [text('Done')])); }) });
+  await startListening(view, chat);
+  const ch = channel();
+  delegated(ch, 'stop', 'Read the note');
+  await until(() => log.chat.length > 0);
+  view.handleStop();
+  release();
+  await until(() => spoken(ch).length > 0);
+  assert.match(spoken(ch)[0][1], /task was stopped/);
+  assert.ok(!notes(ch).some(([, s]) => s === C.TASK_DONE));
+  view.endVoice();
+});
+
 // ─── Session creation ───────────────────────────────────────────────────────
 
 test('A call with the instructions, voice, client delegation, recent chat and the offer; the answer SDP is applied', async () => {

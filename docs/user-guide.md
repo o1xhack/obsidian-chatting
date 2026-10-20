@@ -28,7 +28,7 @@ The agent reads before it edits, prefers small surgical changes over rewrites, a
 
 ## 🎤 Voice
 
-Talk with the assistant in the current chat and hear the answer. Voice needs the **ChatGPT account** sign-in (the same as the ChatGPT provider; connect it there or under **Settings → Chatting with AI → Voice**), whichever provider you chat with. It uses Codex's voice service, the one OpenAI's Codex app talks through, so it is included in your ChatGPT plan; the chat model's answers are billed as usual. Like the ChatGPT provider's Codex route, OpenAI doesn't document it for other apps, so it may change or stop working.
+Talk with the assistant in the current chat and hear the answer. Voice needs the **ChatGPT account** sign-in (the same as the ChatGPT provider; connect it there or under **Settings → Chatting with AI → Voice**), whichever provider you chat with. It uses Codex's voice service with that account; access and limits depend on the account. The chat model uses your selected provider as usual. Like the ChatGPT provider's Codex route, OpenAI doesn't document it for other apps, so it may change or stop working.
 
 - **Start:** the voice button (a circle with sound-wave bars) sits where Send is. It shows while the input is empty, nothing is attached, no answer is running and the AI isn't waiting for your answer to a question.
 - **During a call** the voice bar replaces the input row: the microphone button (tap to mute) or, with *Hold to talk*, the button you hold while speaking; a line showing your current words, or else whether the assistant is listening, working or speaking; and a red **✕** to end.
@@ -37,7 +37,7 @@ Talk with the assistant in the current chat and hear the answer. Voice needs the
 - **Ending:** the **✕**, switching or starting a chat, Clear, or closing the chat panel. On a phone the microphone goes off while Obsidian is in the background; the call reconnects when you come back and ends after a minute away.
 - **Settings:** **ChatGPT account for voice** (connected or not), **Voice** (how it sounds) and **Microphone** (*Hands-free* or *Hold to talk*).
 
-Voice is tested on desktop and Android (including a Bluetooth headset); iOS isn't verified yet. The phone asks for microphone access the first time. **Check device capabilities (voice, streaming)** in the command palette shows what the device supports (microphone, live audio, streaming) in a window you can copy; with your keys it sends short test requests (which cost a little), and with the ChatGPT account it starts a voice call for a moment.
+The contributor reports desktop and Android testing, including a Bluetooth headset. Maintainer verification for this candidate is recorded in [the voice review](phase7-review.md); physical iOS support has not been verified. The phone asks for microphone access the first time. **Check device capabilities (voice, streaming)** in the command palette shows what the device supports (microphone, live audio, streaming) in a window you can copy; with your keys it sends short test requests (which cost a little), and with the ChatGPT account it starts a voice call for a moment.
 
 ## 🎯 Selection scope
 
