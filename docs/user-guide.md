@@ -41,7 +41,7 @@ Voice is tested on desktop and Android (including a Bluetooth headset); iOS isn'
 
 ## 🎯 Selection scope
 
-Highlight text in any note, right-click, choose **Send selection to chat**. The selection becomes a pill above the input and the assistant edits only inside the selected range — leaving the rest of the document byte-identical.
+Highlight text in any note, right-click, choose **Send selection to chat**. The selection becomes a pill above the input, and the tools restrict direct edits of that note to the selected range.
 
 ```
 [ pill: "...the introduction was a bit dry, and..."  ✕ ]
@@ -64,6 +64,28 @@ Click the pencil under a message you sent to change it: the chat continues from 
 ## 💬 Chats
 
 The chat header shows the current chat's title, taken from your first message. **New chat** (the pen icon) starts a new one; so do the *New chat* command and the ribbon icon's right-click menu, and *Chat about this note* and *Send selection to chat* always start a new chat. The clock icon opens your chats, most recent first: open one to go on with it, rename it with the pencil, or delete it (you confirm first). **Clear** (the trash icon) empties only the current chat. The chat you had open is open again after a restart. An answer keeps running when you start a new chat or switch to another: the list shows *Answering…*, a notice says when it is ready or has a question for you, and going back shows it as far as it got. A message still reading its linked files, or an edit not yet answered, goes back to the input instead. Deleting a chat stops its answer. Each chat sends only its own messages to the provider.
+
+### Read and steer an answer as it runs
+
+Answers stream where the provider and connection allow it; the buffered fallback delivers them together. Stop keeps the text already shown. The input remains usable: send more text to add it at the next step, or to start the next turn if the current answer is finishing. It appears as *Queued* until taken in. New attachments and a selection wait for the next turn. Stop or Clear drops queued text; switching chats keeps it with its running task.
+
+### Return to interrupted work
+
+Switching to another chat does not stop an already-sent answer. Switching apps or locking the phone can interrupt the network: eligible transient failures can retry when Obsidian returns, with at most two recovery attempts per turn. This does not guarantee continued execution while a phone suspends the app.
+
+After an app restart, **Continue** can finish an eligible saved pending turn, using the original user turn and the completed tool results without rerunning those tools. Selection fingerprints are still checked, so a changed note can prevent scoped edits. Continue is an explicit action, not an automatic restart.
+
+Remote tools need a different recovery rule. If an MCP-capable request loses its response, it is not automatically sent again through a different transport: external operations may already have happened. After restart, an uncertain remote request shows a warning instead of Continue. Inspect the remote service before deciding whether to repeat an operation. Vault Undo does not reverse remote MCP changes.
+
+## 🧠 Long conversations and usage
+
+The context ring in the chat header shows the last request's context use against the selected model's available window, when that information is known. Open it to see the chat's token totals, estimated API cost when model prices are available, and **Compact now**. ChatGPT account chats show a link to plan usage rather than a subscription-cost estimate. Estimates use recorded model token usage and available prices; they are not a final bill or a total of external tool charges.
+
+**Settings → Compaction point** controls when earlier model context is summarized. The default follows the catalog where provided, otherwise a model-window-based threshold; you can adjust the share or token count. If the provider cannot compact that conversation, the plugin can summarize with the same model. **Compact now** runs this manually. Summarization itself uses model tokens and may lose detail; it does not expand the model's context window.
+
+The visible conversation and the model's context are separate. Earlier messages stay readable in the saved chat, loaded as you scroll up, while future requests use the summary and recent context. Messages covered by the last compaction cannot be edited or regenerated; a summary is not a verbatim memory of every attachment or detail. Full visible history also does not mean every old attachment payload remains available (see the storage FAQ).
+
+Chats are stored in individual files and loaded when opened. **Saved chats** in settings shows their total size; chats over 5 MiB show their size in the list. Upgrading the old single-file history creates the per-chat files only after preserving a backup; a failed backup prevents migration and saving for that session. For file names, interrupted-save recovery and downgrade behavior, see [Where is chat history stored?](#-faq).
 
 ## 👀 Follow the AI's edits
 
@@ -91,7 +113,11 @@ Every chat knows the names and descriptions of your skills; when a task matches 
 
 With an Anthropic or OpenAI API key, the assistant can use the tools of remote MCP servers (Linear, GitHub and others that offer one). Add a server under **Settings → MCP servers**: a name (letters, digits, `-`, `_`), its public https address and, if it needs one, a token. The provider connects to the servers that are on and calls their tools as the assistant decides; each call shows as a step ("Used create_issue on linear").
 
-The tools run without asking, so add only servers you trust. Tokens are kept in SecretStorage, never in `data.json`, and go to the provider with each request. Local servers and the ChatGPT account aren't supported: the provider has to reach the server, and the ChatGPT account's route offers no MCP. When you switch a server off or remove it, its earlier calls are no longer sent back to the provider.
+New servers start off. Configure the address and optional token, then switch on only servers you trust: their tools run without asking for each call. The assistant can send context from your conversation to those tools. Tokens are kept in SecretStorage on this device, never in `data.json`, and go to the provider with each request. Use the token field for credentials, not the address. Local servers aren't supported because the provider has to reach them. This plugin's ChatGPT account integration does not implement remote MCP yet; this does not mean subscription accounts cannot use MCP in other clients.
+
+Switching a server off, removing it, or changing its address or authorization removes its native calls and cached tool lists from subsequent requests. Your conversation text remains. A request already sent to the provider may finish its remote tools even after Stop; the chat's Undo covers vault changes only, not changes made by MCP tools. If an answer is cut short, check reported remote results before retrying a write.
+
+Remote tool text shares the chat's existing result-size budget. Non-text MCP results are omitted from saved/replayed history with a note; this release does not add MCP image or file attachment support.
 
 ## 🛠️ 22 vault-native tools
 
@@ -282,4 +308,3 @@ Mind one risk: `read_web_page` loads pages from your device, so it can also reac
 Yes. Word, Excel and PowerPoint files are ZIP archives, and the plugin unpacks them on your device to read their text (for Anthropic). A file is unpacked to at most 64 MB: a crafted file that unpacks to more (a "zip bomb") is attached without its text instead of freezing Obsidian. Excel text extraction also validates cell references and limits sparse rows and repeated shared strings; a workbook exceeding these bounds is attached without locally extracted text.
 
 </details>
-

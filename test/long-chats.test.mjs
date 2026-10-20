@@ -272,11 +272,34 @@ test('A long chat shows its last 20 turns; scrolled near the top, the 20 before 
 });
 
 test('Where a page of turns starts', () => {
-  const entries = (...types) => types.map(type => ({ type }));
+  const entries = (...types) => types.map((type, index) => ({ type, ...(type === "user" ? { turnId: `t${index}` } : {}) }));
   const history = entries('error', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant');
   assert.equal(api.pageStart(history, history.length, 2), 3);
   assert.equal(api.pageStart(history, 3, 2), 0);
   assert.equal(api.pageStart(history, history.length, 3), 0);
   assert.equal(api.pageStart([], 0), 0);
   assert.equal(api.PAGE_TURNS, 20);
+});
+
+test('Paging counts complete turn starts rather than ask_user answers or steering rows', async () => {
+  const history = Array.from({ length: 60 }, (_, i) => [
+    { type: 'user', text: `Original question ${i}`, turnId: `t${i}` },
+    { type: 'assistant', text: 'A clarifying question' },
+    { type: 'user', text: `ask_user answer ${i}` },
+    { type: 'user', text: `steering ${i}` },
+    { type: 'assistant', text: `Final answer ${i}` },
+  ]).flat();
+  assert.equal(api.pageStart(history, history.length), 40 * 5);
+  assert.equal(api.pageStart(history, 40 * 5), 20 * 5);
+  assert.equal(api.pageStart(history, 20 * 5), 0);
+  const { plugin, view, chat } = await chatSetup('anthropic');
+  plugin.chatHistory = history;
+  view.showConversation();
+  assert.equal(chat.shown.filter(row => row.type === 'user' && row.turnId).length, 20);
+  assert.equal(chat.shown.find(row => row.type === 'user').text, 'Original question 40');
+  assert.ok(chat.shown.some(row => row.text === 'ask_user answer 40'));
+  assert.ok(chat.shown.some(row => row.text === 'Final answer 59'));
+  view.loadEarlier();
+  assert.equal(chat.shown.find(row => row.type === 'user').text, 'Original question 20');
+  assert.equal(chat.shown.filter(row => row.type === 'user' && row.turnId).length, 40);
 });

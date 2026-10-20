@@ -1,11 +1,12 @@
 import type { ChatSettings, McpServer, ServerToolCall } from "../types";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 /**
  * Remote MCP servers through the provider: Anthropic's MCP connector and
  * OpenAI's remote MCP tool connect to the server and call its tools
  * themselves; the plugin only names the servers in the request and shows
- * the calls. The ChatGPT account's route doesn't offer it ("hosted
- * MCP/connectors" unsupported).
+ * the calls. This plugin's ChatGPT account integration doesn't implement
+ * remote MCP; that is separate from subscription clients supporting MCP.
  */
 
 /** Anthropic's MCP connector beta. */
@@ -19,7 +20,9 @@ export function validServerName(name: string): boolean {
 /** A public https address (the providers connect from their side). */
 export function validServerUrl(url: string): boolean {
   try {
-    return new URL(url).protocol === "https:";
+    const parsed = new URL(url);
+    // Credentials belong in SecretStorage, never in the synced URL field.
+    return /^https:\/\//i.test(url) && parsed.protocol === "https:" && url.trim() === url && !parsed.username && !parsed.password && !parsed.hash;
   } catch {
     return false;
   }
@@ -34,6 +37,14 @@ export function activeServers(settings: ChatSettings): McpServer[] {
     seen.add(server.name);
     return true;
   });
+}
+
+/** Bind replayed tool lists/calls to the same endpoint and authorization. */
+export function mcpServerIdentities(servers: McpServer[]): Record<string, string> {
+  return Object.fromEntries(servers.map(server => [server.name, Array.from(
+    sha256(new TextEncoder().encode(JSON.stringify([server.id, server.url, server.token ?? ""]))),
+    byte => byte.toString(16).padStart(2, "0"),
+  ).join("")]));
 }
 
 /** Anthropic: `mcp_servers` and one `mcp_toolset` per server. */
@@ -52,15 +63,17 @@ export function anthropicMcp(servers: McpServer[]): { mcp_servers: Record<string
  * doesn't name (switched off or removed since): the provider would refuse
  * them, and without any server the MCP beta isn't even asked for.
  */
-export function withoutGoneServerCalls(items: Record<string, unknown>[], servers: McpServer[]): Record<string, unknown>[] {
-  const names = new Set(servers.map((server) => server.name));
-  const gone = new Set<unknown>();
+export function withoutGoneServerCalls(items: Record<string, unknown>[], servers: McpServer[], recorded?: Record<string, string>, retainedCallIds?: ReadonlySet<unknown>): Record<string, unknown>[] {
+  const current = mcpServerIdentities(servers);
+  const names = new Set(servers.filter(server => !recorded || recorded[server.name] === current[server.name]).map(server => server.name));
+  // Determine removals first: result blocks need not follow their call in an
+  // imported replay. Never retain an orphan result for a removed server.
+  const gone = new Set(items.filter(item => item.type === "mcp_tool_use" && !names.has(item.server_name as string)).map(item => item.id));
   return items.filter((item) => {
     if (item.type === "mcp_tool_use" && !names.has(item.server_name as string)) {
-      gone.add(item.id);
       return false;
     }
-    if (item.type === "mcp_tool_result") return !gone.has(item.tool_use_id);
+    if (item.type === "mcp_tool_result") return !gone.has(item.tool_use_id) && (!retainedCallIds || retainedCallIds.has(item.tool_use_id));
     if (item.type === "mcp_call" || item.type === "mcp_list_tools" || item.type === "mcp_approval_request") {
       return names.has(item.server_label as string);
     }
@@ -83,9 +96,14 @@ function resultText(content: unknown): string {
 }
 
 /** Anthropic's `mcp_tool_use` blocks with their `mcp_tool_result`, for the chat. */
-export function anthropicServerCalls(blocks: Record<string, unknown>[]): ServerToolCall[] {
+export function anthropicServerCalls(blocks: Record<string, unknown>[], previous: Record<string, unknown>[] = []): ServerToolCall[] {
   const results = new Map(blocks.filter((block) => block.type === "mcp_tool_result").map((block) => [block.tool_use_id, block]));
-  return blocks.filter((block) => block.type === "mcp_tool_use").map((block) => {
+  const calls = blocks.filter(block => block.type === "mcp_tool_use");
+  const ids = new Set(calls.map(block => block.id));
+  for (const block of previous) {
+    if (block.type === "mcp_tool_use" && results.has(block.id) && !ids.has(block.id)) { calls.push(block); ids.add(block.id); }
+  }
+  return calls.map((block) => {
     const result = results.get(block.id);
     return {
       server: typeof block.server_name === "string" ? block.server_name : "",
@@ -93,6 +111,7 @@ export function anthropicServerCalls(blocks: Record<string, unknown>[]): ServerT
       input: isRecord(block.input) ? block.input : {},
       result: result ? resultText(result.content) : "",
       isError: result?.is_error === true,
+      ...(!result ? { pending: true } : {}),
     };
   });
 }
@@ -112,8 +131,10 @@ export function openaiServerCalls(items: Record<string, unknown>[]): ServerToolC
       server: typeof item.server_label === "string" ? item.server_label : "",
       tool: typeof item.name === "string" ? item.name : "",
       input,
-      result: error ? resultText(error) || (typeof error === "string" ? error : JSON.stringify(error)) : resultText(item.output),
-      isError: !!error,
+      result: error ? resultText(error) || (typeof error === "string" ? error : JSON.stringify(error))
+        : resultText(item.output) || (item.status === "failed" ? "MCP call failed without a result." : ""),
+      isError: !!error || item.status === "failed",
+      ...(item.status === "in_progress" || item.status === "calling" || item.status === "incomplete" ? { pending: true } : {}),
     };
   });
 }

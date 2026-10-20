@@ -515,7 +515,7 @@ export class ChatSettingTab extends PluginSettingTab {
     setting
       .setName(MCP_SERVERS)
       .setDesc(this.plugin.settings.provider === "chatgpt-oauth"
-        ? "Remote MCP servers work with an Anthropic or OpenAI API key; the ChatGPT account doesn't offer them."
+        ? "Remote MCP servers work with an Anthropic or OpenAI API key. This plugin's ChatGPT account integration doesn't support remote MCP yet."
         : "Remote servers (public https) whose tools the AI can use. The provider connects to them and calls their tools without asking, so add only servers you trust.");
   }
 
@@ -576,7 +576,8 @@ export class ChatSettingTab extends PluginSettingTab {
       .addText((text) => {
         text.inputEl.type = "password";
         text.setPlaceholder("Token (optional)").setValue(server.token ?? "").onChange(async (value) => {
-          server.token = value.trim() || undefined;
+          // Empty is an explicit deletion; undefined means not loaded on this device.
+          server.token = value.trim();
           await save();
         });
       })
@@ -598,7 +599,10 @@ export class ChatSettingTab extends PluginSettingTab {
 
   private async addMcpServer(): Promise<void> {
     const s = this.plugin.settings;
-    s.mcpServers = [...s.mcpServers ?? [], { id: `mcp-${Date.now().toString(36)}`, name: "", url: "", enabled: true }];
+    // getRandomValues also works in mobile WebViews without secure-context
+    // APIs such as randomUUID/SubtleCrypto.
+    const id = `mcp-${Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    s.mcpServers = [...s.mcpServers ?? [], { id, name: "", url: "", enabled: false }];
     await this.plugin.saveSettings();
     this.refreshSettingsTab();
   }

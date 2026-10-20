@@ -496,3 +496,128 @@ test('A turn running in another chat keeps its mark while the user switches; its
   await running;
   assert.equal(plugin.conversations.find(c => c.id === a).pendingTurn, undefined);
 });
+
+for (const provider of ['openai', 'anthropic']) {
+  for (const ending of ['cut', 'error', 'drop']) {
+    test(`${provider}: background ${ending} after MCP keeps completed receipts and never resends`, async () => {
+      const { plugin, view } = await chatSetup(provider);
+      plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+      const blocks = provider === 'openai' ? [
+        { type: 'mcp_call', id: 'remote1', name: 'create', server_label: 'remote', arguments: '{}', output: 'CREATED-ONCE' },
+      ] : [
+        { type: 'mcp_tool_use', id: 'remote1', name: 'create', server_name: 'remote', input: {} },
+        { type: 'mcp_tool_result', tool_use_id: 'remote1', content: [{ type: 'text', text: 'CREATED-ONCE' }] },
+      ];
+      const events = streamEvents(provider, blocks).slice(0, provider === 'openai' ? -1 : -2);
+      if (ending === 'error') events.push(provider === 'openai'
+        ? { type: 'error', code: 'rate_limit_exceeded', message: 'Try again in 0ms' }
+        : { type: 'error', error: { type: 'overloaded_error', message: 'Try again in 0ms' } });
+      const requests = fakeFetch(() => {
+        if (ending === 'drop') return body(sseText(events), { fail: () => { appLifecycle.markHidden(); return new TypeError('connection lost'); } });
+        appLifecycle.markHidden();
+        return body(sseText(events));
+      });
+      await view.handleUserMessage('Create once', null);
+      assert.equal(requests.length, 1);
+      assert.match(JSON.stringify(plugin.agent.exportMessages()), /Remote MCP receipt.*CREATED-ONCE/);
+      assert.match(plugin.chatHistory.find(row => row.type === 'error').text, /MCP tools may already have run/);
+      assert.equal(plugin.chatHistory.filter(row => row.type === 'tool-result').length, 1);
+      appLifecycle.markVisible();
+    });
+  }
+}
+
+test('Continue restores selection enforcement instead of granting full-note writes', async () => {
+  const selection = { filePath: 'Untitled.md', text: 'rig', from: 1, sourceText: 'Original' };
+  const saved = { version: 3, activeConversationId: 'scoped', conversations: [{
+    id: 'scoped', title: 'Scoped', createdAt: 1, updatedAt: 1,
+    pendingTurn: { turnId: 't', startedAt: 1 },
+    chatHistory: [{ type: 'user', text: 'Edit selection', turnId: 't', selection }],
+    agentMessages: [{ role: 'user', content: 'Edit selected text only', turnId: 't' }],
+  }] };
+  const { plugin, view, app } = await chatSetup('anthropic', saved);
+  let changes = 0;
+  app.vault.process = async () => { changes++; };
+  transport((_body, index) => index === 0
+    ? response('anthropic', [call('edit', 'edit_document', { path: 'Untitled.md', operation: 'replace', content: 'Unscoped overwrite' })], 'tool_use')
+    : response('anthropic', [text('Refused outside selection')]));
+  await view.continueTurn();
+  assert.equal(changes, 0);
+  assert.equal(plugin.chatHistory.find(row => row.type === 'tool-result').toolResult.isError, true);
+});
+
+test('A plan quota failure in the background is not resent', async () => {
+  const { view } = await chatSetup('openai');
+  const requests = fakeFetch(() => {
+    appLifecycle.markHidden();
+    return new Response(JSON.stringify({ error: { code: 'insufficient_quota', message: 'Quota exhausted' } }), { status: 429 });
+  });
+  await view.handleUserMessage('Question', null);
+  assert.equal(requests.length, 1);
+  appLifecycle.markVisible();
+});
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: no headers with enabled MCP never falls back or auto-resends`, async () => {
+  const { plugin, view } = await chatSetup(provider);
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  let attempts = 0;
+  globalThis.__fetch = async () => { attempts++; appLifecycle.markHidden(); throw new TypeError('Lost response before headers'); };
+  transport(() => assert.fail('Unsafe fallback would duplicate a POST'));
+  await view.handleUserMessage('Create once', null);
+  assert.equal(attempts, 1);
+  assert.match(JSON.stringify(plugin.agent.exportMessages()), /Remote MCP request outcome unknown/);
+  assert.match(plugin.chatHistory.find(row => row.type === 'error').text, /MCP tools may already have run/);
+  appLifecycle.markVisible();
+});
+
+test('Restart after an in-flight MCP request preserves uncertainty and refuses Continue', async () => {
+  const { plugin, view, writes } = await chatSetup('openai');
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  let sent = false;
+  globalThis.__fetch = async () => { sent = true; return new Promise(() => {}); };
+  void view.handleUserMessage('Create externally', null);
+  await until(() => sent);
+  await plugin.saveChatHistory();
+  const saved = JSON.parse(JSON.stringify(writes.at(-1)));
+  assert.equal(saved.conversations[0].pendingTurn.remoteEffectsPossible, true);
+  const restored = await chatSetup('openai', saved);
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, false);
+  assert.ok(restored.chat.shown.some(row => /may have run remote MCP tools/.test(row.text)));
+  const after = transport(() => assert.fail('Must not repeat unknown external operations'));
+  await restored.view.continueTurn();
+  assert.equal(after.length, 0);
+});
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: enabling MCP during backoff checkpoints the retry before its POST`, async () => {
+  const { plugin, view, writes } = await chatSetup(provider);
+  let attempts = 0;
+  globalThis.__fetch = async (_url, init) => {
+    attempts++;
+    if (attempts === 1) {
+      plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', code: 'rate_limit_exceeded', message: 'Wait' } }), { status: 429, headers: { 'retry-after': '0' } });
+    }
+    assert.equal(writes.at(-1).conversations[0].pendingTurn.remoteEffectsPossible, true);
+    const request = JSON.parse(init.body);
+    assert.ok(provider === 'anthropic' ? request.mcp_servers?.length : request.tools.some(tool => tool.type === 'mcp'));
+    return new Promise(() => {});
+  };
+  void view.handleUserMessage('Create once', null);
+  await until(() => attempts === 2);
+  const saved = JSON.parse(JSON.stringify(writes.at(-1)));
+  const restored = await chatSetup(provider, saved);
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, false);
+  assert.ok(restored.chat.shown.some(row => /may have run remote MCP tools/.test(row.text)));
+});
+
+for (const provider of ['anthropic', 'openai']) test(`${provider}: failed durable MCP checkpoint prevents the provider POST`, async () => {
+  const { plugin, view } = await chatSetup(provider);
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  plugin.app.vault.adapter.write = async () => { throw new Error('disk full'); };
+  const requests = transport(() => response(provider, [text('Must never arrive')]));
+  await view.handleUserMessage('Create a remote item', null);
+  assert.equal(requests.length, 0);
+  assert.ok(plugin.chatHistory.some(row => row.type === 'error' && /checkpoint/.test(row.text)));
+});

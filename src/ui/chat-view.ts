@@ -11,7 +11,7 @@ import { confirmUndo } from "./undo-confirm";
 import { ChangeLog } from "../tools/undo";
 import { screenAwake } from "../platform/screen-awake";
 import { historySelection } from "../selection-history";
-import { newTurnId } from "../agent/history";
+import { newTurnId, withoutLargeVisibleToolText } from "../agent/history";
 import { mentionContext, mentionedFiles } from "./mentions";
 import { attachmentBudgetError } from "../files/attachments";
 import { findSkills, invokedSkillsContext, type Skill } from "../agent/skills";
@@ -103,7 +103,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   /** The next input answers a question; `question` is shown first unless the chat shows it already. */
   showAskUser(question?: string): Promise<string>;
   cancelAskUser(): void;
-  setInputEnabled(enabled: boolean): void;
+  setInputEnabled(enabled: boolean, preservePreparation?: boolean): void;
   setBusy(busy: boolean): void;
   setComposerLocked?(locked: boolean): void;
   setRetainedAttachments?(entries: ChatHistoryEntry[]): void;
@@ -111,7 +111,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   setQueued(texts: string[]): void;
   /** The open chats list again (a chat started or finished answering). */
   updateConversations(): void;
-  clearMessages(): void;
+  clearMessages(preserveDraft?: boolean): void;
   focus(): void;
   setModel(name: string): void;
   setTitle(title: string): void;
@@ -156,8 +156,8 @@ export const PAGE_TURNS = 20;
 export function pageStart(history: ChatHistoryEntry[], end: number, turns = PAGE_TURNS): number {
   let count = 0;
   for (let index = end - 1; index > 0; index--) {
-    if (history[index].type === "user" && ++count === turns) {
-      return history.slice(0, index).some((entry) => entry.type === "user") ? index : 0;
+    if (history[index].type === "user" && history[index].turnId && ++count === turns) {
+      return history.slice(0, index).some((entry) => entry.type === "user" && entry.turnId) ? index : 0;
     }
   }
   return 0;
@@ -249,6 +249,7 @@ export class ObsidianChatView extends ItemView {
   private unwatchBackground?: () => void;
   /** Lets the screen sleep again: the call holds it on until it ends, however it ends. */
   private releaseVoiceScreen?: () => void;
+  private compactions = new Map<string, { agent: AgentLoop }>();
   /** Resolves once onOpen() has mounted the chat UI, or failed to. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
@@ -274,7 +275,7 @@ export class ObsidianChatView extends ItemView {
 
   /** The shown conversation runs a turn. */
   get running(): boolean {
-    return !!this.turn;
+    return !!this.turn || this.compactions.has(this.plugin.activeConversationId);
   }
 
   /** The chat UI while it shows `turn`'s conversation (and `turn` still runs there). */
@@ -386,10 +387,10 @@ export class ObsidianChatView extends ItemView {
    * shows, and what its running turn shows so far. Earlier turns come in
    * when the chat is scrolled near the top (`loadEarlier`).
    */
-  renderHistory(): void {
+  renderHistory(preserveDraft = false): void {
     const chat = this.chatContainer;
     if (!chat) return;
-    chat.clearMessages();
+    chat.clearMessages(preserveDraft);
     const history = this.plugin.chatHistory;
     this.shownFrom = pageStart(history, history.length);
     const shown = history.slice(this.shownFrom);
@@ -408,6 +409,9 @@ export class ObsidianChatView extends ItemView {
     this.updateEditable();
     chat.setHasEarlier?.(this.shownFrom > 0);
     chat.setContinue(this.canContinue());
+    if (!this.running && this.plugin.activeConversation.pendingTurn?.remoteEffectsPossible) {
+      chat.addError("This interrupted request may have run remote MCP tools. Check the external service before sending a new message; Continue is unavailable to avoid repeating changes.");
+    }
     this.updateUsage();
   }
 
@@ -485,13 +489,15 @@ export class ObsidianChatView extends ItemView {
    */
   async compactNow(): Promise<void> {
     const chat = this.chatContainer;
-    if (!chat || this.running) return;
+    if (!chat || this.running || this.undoing) return;
     const conversation = this.plugin.activeConversation;
     const agent = this.plugin.agentFor(conversation);
     // Kept by the plugin if the user switches away meanwhile.
     const release = agent.hold();
+    const operation = { agent };
+    this.compactions.set(conversation.id, operation);
     chat.setBusy(true);
-    chat.setInputEnabled(false);
+    chat.setInputEnabled(false, true);
     chat.showThinking("Summarizing…");
     try {
       const onUsage: AgentCallbacks["onUsage"] = (usage, request) => {
@@ -508,12 +514,15 @@ export class ObsidianChatView extends ItemView {
       new Notice(`Couldn't summarize the chat: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       release();
-      if (this.plugin.activeConversation === conversation) {
+      const current = this.compactions.get(conversation.id) === operation;
+      if (current) this.compactions.delete(conversation.id);
+      if (current && this.plugin.activeConversation === conversation && !this.running) {
         chat.hideThinking();
-        this.renderHistory();
+        this.renderHistory(true);
         chat.setBusy(false);
         chat.setInputEnabled(true);
       }
+
     }
   }
 
@@ -523,7 +532,9 @@ export class ObsidianChatView extends ItemView {
    */
   private canContinue(): boolean {
     const pending = this.plugin.activeConversation.pendingTurn;
-    return !this.running && !!pending && this.plugin.agent.owesAnswer(pending.turnId);
+    return !this.running && !!pending && !pending.remoteEffectsPossible &&
+      this.plugin.chatHistory.some(row => row.type === "user" && row.turnId === pending.turnId) &&
+      this.plugin.agent.owesAnswer(pending.turnId);
   }
 
   /** Forget a cut-off turn: no Continue (a new message, Stop, Clear, leaving the chat). */
@@ -542,6 +553,8 @@ export class ObsidianChatView extends ItemView {
     this.endVoice();
     this.unwatchBackground?.();
     this.handleStop();
+    for (const { agent } of this.compactions.values()) agent.abort();
+    this.compactions.clear();
     // The turns in the background stop too: they show and save through this view.
     for (const turn of [...this.turns.values()]) this.stopTurn(turn);
     if (this.chatContainer) {
@@ -755,6 +768,8 @@ export class ObsidianChatView extends ItemView {
     const active = id === this.plugin.activeConversationId;
     if (active) this.endVoice();
     // Its turn stops, shown or not.
+    this.compactions.get(id)?.agent.abort();
+    this.compactions.delete(id);
     const turn = this.turns.get(id);
     if (turn) this.stopTurn(turn);
     await this.plugin.deleteConversation(id);
@@ -773,8 +788,10 @@ export class ObsidianChatView extends ItemView {
     this.renderHistory();
     chat.setTitle(this.plugin.activeConversation.title);
     const turn = this.turn;
-    chat.setInputEnabled(true);
-    chat.setBusy(!!turn);
+    const compacting = this.compactions.has(this.plugin.activeConversationId);
+    chat.setInputEnabled(!compacting);
+    chat.setBusy(!!turn || compacting);
+    if (compacting) chat.showThinking("Summarizing…");
     chat.setQueued([...turn?.queued ?? []]);
     if (turn?.ask) this.askNow(turn);
     chat.focus();
@@ -795,7 +812,7 @@ export class ObsidianChatView extends ItemView {
    * original turn comes back.
    */
   async editMessage(turnId: string, text: string): Promise<void> {
-    if (this.undoing || !this.chatContainer) return;
+    if (this.undoing || !this.chatContainer || this.compactions.has(this.plugin.activeConversationId)) return;
     const running = this.turn;
     if (running) this.stopTurn(running);
     const history = this.plugin.chatHistory;
@@ -876,7 +893,7 @@ export class ObsidianChatView extends ItemView {
     voiceContext: VoiceTurn[] = []
   ): Promise<void> {
     // An undo is running: the message waits in the input.
-    if (this.undoing) {
+    if (this.undoing || this.compactions.has(this.plugin.activeConversationId)) {
       this.chatContainer?.restoreDraft?.(text, selection, images, files);
       new Notice("Please wait for the current response to complete.");
       return;
@@ -947,7 +964,8 @@ export class ObsidianChatView extends ItemView {
   async continueTurn(): Promise<void> {
     const pending = this.plugin.activeConversation.pendingTurn;
     if (!pending || !this.canContinue()) return;
-    await this.runTurn(pending.turnId, (agent, callbacks) => agent.continueTurn(callbacks));
+    const selection = this.plugin.chatHistory.find(row => row.type === "user" && row.turnId === pending.turnId)?.selection;
+    await this.runTurn(pending.turnId, (agent, callbacks) => agent.continueTurn(callbacks, selection));
   }
 
   /**
@@ -1022,6 +1040,11 @@ export class ObsidianChatView extends ItemView {
     try {
       await start(agent, {
         changes,
+        onRequestStarted: (remoteEffectsPossible) => {
+          if (isCurrent() && conversation.pendingTurn) conversation.pendingTurn.remoteEffectsPossible = remoteEffectsPossible;
+          // Flush the marker before an MCP-capable POST, including retries.
+          if (remoteEffectsPossible) return this.plugin.checkpointChatHistory();
+        },
         onPreflightRejected: (error) => {
           turn.started = false;
           let pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);
@@ -1097,6 +1120,8 @@ export class ObsidianChatView extends ItemView {
           turn.tools.delete(name);
           if (call) ui()?.updateToolResult(call.id, name, result);
           history.push({ type: "tool-result", toolName: name, toolInput: savedToolInput(call?.input ?? {}), toolResult: result });
+          const bounded = withoutLargeVisibleToolText(history);
+          if (bounded !== history) for (let i = 0; i < history.length; i++) history[i] = bounded[i];
           if (focus && !result.isError && this.plugin.settings.followEdits) this.follow(focus);
         },
         onResponse: (text) => {
@@ -1429,6 +1454,10 @@ export class ObsidianChatView extends ItemView {
   }
 
   private handleStop(): void {
+    const id = this.plugin.activeConversationId;
+    this.compactions.get(id)?.agent.abort();
+    this.compactions.delete(id);
+    this.chatContainer?.hideThinking();
     const turn = this.turn;
     // Nothing of the answer is on screen yet: say that the turn was stopped.
     const silent = !!turn && !turn.answerShown;
@@ -1448,6 +1477,9 @@ export class ObsidianChatView extends ItemView {
   private handleClear(): void {
     if (this.undoing) return;
     this.endVoice();
+    const id = this.plugin.activeConversationId;
+    this.compactions.get(id)?.agent.abort();
+    this.compactions.delete(id);
     const turn = this.turn;
     if (turn) {
       // Clear drops the turn: nothing comes back.

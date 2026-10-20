@@ -37,17 +37,25 @@ export async function sendResponsesRequest(
   const collected = collectResponsesStream(stream.onTextDelta, stream.onServerTool);
   // The final size check (`serializeRequest`) runs before anything is sent.
   const requestBody = serializeRequest(body);
+  const remoteEnabled = Array.isArray(body.tools) && body.tools.some(tool => isRecord(tool) && tool.type === "mcp");
   let response: StreamResult;
   try {
-    response = await streamSSE(url, { headers, body: requestBody }, collected.onEvent, stream.signal);
+    response = await streamSSE(url, { headers, body: requestBody, noFallback: remoteEnabled }, collected.onEvent, stream.signal);
   } catch (error) {
+    if (collected.serverTool() || remoteEnabled) return collected.remoteFailure(error instanceof Error ? error.message : String(error));
     if (error instanceof StreamDropped) throw new StreamCutError(name, collected.serverTool());
     throw error;
   }
   if (response.status < 200 || response.status >= 300) throw errors.http(response);
   const { data, failure } = collected.finish();
-  if (failure) throw errors.stream(failure);
-  if (!data) throw new StreamCutError(name, collected.serverTool());
+  if (failure) {
+    if (collected.serverTool()) return collected.remoteFailure(failure.message, failure.code);
+    throw errors.stream(failure);
+  }
+  if (!data) {
+    if (collected.serverTool() || remoteEnabled) return collected.remoteFailure(`${name} stream ended before the answer was complete.`);
+    throw new StreamCutError(name);
+  }
   return data;
 }
 
@@ -67,10 +75,10 @@ export function buildResponsesInput(
   for (const message of withoutOldToolImages(afterCompaction(messages, replayable))) {
     if (replayable(message) && message.replay) {
       // Items before the latest compaction item are covered by it.
-      const replayed = withoutGoneServerCalls(message.replay.items, servers);
+      const replayed = withoutGoneServerCalls(message.replay.items, servers, message.replay.mcpServers);
       const last = replayed.map((item) => item.type).lastIndexOf("compaction");
-      items.push(...(last > 0 ? replayed.slice(last) : replayed));
-      continue;
+      if (replayed.length) { items.push(...(last > 0 ? replayed.slice(last) : replayed)); continue; }
+
     }
     const content: Record<string, unknown>[] = [];
     const flush = () => {
@@ -143,14 +151,12 @@ export function fromResponsesOutput(
   model?: string,
   identity?: string,
 ): UnifiedResponse {
-  if (data.status === "failed" || data.error) {
-    const error = isRecord(data.error) ? data.error : {};
-    // Status 0: the error came inside a response; its code decides on a retry.
-    throw new ProviderError(typeof error.message === "string" ? error.message : "Response failed.", 0,
-      typeof error.code === "string" ? error.code : undefined);
-  }
   const output = Array.isArray(data.output) ? data.output.filter(isRecord) : [];
+  const failed = data.status === "failed" || !!data.error;
   const content: ContentBlock[] = [];
+  if (failed && data.mcpEffectsPossible === true && !output.some(item => item.type === "mcp_call")) {
+    content.push({ type: "text", text: "Remote MCP request outcome unknown. Check the external service before repeating this request." });
+  }
   for (const item of output) {
     if (item.type === "message" && Array.isArray(item.content)) {
       for (const part of item.content.filter(isRecord)) {
@@ -160,7 +166,7 @@ export function fromResponsesOutput(
           content.push({ type: "text", text: part.refusal });
         }
       }
-    } else if (item.type === "function_call" && data.status !== "incomplete") {
+    } else if (item.type === "function_call" && data.status !== "incomplete" && !failed) {
       if (typeof item.call_id !== "string" || typeof item.name !== "string") {
         throw new Error("Response contained an invalid tool call.");
       }
@@ -176,7 +182,7 @@ export function fromResponsesOutput(
     }
   }
   const usage = isRecord(data.usage) ? data.usage : undefined;
-  return {
+  const result: UnifiedResponse = {
     content,
     replay: { provider, model, identity, items: output },
     stopReason: data.status === "incomplete" ? "max_tokens" : content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn",
@@ -186,6 +192,16 @@ export function fromResponsesOutput(
     // Server-side compaction: its item is encrypted, so no readable summary.
     ...(output.some((item) => item.type === "compaction") ? { compaction: {} } : {}),
   };
+  if (failed) {
+    const error = isRecord(data.error) ? data.error : {};
+    const remoteEffectsPossible = !!result.serverCalls?.length || data.mcpEffectsPossible === true;
+    // Keep receipts even though the error still ends the turn. The dispatcher
+    // must not repeat a request that may have changed an external service.
+    throw new ProviderError((typeof error.message === "string" ? error.message : "Response failed.") +
+      (remoteEffectsPossible ? " Remote MCP tools may already have run; check their results before retrying." : ""), 0,
+      typeof error.code === "string" ? error.code : undefined, undefined, remoteEffectsPossible, remoteEffectsPossible ? result : undefined);
+  }
+  return result;
 }
 
 /**
@@ -205,6 +221,7 @@ function responsesUsage(usage: Record<string, unknown>): TokenUsage {
     outputTokens: numberValue(usage.output_tokens),
     ...(cached ? { cachedInputTokens: cached } : {}),
   };
+
 }
 
 /**
@@ -234,6 +251,7 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
   finish: () => { data?: Record<string, unknown>; failure?: ResponsesFailure };
   /** An MCP call started in this answer. */
   serverTool: () => boolean;
+  remoteFailure: (message: string, code?: string) => Record<string, unknown>;
 } {
   let serverTool = false;
   const items = new Map<string | number, Record<string, unknown>>();
@@ -246,6 +264,10 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
         isRecord(event.item) && event.item.type === "mcp_call" && !serverTool) {
         serverTool = true;
         onServerTool?.();
+      }
+      // A call that started without a result still records possible effects.
+      if (type === "response.output_item.added" && isRecord(event.item) && event.item.type === "mcp_call") {
+        items.set(typeof event.output_index === "number" ? event.output_index : String(event.item.id), { ...event.item, status: "in_progress" });
       }
       if (type === "response.output_text.delta") {
         // The markers' characters go; their words are dropped from the whole text at the end.
@@ -262,6 +284,11 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
       } else if (type === "response.incomplete") {
         completed = { ...(isRecord(event.response) ? event.response : {}), status: "incomplete" };
       } else if (type === "response.failed") {
+        completed = isRecord(event.response) ? event.response : {};
+        if (Array.isArray(completed.output) && completed.output.some(item => isRecord(item) && item.type === "mcp_call")) {
+          serverTool = true;
+          onServerTool?.();
+        }
         const error = isRecord(event.response) && isRecord(event.response.error) ? event.response.error : {};
         failure = {
           message: typeof error.message === "string" ? error.message : "Response failed.",
@@ -277,6 +304,8 @@ function collectResponsesStream(onTextDelta?: (text: string) => void, onServerTo
       return { data: { ...completed, output: items.size > 0 ? Array.from(items.values()) : completed.output ?? [] } };
     },
     serverTool: () => serverTool,
+    remoteFailure: (message, code) => ({ ...completed, status: "failed", mcpEffectsPossible: true, error: { message, code },
+      output: Array.isArray(completed?.output) && completed.output.length ? completed.output : [...items.values()] }),
   };
 }
 

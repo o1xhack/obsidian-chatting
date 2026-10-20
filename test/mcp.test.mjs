@@ -271,12 +271,12 @@ test('Settings (Obsidian 1.13+): a heading and a list of servers, each row check
   await linear.toggle(false);
   assert.equal(linear.desc, 'Off');
   await linear.texts[2].change('  ');
-  assert.equal(plugin.settings.mcpServers[0].token, undefined);
+  assert.equal(plugin.settings.mcpServers[0].token, '');
   assert.equal(plugin.saves, 6);
 
   list.addItem.action();
   await settle();
-  assert.deepEqual(plugin.settings.mcpServers.at(-1), { id: plugin.settings.mcpServers.at(-1).id, name: '', url: '', enabled: true });
+  assert.deepEqual(plugin.settings.mcpServers.at(-1), { id: plugin.settings.mcpServers.at(-1).id, name: '', url: '', enabled: false });
   list.onDelete(0);
   await settle();
   assert.deepEqual(plugin.settings.mcpServers.map(server => server.name), ['plain', '']);
@@ -285,7 +285,7 @@ test('Settings (Obsidian 1.13+): a heading and a list of servers, each row check
   // With the ChatGPT account the heading says it doesn't apply.
   plugin.settings.provider = 'chatgpt-oauth';
   definitions[at].render(heading);
-  assert.match(heading.desc, /ChatGPT account doesn't offer them/);
+  assert.match(heading.desc, /ChatGPT account integration doesn't support remote MCP yet/);
   assert.equal(settingsTab([]).tab.getSettingDefinitions().find(d => d.type === 'list' && d.emptyState === 'No servers yet.').items.length, 0);
 });
 
@@ -316,3 +316,410 @@ test('Settings before Obsidian 1.13: display() draws the heading, a row per serv
   settingsTab([]).tab.renderAddMcpServer(empty);
   assert.equal(empty.desc, 'No servers yet.');
 });
+
+test('Clearing a token through the real settings row stays cleared after save and reload', async () => {
+  const secrets = new Map([['chatting-with-ai-mcp-a', 'old-token']]);
+  let saved = { mcpServers: [{ ...SERVERS[0], token: undefined }] };
+  const plugin = new api.ChatPlugin();
+  plugin.app = { secretStorage: { getSecret: key => secrets.get(key), setSecret: (key, value) => secrets.set(key, value) }, workspace: { getLeavesOfType: () => [] } };
+  plugin.loadData = async () => saved;
+  plugin.saveData = async data => { saved = JSON.parse(JSON.stringify(data)); };
+  await plugin.loadSettings();
+  const tab = new api.ChatSettingTab(settingsApp, plugin);
+  const field = row();
+  tab.renderMcpServer(field, plugin.settings.mcpServers[0]);
+  await field.texts[2].change('   ');
+  await plugin.loadSettings();
+  assert.equal(secrets.get('chatting-with-ai-mcp-a'), '');
+  assert.equal(plugin.settings.mcpServers[0].token, undefined);
+  assert.doesNotMatch(JSON.stringify(saved), /old-token/);
+});
+
+test('OpenAI drops its live cursor when a server is disabled without reimporting history', async () => {
+  const requests = transport((_body, index) => response('openai', [
+    { type: 'mcp_list_tools', id: `l${index}`, server_label: 'linear', tools: [] },
+    { type: 'mcp_call', id: `c${index}`, server_label: 'linear', name: 'read', arguments: '{}', output: 'found' },
+    text('Found'),
+  ], 'end_turn', index));
+  const config = { ...settings('openai'), mcpServers: [{ ...SERVERS[0] }] };
+  const loop = new api.AgentLoop(vaultApp().app, config);
+  await loop.run('First', callbacks());
+  await loop.run('Second', callbacks());
+  assert.equal(requests[1].previous_response_id, 'resp_0');
+  config.mcpServers[0].enabled = false;
+  await loop.run('Third', callbacks());
+  assert.equal(requests[2].previous_response_id, undefined);
+  assert.equal(requests[2].input.some(item => item.type.startsWith('mcp_')), false);
+});
+
+for (const provider of ['anthropic', 'openai']) {
+  for (const property of ['url', 'token', 'id']) {
+    test(`${provider}: changing a server's ${property} discards its stale native tool list/calls`, async () => {
+      const native = provider === 'anthropic' ? [
+        { type: 'mcp_tool_use', id: 'm1', name: 'read', server_name: 'linear', input: {} },
+        { type: 'mcp_tool_result', tool_use_id: 'm1', content: [{ type: 'text', text: 'old remote result' }] },
+      ] : [
+        { type: 'mcp_list_tools', id: 'l1', server_label: 'linear', tools: [{ name: 'old_tool' }] },
+        { type: 'mcp_call', id: 'c1', server_label: 'linear', name: 'old_tool', arguments: '{}', output: 'old remote result' },
+      ];
+      const requests = transport((_body, index) => response(provider, index ? [text('Next')] : [...native, text('Read')], 'end_turn', index));
+      const config = { ...settings(provider), mcpServers: [{ ...SERVERS[0] }] };
+      const loop = new api.AgentLoop(vaultApp().app, config);
+      await loop.run('First', callbacks());
+      config.mcpServers[0][property] = property === 'url' ? 'https://replacement.example/mcp' : 'replacement';
+      await loop.run('Next', callbacks());
+      assert.equal(requests[1].previous_response_id, undefined);
+      const history = provider === 'anthropic' ? requests[1].messages : requests[1].input;
+      assert.doesNotMatch(JSON.stringify(history), /old remote result|old_tool/);
+      assert.doesNotMatch(JSON.stringify(loop.exportMessages().map(message => message.replay)), /secret-token|replacement/);
+    });
+  }
+}
+
+test('MCP results across turns and multiple text parts share the tool text budget on restore/save', () => {
+  const entries = Array.from({ length: 6 }, (_, i) => [
+    { role: 'user', content: `Q${i}` },
+    { role: 'assistant', content: [text('A')], replay: { provider: 'anthropic', items: [
+      { type: 'mcp_tool_use', id: `m${i}`, name: 'read', server_name: 'linear', input: {} },
+      { type: 'mcp_tool_result', tool_use_id: `m${i}`, content: Array.from({ length: 10 }, () => ({ type: 'text', text: String(i).repeat(80000) })) },
+    ] } },
+  ]).flat();
+  const bounded = api.withoutLargeToolText(entries);
+  const results = bounded.filter(message => message.replay).flatMap(message => message.replay.items.filter(item => item.type === 'mcp_tool_result'));
+  assert.ok(results.every(item => item.content.reduce((n, part) => n + part.text.length, 0) <= 100000));
+  assert.ok(JSON.stringify(results).length < 210000);
+  assert.match(results.at(-1).content[0].text, /^5/);
+  assert.equal(api.withoutLargeToolText(bounded), bounded);
+  const record = api.chatState.newConversation();
+  record.agentMessages = entries;
+  const saved = api.chatState.savedConversation(record);
+  assert.ok(JSON.stringify(saved.agentMessages).length < 215000);
+});
+
+test('Anthropic MCP binary output cannot bypass attachment budgets in persisted replay', () => {
+  const messages = [{ role: 'user', content: 'Q' }, { role: 'assistant', content: [text('A')], replay: { provider: 'anthropic', items: [
+    { type: 'mcp_tool_use', id: 'm1', server_name: 'linear', name: 'read', input: {} },
+    { type: 'mcp_tool_result', tool_use_id: 'm1', content: [{ type: 'image', source: { type: 'base64', data: 'B'.repeat(2000000), media_type: 'image/png' } }] },
+  ] } }];
+  const bounded = api.withoutLargeToolText(messages);
+  assert.match(JSON.stringify(bounded), /Non-text MCP result omitted/);
+  assert.ok(JSON.stringify(bounded).length < 2000);
+  assert.equal(api.withoutLargeToolText(bounded), bounded);
+});
+
+test('Credential-bearing URLs are refused and adding servers starts disabled with distinct IDs', async () => {
+  for (const url of ['https://user:password@example.com/mcp', 'https://example.com/mcp#token']) {
+    const requests = transport(() => response('openai', [text('ok')]));
+    await new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: [{ ...SERVERS[0], url }] }).run('Q', callbacks());
+    assert.equal(requests[0].tools.some(tool => tool.type === 'mcp'), false);
+  }
+  const { tab, plugin } = settingsTab([]);
+  await tab.addMcpServer();
+  await tab.addMcpServer();
+  assert.equal(plugin.settings.mcpServers.every(server => !server.enabled), true);
+  assert.notEqual(plugin.settings.mcpServers[0].id, plugin.settings.mcpServers[1].id);
+});
+
+for (const provider of ['anthropic', 'openai']) {
+  test(`${provider}: a truncated answer retains completed remote receipts without executing partial local tools`, async () => {
+    const native = provider === 'anthropic' ? [
+      { type: 'mcp_tool_use', id: 'm1', name: 'create', server_name: 'linear', input: {} },
+      { type: 'mcp_tool_result', tool_use_id: 'm1', content: [{ type: 'text', text: 'CREATED-42' }] },
+    ] : [{ type: 'mcp_call', id: 'c1', server_label: 'linear', name: 'create', arguments: '{}', output: 'CREATED-42' }];
+    const requests = transport((_body, index) => response(provider, index ? [text('Acknowledged')] : [
+      ...native, { type: 'tool_use', id: 'partial', name: 'create_file', input: { path: 'ShouldNotExist.md', content: 'bad' } },
+    ], index ? 'end_turn' : 'max_tokens', index));
+    const { app, files } = vaultApp();
+    const loop = new api.AgentLoop(app, { ...settings(provider), mcpServers: SERVERS });
+    const cb = callbacks();
+    await loop.run('Create', cb);
+    assert.match(cb.errors[0], /Remote MCP tools may already have run/);
+    assert.equal(files.has('ShouldNotExist.md'), false);
+    assert.match(JSON.stringify(loop.exportMessages()), /CREATED-42/);
+    assert.doesNotMatch(JSON.stringify(loop.exportMessages()), /ShouldNotExist/);
+    await loop.run('Confirm the result', callbacks());
+    assert.match(JSON.stringify(provider === 'anthropic' ? requests[1].messages : requests[1].input), /CREATED-42/);
+  });
+}
+
+test('Anthropic reports suspended MCP calls as pending until the result arrives', async () => {
+  const requests = transport((_body, index) => response('anthropic', index === 0 ? [
+    { type: 'mcp_tool_use', id: 'm1', name: 'search', server_name: 'linear', input: {} },
+  ] : [
+    { type: 'mcp_tool_result', tool_use_id: 'm1', content: [{ type: 'text', text: 'FOUND' }] }, text('Done'),
+  ], index === 0 ? 'pause_turn' : 'end_turn', index));
+  const results = [];
+  const cb = callbacks({ onToolResult: (_name, result) => results.push(result) });
+  const loop = new api.AgentLoop(vaultApp().app, { ...settings('anthropic'), mcpServers: SERVERS });
+  await loop.run('Search', cb);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(cb.errors, []);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].result, 'FOUND');
+});
+
+test('A failed OpenAI response after an MCP call is not automatically retried', async () => {
+  const requests = transport(() => ({ status: 200, json: { status: 'failed', error: { code: 'rate_limit_exceeded', message: 'Try again in 0ms' }, output: [
+    { type: 'mcp_call', server_label: 'linear', name: 'create', output: 'Already created' },
+  ] } }));
+  const cb = callbacks();
+  await new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS }).run('Create', cb);
+  assert.equal(requests.length, 1);
+  assert.match(cb.errors[0], /MCP tools may already have run/);
+});
+
+test('Settings reject duplicate or unsafe server IDs before reading SecretStorage', async () => {
+  const keys = [];
+  const plugin = new api.ChatPlugin();
+  plugin.app = { secretStorage: { getSecret: key => { keys.push(key); return ''; } } };
+  plugin.loadData = async () => ({ mcpServers: [SERVERS[0], { ...SERVERS[0], name: 'other' }, { ...SERVERS[0], id: '../bad' }, { ...SERVERS[0], id: '' }] });
+  await plugin.loadSettings();
+  assert.equal(plugin.settings.mcpServers.length, 1);
+  assert.equal(keys.filter(key => key === 'chatting-with-ai-mcp-a').length, 1);
+  assert.equal(keys.some(key => key.includes('../')), false);
+});
+
+test('Adding a server works in a mobile WebView without randomUUID or SubtleCrypto', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const getRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto);
+  try {
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { getRandomValues } });
+    const { tab, plugin } = settingsTab([]);
+    await tab.addMcpServer();
+    assert.match(plugin.settings.mcpServers[0].id, /^mcp-[a-f0-9]{32}$/);
+  } finally { Object.defineProperty(globalThis, 'crypto', original); }
+});
+
+test('Disabling a server during a local tool step removes it from the next request of that turn', async () => {
+  const requests = transport((_body, index) => response('anthropic', index ? [text('Done')] : [
+    { type: 'tool_use', id: 'r1', name: 'read_document', input: { path: 'Untitled.md' } },
+  ], index ? 'end_turn' : 'tool_use', index));
+  const config = { ...settings('anthropic'), mcpServers: [{ ...SERVERS[0] }] };
+  await new api.AgentLoop(vaultApp().app, config).run('Read', callbacks({ onToolResult: () => { config.mcpServers = []; } }));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].mcp_servers.length, 1);
+  assert.equal(requests[1].mcp_servers, undefined);
+});
+
+for (const change of ['disable', 'remove', 'url', 'token']) {
+  test(`Anthropic ${change}: removes cross-message paused-call results together with their call`, async () => {
+    const requests = transport((_body, index) => response('anthropic', index === 0 ? [
+      { type: 'mcp_tool_use', id: 'm1', name: 'read', server_name: 'linear', input: {} },
+    ] : index === 1 ? [
+      { type: 'mcp_tool_result', tool_use_id: 'm1', content: [{ type: 'text', text: 'PAUSED-RESULT' }] }, text('Done'),
+    ] : [text('Next')], index === 0 ? 'pause_turn' : 'end_turn', index));
+    const config = { ...settings('anthropic'), mcpServers: [{ ...SERVERS[0] }] };
+    const loop = new api.AgentLoop(vaultApp().app, config);
+    await loop.run('Read', callbacks());
+    if (change === 'remove') config.mcpServers = [];
+    else if (change === 'disable') config.mcpServers[0].enabled = false;
+    else config.mcpServers[0][change] = change === 'url' ? 'https://new.example/mcp' : 'new-token';
+    await loop.run('Next', callbacks());
+    const sent = requests[2].messages.flatMap(message => message.content);
+    assert.equal(sent.some(item => item.type === 'mcp_tool_use' || item.type === 'mcp_tool_result'), false);
+    assert.equal(requests[2].messages.every(message => typeof message.content === 'string' || message.content.length > 0), true);
+  });
+}
+
+test('Failed OpenAI remote receipts are shown, persisted, replayed after restart and portable to another provider', async () => {
+  const requests = transport((_body, index) => index === 0 ? { status: 200, json: { status: 'failed', error: { code: 'rate_limit_exceeded', message: 'Try again in 0ms' }, output: [
+    { type: 'mcp_call', id: 'created-call', server_label: 'linear', name: 'create', arguments: '{"title":"Ticket"}', output: 'CREATED-99' },
+    { type: 'function_call', call_id: 'local', name: 'create_file', arguments: '{' },
+  ] } } : response('openai', [text('Confirmed')], 'end_turn', index));
+  const config = { ...settings('openai'), mcpServers: [{ ...SERVERS[0] }] };
+  const cb = callbacks({ onToolResult: (name, result) => cb.receipt = { name, result } });
+  const loop = new api.AgentLoop(vaultApp().app, config);
+  await loop.run('Create', cb);
+  assert.equal(requests.length, 1);
+  assert.equal(cb.receipt.name, 'mcp:linear:create');
+  assert.equal(cb.receipt.result.result, 'CREATED-99');
+  assert.match(cb.errors[0], /Remote MCP tools may already have run/);
+  const saved = JSON.parse(JSON.stringify(loop.exportMessages()));
+  assert.match(JSON.stringify(saved), /CREATED-99/);
+  assert.doesNotMatch(JSON.stringify(saved), /create_file|secret-token/);
+  const restored = new api.AgentLoop(vaultApp().app, config);
+  restored.importMessages(saved);
+  await restored.run('Confirm', callbacks());
+  assert.equal(requests[1].previous_response_id, undefined);
+  assert.equal(requests[1].input.find(item => item.type === 'mcp_call').output, 'CREATED-99');
+  const portable = api.buildResponsesInput(saved, 'chatgpt-oauth');
+  assert.match(JSON.stringify(portable), /CREATED-99/);
+});
+
+test('Exhausted shared MCP text allowance emits one marker per older result, not one per part', () => {
+  const result=(id,content)=>({type:'mcp_tool_result',tool_use_id:id,content});
+  const messages=[{role:'user',content:'Q'},{role:'assistant',content:[text('A')],replay:{provider:'anthropic',items:[
+    result('old',Array.from({length:10000},()=>({type:'text',text:'old payload'}))),
+    result('new1',[{type:'text',text:'N'.repeat(100000)}]),
+    result('new2',[{type:'text',text:'N'.repeat(100000)}]),
+  ]}}];
+  const bounded=api.withoutLargeToolText(messages),old=bounded[1].replay.items[0];
+  assert.equal(old.content.length,1);
+  assert.match(old.content[0].text,/Tool text truncated/);
+  assert.ok(JSON.stringify(bounded).length<202000);
+  assert.equal(api.withoutLargeToolText(bounded),bounded);
+});
+
+test('An MCP result cut exactly between blocks still reports the missing tail', () => {
+  const messages=[{role:'assistant',content:[text('A')],replay:{provider:'anthropic',items:[
+    {type:'mcp_tool_result',tool_use_id:'r',content:[{type:'text',text:'A'.repeat(100000)},{type:'text',text:'MISSING-TAIL'}]},
+  ]}}];
+  const bounded=api.withoutLargeToolText(messages),parts=bounded[0].replay.items[0].content;
+  assert.match(parts.map(part=>part.text).join(''),/Tool text truncated/);
+  assert.ok(parts.reduce((total,part)=>total+part.text.length,0)<=100000);
+  assert.equal(api.withoutLargeToolText(bounded),bounded);
+});
+
+test('OpenAI structured MCP errors share the output allowance and stay bounded on restore and replay', async () => {
+  const requests = transport(() => response('openai', [text('Next')]));
+  const items = [
+    { type: 'mcp_call', id: 'old', server_label: 'linear', name: 'read', arguments: '{}', error: { type: 'http_error', code: 500, message: 'E'.repeat(200000) } },
+    { type: 'mcp_call', id: 'new', server_label: 'linear', name: 'read', arguments: '{}', output: 'O'.repeat(60000), error: { type: 'mcp_tool_execution_error', content: [{ type: 'image', data: 'B'.repeat(2000000) }] } },
+  ];
+  const parsed = api.fromResponsesOutput({ output: items }, 'openai', 'gpt-5.5');
+  const loop = new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS });
+  loop.importMessages([{ role: 'user', content: 'Read' }, assistant(parsed)]);
+  const saved = loop.exportMessages(), bounded = saved[1].replay.items;
+  assert.equal(bounded[0].error.type, 'http_error');
+  assert.equal(bounded[0].error.code, 500);
+  assert.ok(bounded[0].error.message.length <= 100000);
+  assert.equal(bounded[1].error.type, 'mcp_tool_execution_error');
+  assert.ok(bounded[1].output.length + bounded[1].error.content.text.length <= 100000);
+  assert.match(bounded[1].error.content.text, /Tool text truncated/);
+  assert.ok(JSON.stringify(saved).length < 202000);
+  assert.equal(api.withoutLargeToolText(saved), saved);
+  loop.importMessages(JSON.parse(JSON.stringify(saved)));
+  await loop.run('Continue', callbacks());
+  assert.deepEqual(requests[0].input.filter(item => item.type === 'mcp_call'), bounded);
+});
+
+test('An incomplete OpenAI MCP call is not shown or persisted as completed', async () => {
+  transport(() => ({ status: 200, json: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [
+    { type: 'mcp_call', id: 'partial', server_label: 'linear', name: 'create', arguments: '{}', status: 'incomplete', output: null, error: null },
+  ] } }));
+  const results = [];
+  const loop = new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS });
+  await loop.run('Create', callbacks({ onToolResult: (name, result) => results.push({ name, result }) }));
+  assert.deepEqual(results, []);
+  const saved = loop.exportMessages();
+  assert.doesNotMatch(JSON.stringify(saved.map(message => message.content)), /Remote MCP receipt|completed/);
+  assert.equal(saved.at(-1).replay.items[0].status, 'incomplete');
+});
+
+test('An OpenAI MCP call with failed status and no error payload is shown as a failure', async () => {
+  transport(() => response('openai', [{ type: 'mcp_call', id: 'c', server_label: 'linear', name: 'read', arguments: '{}', status: 'failed', output: null, error: null }, text('Failed')]));
+  const results=[];
+  await new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS }).run('Read', callbacks({ onToolResult: (_name, result) => results.push(result) }));
+  assert.equal(results[0].isError, true);
+  assert.match(results[0].result, /failed without a result/);
+});
+
+for (const change of ['disable', 'remove', 'url', 'token']) {
+  for (const includeText of [false, true]) {
+    test(`Failed OpenAI receipt survives ${change}, with native answer text: ${includeText}`, async () => {
+      const requests = transport((_body, index) => index === 0 ? { status: 200, json: { status: 'failed', error: { message: 'Interrupted' }, output: [
+        { type: 'mcp_call', id: 'c1', server_label: 'linear', name: 'create', arguments: '{}', output: 'CREATED-ONCE' },
+        ...(includeText ? [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Almost done', annotations: [] }] }] : []),
+      ] } } : response('openai', [text('Next')]));
+      const config = { ...settings('openai'), mcpServers: [{ ...SERVERS[0] }] };
+      const loop = new api.AgentLoop(vaultApp().app, config);
+      await loop.run('Create', callbacks());
+      if (change === 'remove') config.mcpServers = [];
+      else if (change === 'disable') config.mcpServers[0].enabled = false;
+      else config.mcpServers[0][change] = change === 'url' ? 'https://changed.example/mcp' : 'new-token';
+      loop.importMessages(JSON.parse(JSON.stringify(loop.exportMessages())));
+      await loop.run('Continue', callbacks());
+      assert.equal(requests[1].input.some(item => item.type === 'mcp_call'), false);
+      assert.match(JSON.stringify(requests[1].input), /Remote MCP receipt.*CREATED-ONCE/);
+    });
+  }
+}
+
+test('A legacy portable receipt is used when filtering removes all native replay', () => {
+  const input = api.buildResponsesInput([{ role: 'assistant', content: [text('Remote MCP receipt: CREATED-ONCE')], replay: { provider: 'openai', items: [
+    { type: 'mcp_call', id: 'c1', server_label: 'gone', name: 'create', arguments: '{}', output: 'CREATED-ONCE' },
+  ] } }], 'openai');
+  assert.equal(input.length, 1);
+  assert.match(JSON.stringify(input), /Remote MCP receipt: CREATED-ONCE/);
+});
+
+test('Large MCP catalogs are omitted for rediscovery, without truncating tool schemas', async () => {
+  const requests = transport(() => response('openai', [text('Next')]));
+  const catalog = (id, size) => ({ type: 'mcp_list_tools', id, server_label: 'linear', tools: [
+    { name: 'read', input_schema: { type: 'object', description: 'S'.repeat(size) } },
+  ] });
+  const loop = new api.AgentLoop(vaultApp().app, { ...settings('openai'), mcpServers: SERVERS });
+  loop.importMessages([{ role: 'user', content: 'Read' }, { role: 'assistant', content: [], replay: { provider: 'openai', items: [
+    catalog('huge', 2000000), catalog('old', 80000), catalog('new', 80000),
+    { type: 'mcp_call', id: 'c', server_label: 'linear', name: 'read', arguments: '{}', output: 'O'.repeat(80000) },
+  ] } }]);
+  const saved = loop.exportMessages();
+  assert.ok(JSON.stringify(saved).length < 202000);
+  assert.equal(saved[1].replay.items.filter(item => item.type === 'mcp_list_tools').length, 1);
+  assert.deepEqual(saved[1].replay.items.find(item => item.type === 'mcp_list_tools'), catalog('new', 80000));
+  assert.match(JSON.stringify(saved), /MCP tool catalog omitted/);
+  assert.equal(api.withoutLargeToolText(saved), saved);
+  await loop.run('Continue', callbacks());
+  assert.match(JSON.stringify(requests[0].input), /MCP tool catalog omitted/);
+  assert.equal(requests[0].tools.some(tool => tool.type === 'mcp'), true);
+});
+
+for (const failed of [false, true]) {
+  test(`A batch of MCP callbacks shares a newest-first result budget (failed response: ${failed})`, async () => {
+    const output=Array.from({length:10},(_,i)=>({type:'mcp_call',id:`c${i}`,server_label:'linear',name:`read${i}`,arguments:'{}',output:String(i).repeat(100000)}));
+    transport(()=>failed?{status:200,json:{status:'failed',error:{message:'Interrupted'},output}}:response('openai',output));
+    const results=[];
+    await new api.AgentLoop(vaultApp().app,{...settings('openai'),mcpServers:SERVERS}).run('Read',callbacks({onToolResult:(_name,result)=>results.push(result)}));
+    assert.equal(results.length,10);
+    assert.ok(results.reduce((n,result)=>n+result.result.length,0)<202000);
+    assert.match(results[0].result,/Tool text truncated/);
+    assert.equal(results.at(-1).result,'9'.repeat(100000));
+  });
+}
+
+test('Visible folded and local tool rows share the budget without dropping entries or identities', () => {
+  const row=(id)=>({id,toolResult:{result:String(id).repeat(100000),isError:false}});
+  const change={id:'undo',type:'changes'},rows=[{id:'fold',steps:[row(1),change,row(2)]},row(3),row(4)];
+  const bounded=api.withoutLargeVisibleToolText(rows);
+  assert.equal(bounded.length,3);
+  assert.equal(bounded[0].steps[1],change);
+  assert.match(bounded[0].steps[0].toolResult.result,/Tool text truncated/);
+  assert.equal(bounded[2],rows[2]);
+  assert.equal(api.withoutLargeVisibleToolText(bounded),bounded);
+});
+
+test('Saving and restoring visible MCP rows enforces the shared text allowance', () => {
+  const conversation={...api.chatState.newConversation(),chatHistory:Array.from({length:10},(_,i)=>({type:'tool-result',toolName:'mcp:linear:read',toolResult:{result:String(i).repeat(100000),isError:false}}))};
+  const saved=api.chatState.savedConversation(conversation);
+  const restored=api.chatState.migrateChatState({version:3,activeConversationId:conversation.id,conversations:[conversation]}).conversations[0];
+  for(const history of [saved.chatHistory,restored.chatHistory]){
+    assert.equal(history.length,10);
+    assert.ok(history.reduce((n,row)=>n+row.toolResult.result.length,0)<202000);
+    assert.match(history[0].toolResult.result,/Tool text truncated/);
+  }
+});
+
+for (const provider of ['anthropic','openai']) for (const change of ['disable','remove','url','token']) {
+  test(`${provider}: MCP ${change} during rate-limit backoff applies to the retry`, async () => {
+    const config={...settings(provider),mcpServers:[{...SERVERS[0]}]};
+    const oldWindow=globalThis.window;
+    globalThis.window={setTimeout:resolve=>{
+      if(change==='remove')config.mcpServers=[];
+      else if(change==='disable')config.mcpServers[0].enabled=false;
+      else config.mcpServers[0][change]=change==='url'?'https://changed.example/mcp':'new-token';
+      resolve();return 1;
+    }};
+    try {
+      const requests=transport((_body,i)=>i===0?{status:429,json:{error:{message:'Wait',type:'rate_limit_error',code:'rate_limit_exceeded'}},headers:{'retry-after':'0'}}:response(provider,[text('Done')]));
+      const cb=callbacks();await new api.AgentLoop(vaultApp().app,config).run('Read',cb);
+      assert.deepEqual(cb.errors,[]);assert.equal(requests.length,2);
+      if(change==='disable'||change==='remove'){
+        if(provider==='anthropic')assert.equal(requests[1].mcp_servers,undefined);
+        else assert.equal(requests[1].tools.some(tool=>tool.type==='mcp'),false);
+      } else {
+        const server=provider==='anthropic'?requests[1].mcp_servers[0]:requests[1].tools.find(tool=>tool.type==='mcp');
+        assert.equal(change==='url'?(server.url??server.server_url):(server.authorization_token??server.authorization),change==='url'?'https://changed.example/mcp':'new-token');
+      }
+    } finally {globalThis.window=oldWindow;}
+  });
+}

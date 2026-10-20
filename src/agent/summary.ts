@@ -1,4 +1,5 @@
 import type { ContentBlock, UnifiedMessage } from "../types";
+import { anthropicServerCalls, openaiServerCalls } from "../api/mcp";
 import { ProviderError } from "../api/errors";
 
 /**
@@ -13,7 +14,7 @@ export const SUMMARY_SYSTEM_PROMPT = "You write summaries of conversations betwe
 const SUMMARY_INSTRUCTION = `Summarize the conversation below so that you can continue it without the original messages. Keep:
 - what the user wants, their preferences and instructions;
 - decisions and results so far, with the exact names of notes, files, headings and values that matter;
-- what was changed in the vault;
+- what was changed in the vault and external services, including completed remote actions and uncertain outcomes;
 - open questions and the next steps.
 Leave out greetings and small talk. Write plain Markdown, at most about 600 words.`;
 
@@ -55,7 +56,10 @@ export function transcript(messages: UnifiedMessage[], maxTokens: number): strin
   const lines = messages.map((message) => {
     const text = typeof message.content === "string" ? message.content : message.content.map(blockText).filter(Boolean).join("\n");
     const summary = message.compaction?.summary ? `[Summary of what came before:]\n${message.compaction.summary}\n` : "";
-    return `${message.role === "user" ? "User" : "Assistant"}: ${summary}${text}`;
+    const calls = message.replay ? (message.replay.provider === "anthropic" ? anthropicServerCalls(message.replay.items) : openaiServerCalls(message.replay.items)) : [];
+    const receipts = calls.map(call =>
+      `[Remote action ${call.server}/${call.tool}: ${cut(JSON.stringify(call.input ?? {}), TOOL_INPUT_CHARS)}; ${call.pending ? "outcome unknown; verify before retrying" : call.isError ? "error" : "completed"}; ${cut(call.result ?? "", TOOL_RESULT_CHARS)}]`).join("\n");
+    return `${message.role === "user" ? "User" : "Assistant"}: ${summary}${text}${receipts ? `\n${receipts}` : ""}`;
   });
   const all = lines.join("\n\n");
   let tokens = 0;
@@ -68,6 +72,30 @@ export function transcript(messages: UnifiedMessage[], maxTokens: number): strin
   // Not inside a surrogate pair.
   if (start < all.length && /[\uDC00-\uDFFF]/.test(all[start])) start++;
   return `(The beginning of the conversation is left out.)\n…${all.slice(start)}`;
+}
+
+/** Ordered transcript chunks leave room for a rolling summary and instructions. */
+export function summaryChunks(messages: UnifiedMessage[], contextWindow: number | undefined): string[] {
+  const text = transcript(messages, Infinity);
+  const room = Math.max(1, Math.floor((contextWindow ?? DEFAULT_TRANSCRIPT_TOKENS * 2) * 0.35));
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = start, tokens = 0;
+    while (end < text.length && tokens + tokenCost(text.charCodeAt(end)) <= room) {
+      tokens += tokenCost(text.charCodeAt(end++));
+    }
+    if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    if (end === start) end = start + (text.codePointAt(start)! > 0xffff ? 2 : 1);
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks.length ? chunks : [""];
+}
+
+/** Fold each chunk into a readable summary instead of dropping the oldest text. */
+export function summaryChunkRequest(chunk: string, previous: string): string {
+  return `${SUMMARY_INSTRUCTION}${previous ? `\n\nPreserve the facts from this earlier summary and update it with the next part:\n<earlier-summary>\n${previous}\n</earlier-summary>` : ""}\n\n<conversation>\n${chunk}\n</conversation>`;
 }
 
 /** The summary request for `messages`, its transcript sized to half the window. */

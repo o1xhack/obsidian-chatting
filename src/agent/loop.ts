@@ -11,12 +11,13 @@ import type {
   FileAttachment,
   UnifiedResponse,
   VoiceTurn,
+  ServerToolCall,
 } from "../types";
 import { sendMessage } from "../api/client";
 import { ProviderError, StreamCutError } from "../api/errors";
 import { isBuffered, lastChunkAt } from "../api/stream";
 import { clearOpenAIState } from "../api/openai";
-import { chatgptCompacts, clearChatGPTOAuthState } from "../api/chatgpt-oauth";
+import { chatgptCompacts, chatgptReplayIdentity, clearChatGPTOAuthState } from "../api/chatgpt-oauth";
 import { catalogModel, loadModelDetails, type ModelOption } from "../api/model-catalog";
 import { serverToolName } from "../api/mcp";
 import { TOOL_DEFINITIONS } from "../tools/registry";
@@ -25,13 +26,15 @@ import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage } from "./system-prompt";
-import { cutBeforeTurn, editableTurn, fromLastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, boundedToolText } from "./history";
+import { cutBeforeTurn, editableTurn, fromLastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
+
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
 import { RequestBudgetError } from "../api/request-budget";
 import { appLifecycle } from "../platform/lifecycle";
 import { afterCompaction, compactThreshold, summaryMessage } from "./compaction";
-import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryRequest } from "./summary";
+import { catalogIdentity } from "../api/model-catalog";
+import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryChunks, summaryChunkRequest } from "./summary";
 
 /** The turn ID of a summary message (it starts its own turn, with no visible entry). */
 function summaryTurnId(): string {
@@ -44,6 +47,15 @@ function summaryTurnId(): string {
  * hands over the user's spoken answer as the next request.
  */
 export const VOICE_ASK_RESULT = "Asked aloud in the voice conversation. The user's answer comes as their next message.";
+function displayServerCalls(calls: ServerToolCall[], callbacks: AgentCallbacks): void {
+  const rows = withoutLargeVisibleToolText(calls.filter(call => !call.pending).map(call => ({
+    name: serverToolName(call), input: call.input, toolResult: { result: call.result, isError: call.isError },
+  })));
+  for (const row of rows) {
+    callbacks.onToolCall(row.name, row.input);
+    callbacks.onToolResult(row.name, row.toolResult);
+  }
+}
 
 /** Sending a request again (a cut-off stream, back from the background); tests shorten the wait. */
 export const RESUME = {
@@ -71,6 +83,8 @@ export const RESUME = {
 function transient(e: unknown): boolean {
   if (e instanceof RequestBudgetError) return false;
   if (!(e instanceof ProviderError)) return true;
+  if (["insufficient_quota", "usage_limit_reached", "usage_not_included"].includes(e.code ?? "")) return false;
+  if (e.remoteEffectsPossible) return false;
   return e.status === 0 || e.status === 408 || e.status === 429 || e.status >= 500;
 }
 
@@ -107,6 +121,8 @@ function watchForStall(request: AbortController): () => void {
     stopTimer();
   };
 }
+
+
 
 /**
  * What the chat view shows and saves for a tool result: the text and a
@@ -293,17 +309,27 @@ export class AgentLoop {
    */
   private async prepareContext(settings: ChatSettings, contextTokens: number, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
     try {
+      let handedOff = false;
       const index = this.messages.map((message) => !!message.compaction).lastIndexOf(true);
       const marker = this.messages[index];
       const replay = marker?.replay;
-      const replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
+      let replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
+      if (replayable && replay?.identity && marker?.compaction && !marker.compaction.summary) {
+        const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() :
+          await catalogIdentity(settings.provider, settings.apiKey);
+        replayable = replay.identity === identity;
+        if (isStopped()) return;
+      }
       if (marker?.compaction && !marker.compaction.summary && !replayable && index > 0) {
-        marker.compaction = { summary: await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage) };
+        const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
+        if (isStopped()) return;
+        marker.compaction = { summary };
+        handedOff = true;
         debugLog(this.app, "COMPACTED", { reason: "provider switch" });
       }
       const option = catalogModel(settings.provider, settings.model);
       const threshold = compactThreshold(settings.provider, option, settings);
-      if (!isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
+      if (!handedOff && !isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
         const summary = await this.summarize(settings, this.messages, isStopped, callbacks.onUsage);
         if (isStopped()) return;
         this.messages = [summaryMessage(summary, summaryTurnId())];
@@ -350,16 +376,23 @@ export class AgentLoop {
    */
   private async summarize(settings: ChatSettings, messages: UnifiedMessage[], isStopped: () => boolean,
     onUsage?: AgentCallbacks["onUsage"]): Promise<string> {
-    const window = catalogModel(settings.provider, settings.model)?.contextWindow;
+    const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() : await catalogIdentity(settings.provider, settings.apiKey);
+    const window = settings.modelCatalog?.entries.find(entry => entry.provider === settings.provider && entry.identity === identity)
+      ?.models.find(model => model.value === settings.model)?.contextWindow;
     const request = new AbortController();
     this.request = request;
     try {
-      const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
-        [{ role: "user", content: summaryRequest(messages, window) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
-      if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
-      const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
-      if (!text) throw new Error("The summary came back empty.");
-      return text;
+      let summary = "";
+      for (const chunk of summaryChunks(messages, window)) {
+        if (isStopped()) throw new Error("Summarization stopped.");
+        const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
+          [{ role: "user", content: summaryChunkRequest(chunk, summary) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
+        if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
+        const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
+        if (!text) throw new Error("The summary came back empty.");
+        summary = text;
+      }
+      return summary;
     } finally {
       if (this.request === request) this.request = null;
     }
@@ -488,7 +521,9 @@ export class AgentLoop {
     // copy, since its text follows the edits).
     const scope = selection ? { ...selection } : undefined;
     // Keep one provider/model/credential configuration for this entire turn.
-    const turnSettings = { ...this.settings };
+    // MCP revocation stays live even inside the dispatcher's retry wait.
+    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
 
     // Build context once per user turn and prepend to the user message;
     // the files the message links to come next, the message itself last.
@@ -514,7 +549,7 @@ ${mentioned.text}` : buildContextMessage(context);
     try {
       const prospective: UnifiedMessage[] = [...this.messages, { role: "user", content: "", turnId }];
       // Rules given before the last compaction are gone with it: given again.
-      const retained = fromLastCompaction(prospective);
+      const retained = afterCompaction(prospective, () => true);
       const paths = [...mentioned?.instructionPaths ?? [], ...selection ? [selection.filePath] : []];
       const rules = await folderInstructionContext(this.app, paths, instructionsGiven(retained));
       if (isStopped()) return;
@@ -577,18 +612,20 @@ ${mentioned.text}` : buildContextMessage(context);
    * Continue the turn the history ends in, cut off before the model
    * answered (Obsidian was ended in the background): the loop runs on the
    * history as it is, without a new user message. Tool results already
-   * there are sent, not run again. A selection isn't saved, so the
-   * continued turn has none.
+   * there are sent, not run again. The view supplies the original saved
+   * selection; its fingerprint still refuses writes after the note changed.
    */
-  async continueTurn(callbacks: AgentCallbacks): Promise<void> {
+  async continueTurn(callbacks: AgentCallbacks, selection?: SelectionScope): Promise<void> {
     const version = ++this.runVersion;
     this.voiceTurn = false;
     if (!this.owesAnswer()) return;
     debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
-    const turnSettings = { ...this.settings };
+    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
     await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
     if (version !== this.runVersion) return;
-    await this.loop(version, callbacks, turnSettings, undefined);
+    await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
+
   }
 
   /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
@@ -632,7 +669,6 @@ ${mentioned.text}` : buildContextMessage(context);
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
-
       callbacks.onThinking();
       if (isStopped()) return;
 
@@ -640,16 +676,21 @@ ${mentioned.text}` : buildContextMessage(context);
       while (!response) {
         const startedAt = Date.now();
         try {
-          response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta);
+          response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
         } catch (e) {
           if (isStopped()) return;
-          if (!overflowCompacted && isContextOverflow(e)) {
+          if (!overflowCompacted && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
             overflowCompacted = true;
             callbacks.onThinking();
             if (await this.compactForOverflow(turnSettings, callbacks, isStopped)) continue;
             if (isStopped()) return;
           }
           const msg = e instanceof Error ? e.message : String(e);
+          if (e instanceof ProviderError && e.partialResponse) {
+            this.keepRemoteReceipts(e.partialResponse, callbacks);
+            const partialText = e.partialResponse.content.filter(block => block.type === "text").map(block => block.text).join("");
+            if (partialText) callbacks.onResponse(partialText);
+          }
           // The stream was cut off (a dropped connection, no provider error),
           // or the request failed or was given up while Obsidian was in the
           // background: send the same request again, once Obsidian is
@@ -659,7 +700,9 @@ ${mentioned.text}` : buildContextMessage(context);
           // refused as too large, or a provider's 4xx answer other than 408/429).
           const background = transient(e) && appLifecycle.hiddenSince(startedAt);
           const cut = e instanceof StreamCutError && !e.sideEffects;
-          if (resends < RESUME.perTurn && (cut || background) && !(e instanceof StreamCutError && e.sideEffects)) {
+          if (resends < RESUME.perTurn && (cut || background) && !(e instanceof StreamCutError && e.sideEffects) &&
+              !(e instanceof ProviderError && e.remoteEffectsPossible)) {
+
             resends++;
             debugLog(this.app, "API_RESEND", { error: msg, resend: resends, background });
             await appLifecycle.whenVisible();
@@ -680,6 +723,7 @@ ${mentioned.text}` : buildContextMessage(context);
               clearChatGPTOAuthState();
               continue;
             }
+
           }
           debugLog(this.app, "API_ERROR", { error: msg, model: this.settings.model, provider: this.settings.provider });
           if (i === 0 && e instanceof RequestBudgetError && beforeTurn) {
@@ -720,16 +764,19 @@ ${mentioned.text}` : buildContextMessage(context);
       if (isStopped()) return;
 
       // Tools the provider called on MCP servers: shown as steps, not run here.
-      for (const call of response.serverCalls ?? []) {
-        callbacks.onToolCall(serverToolName(call), call.input);
-        callbacks.onToolResult(serverToolName(call), { result: boundedToolText(call.result), isError: call.isError });
-      }
+      displayServerCalls(response.serverCalls ?? [], callbacks);
 
       // Do not execute or persist truncated tool arguments as a completed call.
       if (response.stopReason === "max_tokens") {
         const text = response.content.filter(block => block.type === "text").map(block => block.text).join("");
+        if (response.serverCalls?.length) {
+          // Remote effects have already happened. Retain their receipts so a
+          // follow-up cannot lose them, while discarding partial local calls.
+          this.keepRemoteReceipts(response);
+        }
         if (text) callbacks.onResponse(text);
-        callbacks.onError("The response reached its token limit before completing. Please try a smaller request.");
+        callbacks.onError("The response reached its token limit before completing. Please try a smaller request." +
+          (response.serverCalls?.length ? " Remote MCP tools may already have run; check their results before retrying." : ""));
         return;
       }
 
@@ -857,6 +904,32 @@ ${mentioned.text}` : buildContextMessage(context);
     );
   }
 
+  /** Keep completed server operations even when the surrounding response failed. */
+  private keepRemoteReceipts(response: UnifiedResponse, callbacks?: AgentCallbacks): void {
+    const calls = (response.serverCalls ?? []).filter(call => !call.pending);
+    if (callbacks) displayServerCalls(calls, callbacks);
+    const content = response.content.filter(block => block.type !== "tool_use");
+    // Keep the receipt in both representations: even a partial native replay
+    // must retain it after revoking one of its servers.
+    const receipts = calls.map(call =>
+      `Remote MCP receipt (${call.server}/${call.tool}, ${call.isError ? "error" : "completed"}): ${boundedToolText(call.result, 1000)}`,
+    );
+    if (callbacks) for (const call of response.serverCalls ?? []) if (call.pending) {
+      receipts.push(`Remote MCP operation (${call.server}/${call.tool}): started, outcome unknown. Check the external service before repeating it.`);
+    }
+    const receipt = boundedToolText(receipts.join("\n"), 8000);
+    if (receipt) content.push({ type: "text", text: receipt });
+    const replay = response.replay && { ...response.replay, items: response.replay.items.filter(item => item.type !== "tool_use" && item.type !== "function_call") };
+    if (replay && receipt) replay.items.push(replay.provider === "anthropic"
+      ? { type: "text", text: receipt }
+      : { type: "message", role: "assistant", content: [{ type: "output_text", text: receipt, annotations: [] }] });
+    this.messages.push({
+      role: "assistant", content,
+      replay,
+    });
+    this.messages = withoutLargeToolText(this.messages);
+  }
+
   /** Bound stored tool pixels as well as outgoing requests; user attachments stay. */
   private pruneToolImages(): void {
     const pruned = withoutOldToolImages(this.messages);
@@ -869,15 +942,19 @@ ${mentioned.text}` : buildContextMessage(context);
     systemPrompt: string,
     isStopped: () => boolean,
     onTextDelta: (text: string) => void,
+    onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>,
   ): Promise<UnifiedResponse> {
     const request = new AbortController();
     this.request = request;
     const unwatch = watchForStall(request);
+    let remoteStarted = false;
     try {
       return await sendMessage(settings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped,
-        { onTextDelta, signal: request.signal });
+        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; } });
     } catch (e) {
       // Aborted, but not by Stop: the watch gave it up.
+      if (e instanceof ProviderError && e.remoteEffectsPossible) throw e;
+      if (remoteStarted && !(e instanceof ProviderError && e.partialResponse)) throw new StreamCutError("Provider", true);
       if (request.signal.aborted && !isStopped()) {
         throw new Error("No answer arrived after Obsidian came back from the background. Please try again.");
       }

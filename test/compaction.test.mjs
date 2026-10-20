@@ -58,13 +58,13 @@ async function chatSetup(provider) {
 }
 
 /** An Anthropic answer that compacted first: its compaction block (streamed in one delta), then the text. */
-function compactedAnthropicAnswer(summary, answer) {
+function compactedAnthropicAnswer(summary, answer, options = {}) {
   const events = streamEvents('anthropic', [text(answer)]);
   // The text block moves to index 1; the compaction block goes first.
   for (const event of events) if (typeof event.index === 'number') event.index += 1;
   events.splice(1, 0,
-    { type: 'content_block_start', index: 0, content_block: { type: 'compaction', content: '' } },
-    { type: 'content_block_delta', index: 0, delta: { type: 'compaction_delta', content: summary } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'compaction', content: '', ...options.start } },
+    ...(options.deltas ?? [{ type: 'compaction_delta', content: summary }]).map(delta => ({ type: 'content_block_delta', index: 0, delta })),
     { type: 'content_block_stop', index: 0 });
   return sse(events);
 }
@@ -289,4 +289,212 @@ test('ChatGPT: a refused context_management is dropped and the request sent agai
   assert.equal(requests[2].context_management, undefined);
   assert.match(firstUserText(requests[3]), /^\[Summary of the earlier part of this conversation[\s\S]*Summary of Q1\./);
   assert.doesNotMatch(JSON.stringify(requests[3].input), /"Q1"|A1/);
+});
+
+test('Manual compaction blocks editing and sending, follows chat switches, and Stop cancels it', async () => {
+  const { plugin, view, chat } = await chatSetup('openai');
+  plugin.agent.importMessages([{ role: 'user', content: 'Remember the blue door', turnId: 't1' }]);
+  plugin.chatHistory.push({ type: 'user', text: 'Remember the blue door', turnId: 't1' });
+  let finish;
+  plugin.agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  let restored;
+  chat.restoreDraft = (...args) => { restored = args; };
+  const busy = [];
+  chat.setBusy = value => busy.push(value);
+  const original = plugin.activeConversationId;
+  const compacting = view.compactNow();
+  assert.equal(view.running, true);
+  await view.handleUserMessage('Keep this unsent', null);
+  assert.equal(restored[0], 'Keep this unsent');
+  await view.editMessage('t1', 'replace');
+  assert.equal(plugin.chatHistory[0].text, 'Remember the blue door');
+  view.newChat();
+  assert.equal(view.running, false);
+  await view.openConversation(original);
+  assert.equal(view.running, true);
+  view.handleStop();
+  assert.equal(view.running, false);
+  finish('Stale summary');
+  await compacting;
+  assert.equal(plugin.agent.exportMessages()[0].content, 'Remember the blue door');
+  assert.equal(busy.at(-1), false);
+});
+
+test('Readable summaries retain external action receipts from native MCP history', () => {
+  const value = api.summary.transcript([{ role: 'assistant', content: [], replay: { provider: 'openai', items: [
+    { type: 'mcp_call', id: 'm1', server_label: 'tasks', name: 'create_task', arguments: '{"title":"Already created"}', output: '{"id":"created-1"}' },
+  ] } }], 10000);
+  assert.match(value, /Remote action tasks\/create_task/);
+  assert.match(value, /completed/);
+  assert.match(value, /created-1/);
+});
+
+test('Changing an API key creates a portable summary before replaying encrypted history', async () => {
+  const original = settings('openai');
+  const requests = transport((body, index) => isSummaryRequest(body)
+    ? sse(streamEvents('openai', [text('Portable remembered fact: cobalt.')], 'end_turn', index))
+    : index === 1 ? compactedResponsesAnswer('openai', 'A2', index) : sse(streamEvents('openai', [text('A')], 'end_turn', index)));
+  const agent = new api.AgentLoop(vaultApp().app, original);
+  await agent.run('The fact is cobalt', callbacks());
+  await agent.run('Remember it', callbacks());
+  agent.settings = { ...original, apiKey: 'new-account-key' };
+  await agent.run('What was the fact?', callbacks());
+  assert.ok(isSummaryRequest(requests[2]));
+  assert.match(JSON.stringify(requests[3].input), /Portable remembered fact/);
+  assert.doesNotMatch(JSON.stringify(requests[3].input), /encrypted_content/);
+});
+
+test('A context overflow after an MCP action preserves its receipt and never summarizes or re-posts', async () => {
+  const requests = transport((body, index) => index === 0 ? sse(streamEvents('openai', [text('Earlier answer')], 'end_turn', index)) : sse([
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'mcp_call', id: 'm1', server_label: 'tasks', name: 'create', arguments: '{}', output: 'created-once' } },
+    { type: 'error', code: 'context_length_exceeded', message: 'maximum context length exceeded' },
+  ]));
+  const agent = new api.AgentLoop(vaultApp().app, settings('openai'));
+  await agent.run('Earlier turn', callbacks());
+  const cb = callbacks();
+  await agent.run('Create once', cb);
+  assert.equal(requests.length, 2);
+  assert.equal(requests.filter(isSummaryRequest).length, 0);
+  assert.match(JSON.stringify(agent.exportMessages()), /created-once/);
+  assert.ok(cb.errors.length);
+});
+
+test('Clearing a manually compacting chat cancels it and unlocks the composer immediately', async () => {
+  const { plugin, view } = await chatSetup('openai');
+  plugin.agent.importMessages([{ role: 'user', content: 'Old chat', turnId: 't1' }]);
+  plugin.chatHistory.push({ type: 'user', text: 'Old chat', turnId: 't1' });
+  let finish;
+  plugin.agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  const pending = view.compactNow();
+  assert.equal(view.running, true);
+  view.clearConversation();
+  assert.equal(view.running, false);
+  finish('Must not return');
+  await pending;
+  assert.equal(plugin.agent.exportMessages().length, 0);
+  assert.equal(plugin.chatHistory.length, 0);
+});
+
+for (const change of ['provider', 'model', 'api-key', 'chatgpt-account']) test(`Repeated opaque compactions preserve the earliest fact through saved-history ${change} changes`, async () => {
+  const provider = change === 'chatgpt-account' ? 'chatgpt-oauth' : 'openai';
+  const initial = settings(provider);
+  transport((body, index) => compactedResponsesAnswer(provider, `Answer ${index}`, index));
+  const agent = new api.AgentLoop(vaultApp().app, initial);
+  await agent.run('Earliest fact: the archive key is EARLIEST-7319.', callbacks());
+  await agent.run('Second compaction', callbacks());
+  await agent.run('Third compaction', callbacks());
+  agent.trimForRetention();
+  const saved = JSON.parse(JSON.stringify(api.chatState.savedConversation({ id: 'repeat', title: 'Repeated', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory: [], agentMessages: agent.exportMessages() })));
+  assert.match(JSON.stringify(saved.agentMessages), /EARLIEST-7319/);
+  const next = { ...initial };
+  if (change === 'provider') Object.assign(next, settings('anthropic'));
+  if (change === 'model') next.model = 'gpt-6.1-sol';
+  if (change === 'api-key') next.apiKey = 'new-key';
+  if (change === 'chatgpt-account') api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'other-token', accountId: 'other-account' }) });
+  const restored = new api.AgentLoop(vaultApp().app, next);
+  restored.importMessages(saved.agentMessages);
+  const requests = transport((body, index) => {
+    if (isSummaryRequest(body)) {
+      assert.match(JSON.stringify(body), /EARLIEST-7319/);
+      return sse(streamEvents(next.provider, [text('Portable summary: archive key EARLIEST-7319.')], 'end_turn', index));
+    }
+    return sse(streamEvents(next.provider, [text('EARLIEST-7319')], 'end_turn', index));
+  });
+  const cb = callbacks();
+  await restored.run('What was the earliest fact?', cb);
+  assert.deepEqual(cb.errors, []);
+  assert.equal(requests.filter(isSummaryRequest).length, 1);
+  assert.match(JSON.stringify(requests.at(-1)), /Portable summary: archive key EARLIEST-7319/);
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).input ?? requests.at(-1).messages), /encrypted_content/);
+});
+
+test('A multi-window portable summary carries earliest facts forward through every chunk', async () => {
+  const loopSettings = await withCatalog('openai', [{ value: 'gpt-5.5', label: 'GPT', contextWindow: 1000 }]);
+  const original = [{ role: 'user', content: `EARLIEST-FACT ${'middle '.repeat(1000)} LATEST-FACT`, turnId: 't1' }];
+  const requests = transport(body => {
+    const input = JSON.stringify(body.input);
+    assert.match(input, /EARLIEST-FACT/);
+    return sse(streamEvents('openai', [text(`Remember EARLIEST-FACT${input.includes('LATEST-FACT') ? ' and LATEST-FACT' : ''}`)]));
+  });
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  agent.importMessages(original);
+  assert.equal(await agent.compact(), true);
+  assert.ok(requests.length > 2);
+  assert.match(JSON.stringify(agent.exportMessages()), /EARLIEST-FACT and LATEST-FACT/);
+  for (const body of requests) assert.equal(body.tools, undefined);
+});
+
+test('A failure partway through a rolling summary retains the whole original history', async () => {
+  const loopSettings = await withCatalog('openai', [{ value: 'gpt-5.5', label: 'GPT', contextWindow: 1000 }]);
+  const original = [{ role: 'user', content: `EARLIEST-FACT ${'middle '.repeat(1000)} LATEST-FACT`, turnId: 't1' }];
+  const requests = transport((body, index) => index === 0 ? sse(streamEvents('openai', [text('EARLIEST-FACT')])) : { status: 400, json: { error: { message: 'Summary rejected' } } });
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  agent.importMessages(original);
+  await assert.rejects(agent.compact(), /Summary rejected/);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(agent.exportMessages(), original);
+});
+
+for (const mode of ['set', 'preserve-start', 'null']) test(`Anthropic compaction round-trips final encrypted metadata (${mode}) through restore and follow-up`, async () => {
+  const loopSettings = await withCatalog('anthropic', [{ value: 'claude-sonnet-4-6', label: 'Claude', contextWindow: 200000, compaction: true }]);
+  const encrypted = mode === 'null' ? null : mode === 'preserve-start' ? 'opaque-start' : 'opaque-final';
+  const finalDelta = { type: 'compaction_delta', content: 'Final complete summary', ...(mode === 'preserve-start' ? {} : { encrypted_content: encrypted }) };
+  const requests = transport((_body, index) => index === 0 ? compactedAnthropicAnswer(null, 'A1', {
+    start: { content: null, encrypted_content: 'opaque-start' },
+    deltas: [...mode === 'preserve-start' ? [] : [{ type: 'compaction_delta', content: 'Interim snapshot', encrypted_content: 'opaque-interim' }], finalDelta],
+  }) : sse(streamEvents('anthropic', [text('A2')])));
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  await agent.run('Q1', callbacks());
+  const saved = JSON.parse(JSON.stringify(agent.exportMessages()));
+  assert.equal(saved.at(-1).replay.items[0].encrypted_content, encrypted);
+  assert.equal(saved.at(-1).compaction.summary, 'Final complete summary');
+  agent.importMessages(saved);await agent.run('Q2', callbacks());
+  assert.deepEqual(requests[1].messages[0].content[0], { type: 'compaction', content: 'Final complete summary', encrypted_content: encrypted });
+});
+
+for (const mode of ['null', 'empty', 'failed-after-draft']) test(`An Anthropic ${mode} compaction is a no-op and cannot cut prior history`, async () => {
+  const loopSettings = await withCatalog('anthropic', [{ value: 'claude-sonnet-4-6', label: 'Claude', contextWindow: 200000, compaction: true }]);
+  const requests = transport((_body, index) => index === 1 ? compactedAnthropicAnswer(mode === 'empty' ? '' : null, 'A2', {
+    start: { content: null, encrypted_content: 'opaque-start' },
+    deltas: [...mode === 'failed-after-draft' ? [{ type: 'compaction_delta', content: 'Invalid draft', encrypted_content: 'draft' }] : [], { type: 'compaction_delta', content: mode === 'empty' ? '' : null, encrypted_content: null }],
+  }) : sse(streamEvents('anthropic', [text(`A${index}`)])));
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);let compacted = 0;
+  await agent.run('EARLIEST-FACT', callbacks(), null, [], 't1');
+  await agent.run('Q2', callbacks({ onCompacted: () => compacted++ }));
+  agent.importMessages(JSON.parse(JSON.stringify(agent.exportMessages())));
+  await agent.run('Q3', callbacks());
+  assert.equal(compacted, 0);
+  assert.equal(agent.exportMessages().some(m=>m.compaction), false);
+  assert.match(JSON.stringify(requests[2].messages), /EARLIEST-FACT/);
+  assert.equal(agent.canEditTurn('t1'), true);
+});
+
+test('A provider handoff ignores the previous provider token count after installing its portable summary', async () => {
+  const first = settings('openai');
+  transport((_body,index)=>compactedResponsesAnswer('openai', `A${index}`, index));
+  const agent = new api.AgentLoop(vaultApp().app, first);
+  await agent.run('EarliestOriginal', callbacks());
+  const next = await withCatalog('anthropic', [{ value: 'claude-sonnet-4-6', label: 'Claude', contextWindow: 100000, compaction: false }]);
+  transport(()=>sse(streamEvents('anthropic', [text('Primed')])));
+  await api.sendAnthropicMessage(next, [{role:'user',content:'Prime catalog'}], [], 'System');
+  const switched = new api.AgentLoop(vaultApp().app, next);switched.importMessages(agent.exportMessages());
+  const requests = transport((body,index)=>sse(streamEvents('anthropic', [text(isSummaryRequest(body)?'Portable handoff summary.':`Answer ${index}`)])));
+  const cb=callbacks();await switched.run('Q2',cb,null,[],'next',null,[],[],90000);
+  assert.deepEqual(cb.errors,[]);
+  assert.equal(requests.filter(isSummaryRequest).length,1);
+  assert.equal(requests.length,2);
+  assert.match(firstUserText(requests[1]),/Portable handoff summary/);
+});
+
+for (const failed of [false,true]) test(`Manual compaction ${failed?'failure':'success'} refreshes only history and preserves the prepared composer`, async () => {
+  const {plugin,view,chat}=await chatSetup('openai');
+  plugin.agent.importMessages([{role:'user',content:'Earlier context',turnId:'old'}]);
+  plugin.chatHistory.push({type:'user',text:'Earlier context',turnId:'old'});
+  const draft={text:'Unsent draft',images:[{id:'image'}],files:[{id:'file'}],selection:{filePath:'Plan.md',text:'Selected'},preparationCurrent:true};
+  chat.clearMessages=preserve=>{chat.shown=[];if(!preserve){draft.images=[];draft.files=[];draft.selection=null;draft.preparationCurrent=false;}};
+  chat.setInputEnabled=(enabled,preserve)=>{if(!enabled&&!preserve)draft.preparationCurrent=false;};
+  plugin.agent.summarize=async()=>{if(failed)throw Error('Summary unavailable');return 'Summary';};
+  await view.compactNow();
+  assert.deepEqual(draft,{text:'Unsent draft',images:[{id:'image'}],files:[{id:'file'}],selection:{filePath:'Plan.md',text:'Selected'},preparationCurrent:true});
+  assert.equal(view.running,false);
 });

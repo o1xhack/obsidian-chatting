@@ -163,7 +163,7 @@ test('The active conversation is restored on load, with its own API history; the
   const written = writes.at(-1);
   assert.equal(written.activeConversationId, 'b');
   assert.deepEqual(written.conversations.map(c => c.id), ['a', 'b']);
-  const { size, ...a } = written.conversations[0];
+  const { size, metadataSavedAt, ...a } = written.conversations[0];
   assert.deepEqual(a, { ...saved.conversations[0], automaticTitle: 'Topic A', titleSourceTurnId: 'a-t' });
   assert.ok(size > 0);
   assert.deepEqual(texts(written.conversations[1].chatHistory), ['Topic B', 'Topic B answer', 'Back to B', 'A1']);
@@ -655,6 +655,14 @@ test('Opening an old chat keeps its attachments: chats unchanged since read are 
   const files = old.agentMessages.flatMap(m => typeof m.content === 'string' ? [] : m.content).filter(b => b.type === 'file');
   assert.equal(files.length, 1);
   assert.equal(files[0].file.data.length, payload.length);
+  const recent = plugin.conversations.find(c => c.id === records[1].id);
+  assert.equal(recent.unloaded, true, 'idle saved attachment payload is evicted, not stripped');
+  const beforeDisk = new Map([...plugin.app.vault.adapter.stored].filter(([path]) => /chats\/[^/]+\.json$/.test(path)));
+  await view.openConversation(recent.id);
+  await plugin.saveChatHistory();
+  assert.equal(old.unloaded, true);
+  assert.equal(recent.agentMessages[0].content[0].file.data.length, payload.length);
+  for (const [path, data] of beforeDisk) assert.equal(plugin.app.vault.adapter.stored.get(path), data, 'opening kept disk file unchanged');
 });
 
 test('Edit and regenerate work within the conversation they belong to', async () => {
@@ -718,7 +726,7 @@ test('A save writes only the chats that changed, each to its own file, then the 
   const index = JSON.parse(files.get(STATE));
   assert.equal(index.version, CHAT_STATE_VERSION);
   for (const entry of index.conversations) {
-    assert.deepEqual(Object.keys(entry).sort(), ['automaticTitle', 'createdAt', 'customTitle', 'id', 'size', 'title', 'titleSourceTurnId', 'updatedAt']);
+    assert.deepEqual(Object.keys(entry).sort(), ['automaticTitle', 'createdAt', 'customTitle', 'id', 'metadataSavedAt', 'size', 'title', 'titleSourceTurnId', 'updatedAt']);
     assert.equal(entry.size, Buffer.byteLength(files.get(chatPath(entry.id))));
   }
   assert.deepEqual(plugin.savedChatsSize(), { chats: 2, bytes: index.conversations.reduce((sum, c) => sum + c.size, 0) });
@@ -1027,4 +1035,50 @@ test('Retention during an in-flight chained response forces replay of the bounde
   const serialized = JSON.stringify(requests[3]);
   assert.match(serialized, /older chat history/);
   assert.doesNotMatch(serialized, /"filename":"1.pdf"/);
+});
+
+test('An old lazy-open completion cannot replace a newer navigation choice', async () => {
+  const { plugin, view, app } = await setup('anthropic');
+  const files = app.vault.adapter;
+  answering('anthropic');
+  await view.handleUserMessage('Chat A', null);
+  const aid = plugin.activeConversationId;
+  view.newChat();
+  await view.handleUserMessage('Chat B', null);
+  const bid = plugin.activeConversationId;
+  await plugin.saveChatHistory();
+  const restored = await reload(files);
+  const read = files.read;
+  let finish;
+  files.read = path => path === chatPath(aid) ? new Promise(resolve => { finish = () => read(path).then(resolve); }) : read(path);
+  const earlier = restored.openConversation(aid);
+  for(let i=0;i<100&&!finish;i++) await tick();
+  assert.ok(finish);
+  restored.startNewConversation();
+  const current = restored.activeConversationId;
+  finish();
+  assert.equal(await earlier, false);
+  assert.equal(restored.activeConversationId, current);
+  assert.notEqual(current, bid);
+});
+
+test('Deleting the active chat cannot steal focus from another chat opened during its lazy fallback read', async () => {
+  const { plugin, view, app } = await setup('anthropic');
+  answering('anthropic');
+  await view.handleUserMessage('Fallback A', null);const aid = plugin.activeConversationId;
+  view.newChat();await view.handleUserMessage('Chosen C', null);const cid = plugin.activeConversationId;
+  view.newChat();await view.handleUserMessage('Deleted B', null);const bid = plugin.activeConversationId;
+  plugin.conversations.find(c=>c.id===aid).updatedAt = Date.now()+1000;
+  await plugin.saveChatHistory();
+  const restored = await reload(app.vault.adapter);
+  const adapter = app.vault.adapter, read = adapter.read;let finish;
+  adapter.read = path => path === chatPath(aid) ? new Promise(resolve => { finish = () => read(path).then(resolve); }) : read(path);
+  const deleting = restored.deleteConversation(bid);
+  for(let i=0;i<100&&!finish;i++)await tick();
+  assert.ok(finish);
+  assert.equal(await restored.openConversation(cid), true);
+  finish();await deleting;await restored.saveChatHistory();
+  assert.equal(restored.activeConversationId, cid);
+  assert.ok(!restored.conversations.some(c=>c.id===bid));
+  assert.equal(JSON.parse(adapter.stored.get(STATE)).activeConversationId, cid);
 });

@@ -6,11 +6,12 @@
  */
 import { historySelection } from "./selection-history";
 import type { ChatHistoryEntry, FileAttachment, ImageAttachment, UnifiedMessage } from "./types";
-import { assignLegacyTurnIds, fromLastCompaction, withoutOldToolImages, withoutLargeToolText, boundedToolText } from "./agent/history";
+import { assignLegacyTurnIds, fromLastCompaction, withoutOldToolImages, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./agent/history";
 import type { ConversationUsage } from "./agent/usage";
 
 /** Current format version of `chat-state.json` and the chat files. */
 export const CHAT_STATE_VERSION = 4;
+
 
 /** A chat whose file is larger is marked with its size in the chat list. */
 export const LARGE_CHAT_BYTES = 5 * 1024 * 1024;
@@ -51,6 +52,8 @@ export interface ConversationRecord {
   pendingTurn?: PendingTurn;
   /** Context of the last request, tokens used and estimated cost (the ring in the chat header). */
   usage?: ConversationUsage;
+  /** Revision of title metadata in the index; carried unchanged for unread chats. */
+  metadataSavedAt?: number;
   /** Size of its saved file in bytes (in the index). */
   size?: number;
   /**
@@ -61,13 +64,15 @@ export interface ConversationRecord {
 }
 
 /** A conversation in the index (`chat-state.json`, version 4). */
-export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size">;
+export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size" | "metadataSavedAt">;
 
 /** A conversation as saved in its file: without the index-only fields. */
-export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded">;
+export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded" | "metadataSavedAt">;
 
 /** The turn a conversation was running. */
 export interface PendingTurn {
+  /** A lost response could have already run external tools; never offer replay. */
+  remoteEffectsPossible?: boolean;
   turnId: string;
   startedAt: number;
 }
@@ -95,6 +100,8 @@ export interface ChatState {
 
 /** A chat file (`chats/<id>.json`) as read. */
 export interface ChatFile {
+  /** A newer-format copy must win recovery without being parsed or overwritten. */
+  unsupported?: boolean;
   /** When it was written (ms); tells the newer of the two copies. */
   savedAt?: number;
   /** Written over a deleted chat's file that couldn't be removed. */
@@ -147,7 +154,8 @@ export function migrateChatState(value: unknown): ChatState | null {
   }
   const items = arrayOf<unknown>(state.conversations)
     .filter((item): item is StateRecord => isRecord(item) && typeof item.id === "string");
-  const conversations = version >= 4 ? items.map(indexedConversation) : items.map(savedRecord);
+  const conversations = version >= 4 ? items.map(item => indexedConversation({ ...item, metadataSavedAt: item.metadataSavedAt ?? state.savedAt ?? 0 })) : items.map(savedRecord);
+
   if (conversations.length === 0) conversations.push(newConversation());
   const active = conversations.find((conversation) => conversation.id === state.activeConversationId)
     ?? newestFirst(conversations)[0];
@@ -168,13 +176,14 @@ function indexedConversation(item: StateRecord): ConversationRecord {
     chatHistory: [],
     agentMessages: [],
     ...(typeof size === "number" && Number.isFinite(size) && size >= 0 ? { size } : {}),
+    ...(typeof item.metadataSavedAt === "number" ? { metadataSavedAt: item.metadataSavedAt } : {}),
     unloaded: true,
   };
 }
 
 /** A whole saved conversation (in `chat-state.json` up to version 3, then in its file). */
 function savedRecord(item: StateRecord): ConversationRecord {
-  const chatHistory = arrayOf<ChatHistoryEntry>(item.chatHistory).map(compactSelection);
+  const chatHistory = withoutLargeVisibleToolText(arrayOf<ChatHistoryEntry>(item.chatHistory).map(compactSelection));
   const customTitle = item.customTitle === true && typeof item.title === "string";
   const derived = conversationTitle(chatHistory);
   const automaticTitle = typeof item.automaticTitle === "string" && item.automaticTitle.trim() ? item.automaticTitle
@@ -187,7 +196,7 @@ function savedRecord(item: StateRecord): ConversationRecord {
   // Optional, so no new format version: an older plugin just drops it.
   const pending = item.pendingTurn;
   const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
-    ? { turnId: pending.turnId, startedAt: pending.startedAt }
+    ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) }
     : undefined;
   return {
     id: item.id as string,
@@ -230,10 +239,10 @@ export function chatFileText(conversation: string, savedAt: number): string {
 export const DELETED_CHAT_FILE = `{"version":${CHAT_STATE_VERSION},"deleted":true}`;
 
 /** A conversation's index entry. */
-export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size }: ConversationRecord): ConversationEntry {
+export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size, metadataSavedAt }: ConversationRecord): ConversationEntry {
   return {
     id, title, ...(automaticTitle !== undefined ? { automaticTitle } : {}), ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}),
-    customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}),
+    customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}), ...(metadataSavedAt !== undefined ? { metadataSavedAt } : {}),
   };
 }
 
@@ -289,13 +298,22 @@ export function newestFirst(conversations: ConversationRecord[]): ConversationRe
  * history from its last compaction on, image and file data only in the API
  * history.
  */
-export function savedConversation({ size: _size, unloaded: _unloaded, ...conversation }: ConversationRecord): SavedConversation {
+export function savedConversation({ size: _size, unloaded: _unloaded, metadataSavedAt: _metadataSavedAt, ...conversation }: ConversationRecord): SavedConversation {
   const titled: ConversationRecord = { ...conversation };
   updateConversationTitle(titled);
   return {
-    ...titled,
+    // Stable top-level order also makes cache digests independent of whether
+    // the record came from an index entry or a whole chat file.
+    id: titled.id, title: titled.title,
+    ...(titled.automaticTitle !== undefined ? { automaticTitle: titled.automaticTitle } : {}),
+    ...(titled.titleSourceTurnId !== undefined ? { titleSourceTurnId: titled.titleSourceTurnId } : {}),
+    customTitle: titled.customTitle, createdAt: titled.createdAt, updatedAt: titled.updatedAt,
     chatHistory: withoutImageData(conversation.chatHistory),
     agentMessages: withoutLargeToolText(withoutOldToolImages(fromLastCompaction(conversation.agentMessages))),
+    ...(titled.notes ? { notes: titled.notes } : {}),
+    ...(titled.pendingMessages ? { pendingMessages: titled.pendingMessages } : {}),
+    ...(titled.pendingTurn ? { pendingTurn: titled.pendingTurn } : {}),
+    ...(titled.usage ? { usage: titled.usage } : {}),
   };
 }
 
@@ -305,7 +323,7 @@ export function savedConversation({ size: _size, unloaded: _unloaded, ...convers
  * history).
  */
 export function withoutImageData(entries: ChatHistoryEntry[]): ChatHistoryEntry[] {
-  return entries.map((entry) => {
+  return withoutLargeVisibleToolText(entries.map((entry) => {
     const compact = compactSelection(entry);
     if (!entry.images?.length && !entry.attachedFiles?.length) return compact;
     const saved = { ...compact };
@@ -314,7 +332,7 @@ export function withoutImageData(entries: ChatHistoryEntry[]): ChatHistoryEntry[
       saved.attachedFiles = entry.attachedFiles.map(({ id, fileName, mediaType, sizeBytes }) => ({ id, fileName, mediaType, sizeBytes, data: "" }));
     }
     return saved;
-  });
+  }));
 }
 
 /**

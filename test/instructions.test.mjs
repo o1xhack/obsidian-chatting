@@ -419,3 +419,28 @@ test('Four near-limit nested rules survive deferral and permit a compliant retry
   assert.equal(files.get(input.path), 'Compliant');
   assert.equal(requests.length, 3);
 });
+
+for (const provider of ['openai', 'chatgpt-oauth']) for (const origin of ['linked', 'selection']) test(`${provider}: ${origin} rules before an opaque compaction are rediscovered from actual request context`, async () => {
+  const { app } = loopWith({ 'Work/AGENTS.md': 'KEEP-WORK-RULE-7319', 'Work/Plan.md': 'Plan' });
+  if (provider === 'chatgpt-oauth') api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'fake-token', accountId: 'fake-account' }) });
+  const config = settings(provider);
+  const identity = await api.catalogIdentity(provider, provider === 'chatgpt-oauth' ? 'fake-account' : config.apiKey);
+  const loop = new api.AgentLoop(app, config);
+  const rules = await api.instructions.folderInstructions(app, ['Work/Plan.md'], new Set());
+  loop.importMessages([
+    { role: 'user', content: rules, instructionSources: ['Work/AGENTS.md'], turnId: 'old0' },
+    { role: 'user', content: 'Old turn covered by the compaction', turnId: 'old1' },
+    { role: 'assistant', content: [text('Answer')], compaction: {}, replay: { provider, model: config.model, identity, items: [{ type: 'compaction', id: 'cmp1', encrypted_content: 'opaque' }] } },
+  ]);
+  const requests = transport(() => response(provider, [text('ok')]));
+  const linked = origin === 'linked' ? { text: 'Linked plan content', images: [], files: [], instructionPaths: ['Work/Plan.md'] } : null;
+  const selection = origin === 'selection' ? { filePath: 'Work/Plan.md', text: 'Plan' } : null;
+  const cb = callbacks();
+  await loop.run('Read the plan', cb, selection, [], 'new1', linked);
+  assert.deepEqual(cb.errors, []);
+  assert.equal(requests.length, 1, 'same-account opaque replay requires no portable summary');
+  assert.equal(JSON.stringify(requests[0].input).split('KEEP-WORK-RULE-7319').length - 1, 1);
+  assert.doesNotMatch(JSON.stringify(requests[0].input), /Old turn covered/);
+  await loop.run('Read it again', callbacks(), selection, [], 'new2', linked);
+  assert.doesNotMatch(JSON.stringify(requests[1].input.at(-1)), /KEEP-WORK-RULE-7319/);
+});

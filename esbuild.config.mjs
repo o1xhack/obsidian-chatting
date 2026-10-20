@@ -10,7 +10,12 @@ const context = await esbuild.context({
   bundle: true,
   plugins: [
     esbuildSvelte({
-      compilerOptions: { css: "injected" },
+      compilerOptions: {
+        css: "injected",
+        // Obsidian hot reload keeps injected styles. A filename-only hash
+        // would reuse the previous release's CSS after a plugin update.
+        cssHash: ({ css, hash }) => `svelte-${hash(css)}`,
+      },
       preprocess: sveltePreprocess(),
     }),
   ],

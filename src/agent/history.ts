@@ -1,4 +1,4 @@
-import type { ChatHistoryEntry, ContentBlock, UnifiedMessage } from "../types";
+import type { ChatHistoryEntry, ContentBlock, ToolResult, UnifiedMessage } from "../types";
 
 /**
  * A user message that starts a turn. Tool results never do, also with a
@@ -18,18 +18,14 @@ export function lastCompaction(messages: UnifiedMessage[]): number {
 }
 
 /**
- * The API history without what the last compaction covers: from that
- * message on, as a new array; the same array when nothing goes. A
- * compaction without a readable summary (OpenAI's is encrypted) keeps what
- * it covers, from the compaction before it on, so another provider or
- * model can summarize it; one compaction further back is dropped, so the
- * history stays within about two compaction windows. There is no cap by
- * count: the compaction point keeps the history within the model's window.
+ * Retain everything since the latest readable summary. Encrypted compaction
+ * items cannot supply a portable summary after a provider/model/account
+ * switch, even if another opaque compaction follows them. Keep their raw
+ * prefix until a readable summary exists. Request replay still starts at
+ * the latest native compaction; attachment and tool-text budgets still apply.
  */
 export function fromLastCompaction(messages: UnifiedMessage[]): UnifiedMessage[] {
-  const last = lastCompaction(messages);
-  if (last <= 0) return messages;
-  const start = messages[last].compaction?.summary ? last : lastCompaction(messages.slice(0, last));
+  const start = messages.map(message => !!message.compaction?.summary).lastIndexOf(true);
   return start > 0 ? messages.slice(start) : messages;
 }
 
@@ -43,13 +39,40 @@ export const MAX_TOOL_FILE_BYTES = 10 * 1024 * 1024;
 export const MAX_TOOL_TEXT_CHARS = 100000;
 const TOTAL_TOOL_TEXT_CHARS = 200000;
 
+const TOOL_TEXT_OMISSION = "\n[Tool text truncated to keep chat history within its size limit. Use search or a smaller focused extract for omitted content.]";
+
 export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): string {
   if (text.length <= limit) return text;
-  const notice = "\n[Tool text truncated to keep chat history within its size limit. Use search or a smaller focused extract for omitted content.]";
+  const notice = TOOL_TEXT_OMISSION;
   let end = Math.max(0, limit - notice.length);
   if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
   const prefix = new TextDecoder().decode(new TextEncoder().encode(text.slice(0, end)));
   return prefix + notice;
+}
+
+/** The same newest-first allowance for visible, saved and folded tool rows. */
+export function withoutLargeVisibleToolText<T extends { toolResult?: ToolResult; steps?: T[] }>(rows: T[]): T[] {
+  let room = TOTAL_TOOL_TEXT_CHARS;
+  const visit = (source: T[]): T[] => {
+    let changed = false;
+    const next = [...source];
+    for (let i = source.length - 1; i >= 0; i--) {
+      const row = source[i];
+      const steps = row.steps && visit(row.steps);
+      let toolResult = row.toolResult;
+      if (toolResult && typeof toolResult.result === "string") {
+        const result = boundedToolText(toolResult.result, Math.min(MAX_TOOL_TEXT_CHARS, room));
+        room = Math.max(0, room - result.length);
+        if (result !== toolResult.result) toolResult = { ...toolResult, result };
+      }
+      if (steps !== row.steps || toolResult !== row.toolResult) {
+        next[i] = { ...row, ...(steps ? { steps } : {}), ...(toolResult ? { toolResult } : {}) };
+        changed = true;
+      }
+    }
+    return changed ? next : source;
+  };
+  return visit(rows);
 }
 
 /** Bound text as well as binary tool payloads. A copied prefix releases the
@@ -60,8 +83,15 @@ export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): stri
 export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
   const replacement = new Map<ContentBlock, ContentBlock>();
+  const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
   for (let i = messages.length - 1; i >= 0; i--) {
-    const content = messages[i].content;
+    const message = messages[i];
+    if (message.replay) {
+      const bounded = withBoundedServerResults(message.replay.items, room);
+      room = bounded.room;
+      if (bounded.items !== message.replay.items) replays.set(message, { ...message.replay, items: bounded.items });
+    }
+    const content = message.content;
     if (typeof content === "string") continue;
     for (let j = content.length - 1; j >= 0; j--) {
       const block = content[j];
@@ -83,11 +113,6 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
       room = Math.max(0, room - clipped.length);
     }
   }
-  const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
-  for (const message of messages) {
-    const bounded = message.replay && withBoundedServerResults(message.replay.items);
-    if (bounded && bounded !== message.replay!.items) replays.set(message, { ...message.replay!, items: bounded });
-  }
   if (!replacement.size && !replays.size) return messages;
   return messages.map(message => {
     const replay = replays.get(message);
@@ -98,38 +123,109 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
   });
 }
 
-/**
- * MCP results the provider returned (Anthropic `mcp_tool_result`, OpenAI
- * `mcp_call.output`) stay in the replayed answer as sent, each clipped like
- * a tool result, so a large one isn't saved and sent again whole.
- */
-function withBoundedServerResults(items: Record<string, unknown>[]): Record<string, unknown>[] {
+/** Remote results share the local tools' text allowance, newest first. Binary
+ * MCP results are not attachments managed by our image budget: omit them from
+ * replay with a text marker instead of retaining unbounded base64 payloads. */
+function withBoundedServerResults(items: Record<string, unknown>[], room: number): { items: Record<string, unknown>[]; room: number } {
+  const bounded = [...items];
   let changed = false;
-  const bounded = items.map((item) => {
-    if (item.type === "mcp_call" && typeof item.output === "string") {
-      const output = boundedToolText(item.output);
-      if (output === item.output) return item;
-      changed = true;
-      return { ...item, output };
+  const take = (text: string, limit = MAX_TOOL_TEXT_CHARS) => {
+    const short = boundedToolText(text, Math.min(limit, room));
+    room = Math.max(0, room - short.length);
+    return short;
+  };
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.type === "mcp_list_tools") {
+      const size = JSON.stringify(item).length;
+      if (size > Math.min(MAX_TOOL_TEXT_CHARS, room)) {
+        // Dropping the catalog makes the provider discover tools again. An
+        // empty/truncated schema could instead hide tools or misdescribe them.
+        const text = "[MCP tool catalog omitted to keep chat history bounded. Rediscover tools from the configured server when needed.]";
+        bounded[i] = { type: "message", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] };
+        room = Math.max(0, room - text.length);
+        changed = true;
+      } else room -= size;
     }
-    if (item.type === "mcp_tool_result" && Array.isArray(item.content)) {
-      let clipped = false;
-      const content = (item.content as unknown[]).map((part) => {
-        if (typeof part !== "object" || part === null) return part;
-        const text = (part as { text?: unknown }).text;
-        if (typeof text !== "string") return part;
-        const short = boundedToolText(text);
-        if (short === text) return part;
-        clipped = true;
-        return { ...part, text: short };
-      });
-      if (!clipped) return item;
-      changed = true;
-      return { ...item, content };
+    if (item.type === "mcp_call") {
+      // Errors can contain the same arbitrary server payload as output. Both
+      // fields share one call's allowance, including structured execution errors.
+      let allowance = MAX_TOOL_TEXT_CHARS;
+      const callText = (text: string) => {
+        const short = take(text, allowance);
+        allowance = Math.max(0, allowance - short.length);
+        return short;
+      };
+      const next = { ...item };
+      if (typeof item.output === "string") next.output = callText(item.output);
+      if (typeof item.error === "string") next.error = callText(item.error);
+      else if (item.error && typeof item.error === "object") {
+        const error = item.error as Record<string, unknown>;
+        const short = { ...error };
+        if (typeof error.message === "string") short.message = callText(error.message);
+        if (error.content !== undefined) {
+          const content = error.content;
+          // A clipped payload has this small, schema-valid object form. Read
+          // its text directly so repeated saves do not re-encode and shrink it.
+          const summary = content && typeof content === "object" && !Array.isArray(content)
+            && Object.keys(content).length === 1 && typeof (content as { text?: unknown }).text === "string"
+            ? (content as { text: string }).text : JSON.stringify(content);
+          const text = callText(summary);
+          if (text !== summary) short.content = { text };
+        }
+        if (short.message !== error.message || short.content !== error.content) next.error = short;
+      }
+      if (next.output !== item.output || next.error !== item.error) { bounded[i] = next; changed = true; }
     }
-    return item;
-  });
-  return changed ? bounded : items;
+    if (item.type === "mcp_tool_result") {
+      if (typeof item.content === "string") {
+        const content = take(item.content);
+        if (content !== item.content) { bounded[i] = { ...item, content }; changed = true; }
+      } else if (Array.isArray(item.content)) {
+        const limit = Math.min(MAX_TOOL_TEXT_CHARS, room);
+        let remaining = limit;
+        const content: Record<string, unknown>[] = [];
+        let clipped = false, truncated = false;
+        const source = item.content as unknown[];
+        for (let index = 0; index < source.length; index++) {
+          // One omission per result, even with thousands of blocks after the
+          // shared allowance is exhausted. Also bound empty block overhead.
+          if (remaining <= 0 || index >= 128) { clipped = truncated = true; break; }
+          const part = source[index];
+          const block = typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string"
+            ? part as { type: string; text: string }
+            : { type: "text", text: "[Non-text MCP result omitted from chat history.]" };
+          clipped ||= block !== part;
+          if (block.text.length > remaining) {
+            content.push({ type: "text", text: block.text.slice(0, remaining) });
+            clipped = truncated = true;
+            break;
+          }
+          content.push(block);
+          remaining -= block.text.length;
+        }
+        if (truncated) {
+          // Reserve room in the retained prefix even when a block consumed
+          // the limit exactly. A missing tail must never look complete.
+          const prefix = content.map(part => part.text as string).join("\n");
+          let end = Math.max(0, limit - TOOL_TEXT_OMISSION.length);
+          if (end > 0 && /[\uD800-\uDBFF]/.test(prefix[end - 1])) end--;
+          const text = new TextDecoder().decode(new TextEncoder().encode(prefix.slice(0, end))) + TOOL_TEXT_OMISSION;
+          content.splice(0, content.length, { type: "text", text });
+        }
+        if (clipped) {
+          const old = source.length === 1 ? source[0] as { type?: string; text?: string } | null : null;
+          // Stable omission markers do not keep replacing their message.
+          if (source.length !== content.length || content.some((part, index) => part !== source[index] &&
+            !(index === 0 && source.length === 1 && old?.type === "text" && old.text === part.text))) {
+            bounded[i] = { ...item, content }; changed = true;
+          }
+        }
+        room = Math.max(0, room - content.reduce((total, part) => total + (part.text as string).length, 0));
+      }
+    }
+  }
+  return { items: changed ? bounded : items, room };
 }
 
 /** Last-resort payload preflight recovery. Keep text, tool pairing and all

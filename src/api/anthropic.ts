@@ -4,8 +4,9 @@ import { ProviderError, StreamCutError } from "./errors";
 import { StreamDropped, streamSSE } from "./stream";
 import { asRecord, getNestedString, isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
+import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls, mcpServerIdentities } from "./mcp";
 import { afterCompaction, compactThreshold } from "../agent/compaction";
-import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls } from "./mcp";
+
 import type {
   ChatSettings,
   McpServer,
@@ -56,6 +57,14 @@ export async function sendAnthropicMessage(
 ): Promise<UnifiedResponse> {
   const model = settings.model;
   const identity = await catalogIdentity("anthropic", settings.apiKey);
+  const servers = activeServers(settings).map(server => ({ ...server }));
+  const priorReplays = messages.filter(message => message.role === "assistant" && message.replay?.provider === "anthropic" &&
+    (!message.replay.model || message.replay.model === model) && (!message.replay.identity || message.replay.identity === identity))
+    .map(message => message.replay!);
+  // A paused server call and its eventual result can live in different
+  // assistant messages. Filter results against all retained calls, not one row.
+  const retainedCallIds = new Set(priorReplays.flatMap(replay => withoutGoneServerCalls(replay.items, servers, replay.mcpServers))
+    .filter(item => item.type === "mcp_tool_use").map(item => item.id));
   if (settings.modelCatalog) {
     cachedCatalog(settings.modelCatalog, "anthropic", identity);
   }
@@ -72,9 +81,9 @@ export async function sendAnthropicMessage(
         cache_control: { type: "ephemeral" },
       },
     ],
-    // After a compaction, from its message on: the API ignores what came before.
     messages: withoutOldToolImages(afterCompaction(messages, (message) => canReplay(message, model, identity)))
-      .map(msg => toAnthropicMessage(msg, model, identity, activeServers(settings))),
+      .map(msg => toAnthropicMessage(msg, model, identity, servers, retainedCallIds)),
+
   };
 
   // The thinking mode the model catalog reports (`/v1/models` capabilities);
@@ -130,7 +139,6 @@ export async function sendAnthropicMessage(
   }
 
   // Remote MCP servers, connected by Anthropic (`api/mcp.ts`).
-  const servers = activeServers(settings);
   if (servers.length) {
     betas.push(ANTHROPIC_MCP_BETA);
     const mcp = anthropicMcp(servers);
@@ -151,9 +159,9 @@ export async function sendAnthropicMessage(
       ...(betas.length ? { "anthropic-beta": betas.join(",") } : {}),
     },
     body: requestBody,
+    noFallback: servers.length > 0,
   }, collected.onEvent, stream.signal).catch((error: unknown) => {
-    // The connection was lost after the answer began: a cut stream.
-    throw error instanceof StreamDropped ? new StreamCutError("Anthropic", collected.serverTool()) : error;
+    throw withReceipts(error instanceof StreamDropped ? new StreamCutError("Anthropic", collected.serverTool()) : error);
   });
 
   if (response.status !== 200) {
@@ -162,33 +170,48 @@ export async function sendAnthropicMessage(
       getNestedString(response.json, ["error", "type"]), response.retryAfterMs);
   }
 
-  const data = parseAnthropicResponse(collected.finish());
-  const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
-  const sources = citedSources(data.content);
-  if (sources) {
-    // Right after the answer's text, before any tool call: in the history
-    // another provider gets, text after a call would split it from its result.
-    const firstCall = content.findIndex((b) => b.type === "tool_use");
-    content.splice(firstCall === -1 ? content.length : firstCall, 0, sources);
+  let complete: Record<string, unknown>;
+  try { complete = collected.finish(); }
+  catch (error) { throw withReceipts(error); }
+  return toResponse(complete);
+
+  function withReceipts(error: unknown): unknown {
+    if (!collected.serverTool() && !servers.length) return error;
+    const source = error instanceof Error ? error.message : String(error);
+    const partial = toResponse(collected.snapshot());
+    if (!partial.serverCalls?.length) partial.content.push({ type: "text", text: "Remote MCP request outcome unknown. Check the external service before repeating this request." });
+    return new ProviderError(source + " Remote MCP tools may already have run; check their results before retrying.", 0,
+      error instanceof ProviderError ? error.code : undefined, undefined, true, partial);
   }
 
-  return {
-    content,
-    // Thinking signatures, redacted thinking, citations and server tool results
-    // must be returned unchanged. UI content is deliberately separate.
-    replay: { provider: "anthropic", model, identity, items: data.content },
-    stopReason: normalizeStopReason(data.stop_reason),
-    usage: data.usage,
-    ...withServerCalls(anthropicServerCalls(data.content)),
-    ...compactionOf(data.content),
-  };
+  function toResponse(packet: Record<string, unknown>): UnifiedResponse {
+    const data = parseAnthropicResponse(packet);
+    const content = data.content.map(fromAnthropicBlock).filter((b): b is ContentBlock => b !== null);
+    const sources = citedSources(data.content);
+    if (sources) {
+      // Right after the answer's text, before any tool call: in the history
+      // another provider gets, text after a call would split it from its result.
+      const firstCall = content.findIndex((b) => b.type === "tool_use");
+      content.splice(firstCall === -1 ? content.length : firstCall, 0, sources);
+    }
+
+    return {
+      content,
+      // Thinking signatures, redacted thinking, citations and server tool results
+      // must be returned unchanged. UI content is deliberately separate.
+      replay: { provider: "anthropic", model, identity, items: data.content, mcpServers: mcpServerIdentities(servers) },
+      stopReason: normalizeStopReason(data.stop_reason),
+      usage: data.usage,
+      ...compactionOf(data.content),
+      ...withServerCalls(anthropicServerCalls(data.content, messages.flatMap(message => message.replay?.provider === "anthropic" ? message.replay.items : []))),
+    };
+  }
 }
 
 /** A `compaction` block in the answer: the context was summarized, readably. */
 function compactionOf(blocks: AnthropicContentBlock[]): Pick<UnifiedResponse, "compaction"> {
-  const block = [...blocks].reverse().find((item) => item.type === "compaction");
-  if (!block) return {};
-  return { compaction: typeof block.content === "string" && block.content ? { summary: block.content } : {} };
+  const block = [...blocks].reverse().find((item) => item.type === "compaction" && typeof item.content === "string" && item.content.length > 0);
+  return block ? { compaction: { summary: block.content as string } } : {};
 }
 
 /**
@@ -213,6 +236,7 @@ function anthropicUsage(usage: Record<string, unknown>): TokenUsage {
     ...(written ? { cacheWriteTokens: written } : {}),
     ...(compactionInput || compactionOutput ? { compactionInputTokens: compactionInput, compactionOutputTokens: compactionOutput } : {}),
   };
+
 }
 
 // ─── Streaming ──────────────────────────────────────────────────────────────
@@ -230,6 +254,7 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
   finish: () => Record<string, unknown>;
   /** An MCP call started in this answer. */
   serverTool: () => boolean;
+  snapshot: () => Record<string, unknown>;
 } {
   let serverTool = false;
   let message: Record<string, unknown> | undefined;
@@ -266,9 +291,13 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
             block.signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
           } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
             inputJson.set(index, (inputJson.get(index) ?? "") + delta.partial_json);
-          } else if (delta.type === "compaction_delta" && typeof delta.content === "string") {
-            // The whole summary of a compaction, in one delta.
-            block.content = (typeof block.content === "string" ? block.content : "") + delta.content;
+          } else if (delta.type === "compaction_delta" && block.type === "compaction") {
+            // As in Anthropic's SDK, these are whole final values, not text
+            // fragments. Null content is a failed compaction (a no-op).
+            if (typeof delta.content === "string" || delta.content === null) block.content = delta.content;
+            if ("encrypted_content" in delta && (typeof delta.encrypted_content === "string" || delta.encrypted_content === null)) {
+              block.encrypted_content = delta.encrypted_content;
+            }
           } else if (delta.type === "citations_delta" && delta.citation !== undefined) {
             block.citations = [...(Array.isArray(block.citations) ? block.citations as unknown[] : []), delta.citation];
           }
@@ -313,6 +342,7 @@ function collectAnthropicStream(onTextDelta?: (text: string) => void, onServerTo
       return { ...message, content: blocks.filter(Boolean) };
     },
     serverTool: () => serverTool,
+    snapshot: () => ({ ...message, content: blocks.filter(Boolean) }),
   };
 }
 
@@ -361,9 +391,10 @@ function canReplay(msg: UnifiedMessage, model: string, identity: string): boolea
   return msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity);
 }
 
-function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[]): Record<string, unknown> {
-  if (canReplay(msg, model, identity) && msg.replay) {
-    const content = withoutGoneServerCalls(msg.replay.items, servers);
+function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string, servers: McpServer[], retainedCallIds: ReadonlySet<unknown>): Record<string, unknown> {
+  if (msg.role === "assistant" && msg.replay?.provider === "anthropic" && (!msg.replay.model || msg.replay.model === model) && (!msg.replay.identity || msg.replay.identity === identity)) {
+    const content = withoutGoneServerCalls(msg.replay.items, servers, msg.replay.mcpServers, retainedCallIds);
+
     // Nothing but calls of servers that are gone: sent as text below.
     if (content.length) return { role: msg.role, content };
   }
@@ -405,7 +436,7 @@ function toAnthropicMessage(msg: UnifiedMessage, model: string, identity: string
     return { type: "text", text: block.text };
   }).filter((b) => !(b.type === "text" && !b.text));
 
-  return { role: msg.role, content: blocks };
+  return { role: msg.role, content: blocks.length ? blocks : [{ type: "text", text: "[Earlier MCP steps omitted: the server configuration changed.]" }] };
 }
 
 /**

@@ -61,6 +61,8 @@ export interface ServerToolCall {
   input: Record<string, unknown>;
   result: string;
   isError: boolean;
+  /** The provider has not supplied a result yet (for example a paused turn). */
+  pending?: boolean;
 }
 
 /**
@@ -176,6 +178,8 @@ export interface ProviderReplay {
   model?: string;
   identity?: string;
   items: Record<string, unknown>[];
+  /** Hashed server identities; no credentials, used to reject stale MCP replay. */
+  mcpServers?: Record<string, string>;
 }
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
@@ -215,6 +219,7 @@ export interface TokenUsage {
 
 /** Per request: where streamed answer text goes, and how Stop cancels it. */
 export interface StreamOptions {
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>;
   onTextDelta?: (text: string) => void;
   /** The provider started a tool with possible effects (an MCP call): the request must not be sent again. */
   onServerTool?: () => void;
@@ -348,6 +353,8 @@ export interface ViewTarget {
 // ─── Agent Loop Callbacks ───────────────────────────────────────────────────
 
 export interface AgentCallbacks {
+  /** Persist uncertainty before a request capable of external side effects. */
+  onRequestStarted?: (remoteEffectsPossible: boolean) => void | Promise<void>;
   onThinking: () => void;
   /** Answer text as it streams in; `onResponse` later gives the whole text. */
   onTextDelta?: (text: string) => void;

@@ -1,0 +1,131 @@
+{
+  "productionMainSha256": "f6201d577f68be8eab62682eb416b217f830f51d30e876a2057e11b452f3d935",
+  "automatedTests": 550,
+  "mcpRegressions": 61,
+  "desktop": {
+    "scope": "native desktop Obsidian, exact production bundle and mounted Svelte UI; provider transport mocked; no live-provider claim",
+    "appVersion": "1.14.4",
+    "checks": [
+      "candidate-loaded",
+      "upgrade-visible-history",
+      "upgrade-api-history",
+      "upgrade-conversations",
+      "native-permission-description",
+      "native-token-masked",
+      "native-token-clear",
+      "native-settings-no-token",
+      "native-narrow-settings-no-horizontal-overflow",
+      "native-add-default-off",
+      "production-shared-mcp-budget",
+      "production-block-boundary-marker",
+      "production-structured-error-budget",
+      "production-large-catalog-rediscovery",
+      "native-mcp-result-history",
+      "native-mcp-step-label",
+      "native-mcp-answer-rendered",
+      "native-disable-removes-request-config",
+      "native-disable-removes-replay",
+      "native-no-retry-after-remote-effects",
+      "native-failed-receipt-history",
+      "native-failed-receipt-step-rendered",
+      "native-failed-response-warning",
+      "native-failed-receipt-persistable",
+      "native-revocation-keeps-receipt",
+      "native-incomplete-no-completed-result",
+      "native-incomplete-no-success-label",
+      "native-shared-mcp-callback-budget",
+      "native-shared-visible-history-budget",
+      "native-folded-tool-result-pruned",
+      "native-retry-honors-revocation",
+      "protected-vault-files-unchanged"
+    ],
+    "version": "0.8.0",
+    "candidateSha256": "f6201d577f68be8eab62682eb416b217f830f51d30e876a2057e11b452f3d935",
+    "narrowLayout": {
+      "width": 375,
+      "scrollWidth": 375,
+      "clientWidth": 375,
+      "controlCount": 4
+    },
+    "protectedFiles": {
+      "checked": 1809,
+      "changed": 0
+    }
+  },
+  "physicalIPhone": {
+    "scope": "physical iPhone; exact production plugin; real Obsidian settings controls, synthetic token store; no provider/network request",
+    "time": "2026-10-19T18:30:14.422Z",
+    "appVersion": "1.14.5",
+    "isPhone": true,
+    "checks": [
+      "plugin-loaded",
+      "exact-candidate-hash",
+      "version-080",
+      "production-settings-tab",
+      "permission-description",
+      "masked-token",
+      "token-clear-event",
+      "settings-no-token",
+      "no-horizontal-overflow",
+      "add-default-off-distinct-ids",
+      "chatgpt-route-explained",
+      "original-settings-retained",
+      "production-shared-mcp-budget",
+      "production-block-boundary-marker",
+      "production-structured-error-budget"
+    ],
+    "version": "0.8.0",
+    "candidateSha256": "3b4c25572c6aca7d451eb9af0c398f0bcacd7054ed9b94526a39a7dab17512bd",
+    "chats": 4,
+    "activeEntries": 12,
+    "layout": {
+      "width": 388,
+      "scrollWidth": 388,
+      "viewport": 420
+    },
+    "passed": true,
+    "protectedFiles": {
+      "checked": 1812,
+      "changed": 0,
+      "settingsByteUnchanged": true
+    },
+    "testedCommit": "d0c5bff9e93a16f1b4f61220940be45e3d298ccd",
+    "isFinalCandidate": false,
+    "subsequentChanges": "Receipt retention after revocation, catalog/error/status and visible-history budgets, and settings-copy clarification were retested on desktop only. No final physical phone rerun. Retry revocation was also retested on desktop only."
+  },
+  "realChatGPT": {
+    "initial": {
+      "scope": "native desktop, production plugin, real ChatGPT subscription; no vault tools requested",
+      "version": "0.8.0",
+      "provider": "chatgpt-oauth",
+      "model": "gpt-6.1-sol",
+      "answers": [
+        "PHASE4-CHATGPT-LIVE-OK"
+      ],
+      "errors": [],
+      "toolCount": 0,
+      "passed": true
+    },
+    "reload": {
+      "scope": "native desktop real ChatGPT subscription, persisted login/history and real continuation after plugin reload",
+      "version": "0.8.0",
+      "model": "gpt-6.1-sol",
+      "connected": true,
+      "historyRestored": true,
+      "answers": [
+        "PHASE4-CHATGPT-RELOAD-OK"
+      ],
+      "errors": [],
+      "protectedFiles": {
+        "checked": 1809,
+        "changed": 0
+      },
+      "passed": true
+    }
+  },
+  "limitations": [
+    "Anthropic/OpenAI MCP requests use mocked transport in regression/native tests; no live API-key MCP call was made.",
+    "The physical phone verifies production settings controls and preservation; it does not exercise a real remote MCP server.",
+    "Physical iPhone checks cover candidate d0c5bff, before subsequent receipt/catalog/status and visible-history budget fixes, plus settings-copy clarification; final bundle was retested on desktop. Retry revocation was also retested on desktop only."
+  ]
+}
