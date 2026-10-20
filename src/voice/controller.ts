@@ -126,6 +126,8 @@ export class VoiceController {
   private openTurn: VoiceTurn | null = null;
   /** The request the last delegation took: its late "turn done" isn't kept again. */
   private lastRequest = "";
+  /** The consumed user transcript, when the delegation rephrased it. */
+  private lastRequestTranscript = "";
   private lastSpeaker: "user" | "assistant" | null = null;
   private voiceTurnRunning = false;
   /** The newest delegation in the running voice turn: progress and the answer go to it. */
@@ -355,10 +357,11 @@ export class VoiceController {
 
   /** A turn is complete (Codex sends its whole text): keep it. */
   private finishTurn(role: VoiceTurn["role"], text: string): void {
-    if (role === "user" && this.lastRequest && sameWords(text, this.lastRequest)) {
+    if (role === "user" && [this.lastRequest, this.lastRequestTranscript].some(request => request && sameWords(text, request))) {
       // The request a delegation already took, reported late.
-      if (this.openTurn?.role === "user") this.openTurn = null;
+      if (this.openTurn?.role === "user" && sameWords(this.openTurn.text, text)) this.openTurn = null;
       this.lastRequest = "";
+      this.lastRequestTranscript = "";
       return;
     }
     if (this.openTurn?.role !== role) {
@@ -369,10 +372,14 @@ export class VoiceController {
         kept.text = text.trim();
         return;
       }
-      this.closeTurn();
+      const closed = this.closeTurn();
+      if (closed?.role === "user" && this.voiceTurnRunning) this.queueSteer(closed);
     }
+    const times = this.openTurn ? this.turnTimes.get(this.openTurn) : undefined;
     this.openTurn = { role, text };
-    this.closeTurn();
+    if (times) this.turnTimes.set(this.openTurn, times);
+    const kept = this.closeTurn();
+    if (kept?.role === "user" && this.voiceTurnRunning) this.queueSteer(kept);
   }
 
   /** Keep the open turn in the transcript; returns it as kept. */
@@ -408,6 +415,7 @@ export class VoiceController {
         break;
       }
     }
+    this.lastRequestTranscript = last >= 0 ? turns[last].text : "";
     if (last >= 0 && (!request || sameWords(turns[last].text, request))) {
       const taken = !request;
       let first = this.turnTimes.get(turns[last])?.first ?? 0;

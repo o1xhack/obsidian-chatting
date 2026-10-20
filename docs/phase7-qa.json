@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 760,
-    "passed": 760,
+    "tests": 768,
+    "passed": 768,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -80,6 +80,12 @@
       "migration-chat-present-chat-mvh7d2si-sj2qft",
       "migration-visible-chat-mvh7d2si-sj2qft",
       "migration-api-chat-mvh7d2si-sj2qft",
+      "migration-chat-present-chat-mvh7kda3-vr23n6",
+      "migration-visible-chat-mvh7kda3-vr23n6",
+      "migration-api-chat-mvh7kda3-vr23n6",
+      "migration-chat-present-chat-mvh8bbyq-huzydu",
+      "migration-visible-chat-mvh8bbyq-huzydu",
+      "migration-api-chat-mvh8bbyq-huzydu",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -113,7 +119,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "4e6839540e0b364d8ba5abe0c351b2e867680c67dedf41595285ac01bb2b4736",
+    "mainSha256": "54b55d24a74750e1733d8026cbbdb8cf02d0e0b1cb77437e1796c7389324c18f",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -132,17 +138,22 @@
       "delegated-answer-rendered",
       "answer-returned-to-voice",
       "duplicate-delegation-no-second-request",
+      "completed-user-turn-queued-native",
+      "completed-correction-sent-to-native-backend",
       "voice-375px-no-overflow",
       "end-mutes-microphone-immediately",
       "end-removes-bar",
       "end-restores-composer",
+      "native-stalled-stream-probe-timed-out",
+      "native-diagnostic-advanced-after-timeout",
+      "native-diagnostic-cancelled-and-completed",
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "4e6839540e0b364d8ba5abe0c351b2e867680c67dedf41595285ac01bb2b4736"
+    "mainSha256": "54b55d24a74750e1733d8026cbbdb8cf02d0e0b1cb77437e1796c7389324c18f"
   },
   "liveVoice": {
-    "mainSha256": "4e6839540e0b364d8ba5abe0c351b2e867680c67dedf41595285ac01bb2b4736",
+    "mainSha256": "54b55d24a74750e1733d8026cbbdb8cf02d0e0b1cb77437e1796c7389324c18f",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "events": [
       "session.started",
@@ -156,7 +167,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvh7kda3-vr23n6",
+    "conversationId": "chat-mvh8m742-bfnpfa",
     "connected": true,
     "answerReadNote": true,
     "delegated": true,
@@ -172,5 +183,19 @@
     "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account.",
     "The available phone control service showed concurrent active operations; this task did not take over the phone."
   ],
-  "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready."
+  "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready.",
+  "reviewFixes": [
+    {
+      "comment": 4330742541,
+      "fix": "Queue completed user turns for steering; ignore the consumed transcript after a paraphrased delegation."
+    },
+    {
+      "comment": 4330742555,
+      "fix": "Preserve exact separators at speech/progress chunk boundaries."
+    },
+    {
+      "comment": 4330742565,
+      "fix": "Bound streaming/CORS/model probes; abort fetch and cancel stalled readers, then continue diagnostics."
+    }
+  ]
 }

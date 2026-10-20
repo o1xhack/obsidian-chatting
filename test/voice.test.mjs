@@ -57,6 +57,8 @@ async function until(condition, ms = 3000) {
 }
 
 beforeEach(() => {
+  delete globalThis.__fetch;
+  api.CAPABILITY_TIMING.networkMs = 1000;
   rtc.pcs = [];
   Object.assign(S.SESSION_TIMING, { iceWait: 10, iceSettle: 5, startWait: 1000, closeWait: 300, quietLog: 5 });
   Object.assign(S.SESSION_TIMING, { permissionWait: 1000, connectWait: 1000 });
@@ -160,6 +162,118 @@ const appended = (ch, kind) => ch.sent.filter((e) => e.type === 'delegation.cont
 const spoken = (ch) => appended(ch, 'speakable');
 /** Progress notes for the voice model, not to be said. */
 const notes = (ch) => appended(ch, 'commentary');
+
+test('Spoken and progress chunks preserve every separator and edge whitespace', () => {
+  const original = '  leading\n' + 'word café 🌍\tand another word\n'.repeat(60) + '\n trailing  ';
+  for (const append of [P.speakEvents, P.progressEvents]) {
+    const events = append('words', original);
+    assert.ok(events.length > 1);
+    assert.equal(events.map(e => e.content[0].text).join(''), original);
+    assert.ok(events.every(e => new TextEncoder().encode(e.content[0].text).length <= 500));
+  }
+});
+
+for (const terminal of ['user', 'assistant']) {
+  test(`A ${terminal} terminal event queues a completed correction without a delegation`, async () => {
+    const { view, chat, plugin } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('r', 'read_file', { path: 'Untitled.md' })], 'tool_use')); })
+      : response('anthropic', [text('Done.')]) });
+    await startListening(view, chat);
+    const ch = channel();
+    delegated(ch, 'first', 'Read the note');
+    await until(() => log.chat.length === 1);
+    said(ch, 'Also keep the original title');
+    ch.receive({ type: 'turn.done', turn: { role: terminal, transcript: terminal === 'user' ? 'Also keep the original title' : 'Okay.' } });
+    answered(ch, 'Okay.');
+    await until(() => chat.queued.includes('Also keep the original title'));
+    release();
+    await until(() => spoken(ch).length > 0);
+    assert.equal(log.chat.length, 2);
+    assert.match(JSON.stringify(log.chat[1]), /Also keep the original title/);
+    assert.equal(plugin.chatHistory.filter(e => e.type === 'user' && e.text === 'Also keep the original title').length, 1);
+    view.endVoice();
+  });
+}
+
+test('A late original transcript is not re-steered when its delegation rephrased the request', async () => {
+  const { view, chat } = await voiceSetup();
+  let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('r', 'read_file', { path: 'Untitled.md' })], 'tool_use')); })
+    : response('anthropic', [text('Done.')]) });
+  await startListening(view, chat);
+  const ch = channel();
+  said(ch, 'Could you get the note content?');
+  delegated(ch, 'first', 'Read Untitled.md');
+  await until(() => log.chat.length === 1);
+  ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Could you get the note content?' } });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(chat.queued, []);
+  release();
+  await until(() => spoken(ch).length > 0);
+  assert.equal(log.chat.length, 2);
+  assert.doesNotMatch(JSON.stringify(log.chat[1]), /The user added while you were working/);
+  view.endVoice();
+});
+
+test('A streaming probe aborts an unanswered fetch and advances with a timeout', async () => {
+  api.CAPABILITY_TIMING.networkMs = 10;
+  let signal, calls = 0;
+  globalThis.__fetch = async (_url, init) => { calls++; signal = init.signal; return new Promise(() => {}); };
+  await assert.rejects(api.streamProbe('https://probe.example', {}, {}, 'test'), /timed out/);
+  assert.equal(signal.aborted, true);
+  assert.equal(calls, 1);
+});
+
+test('A streaming probe cancels a stalled body reader even when fetch ignores abort', async () => {
+  api.CAPABILITY_TIMING.networkMs = 10;
+  let cancelled = false, signal;
+  globalThis.__fetch = async (_url, init) => {
+    signal = init.signal;
+    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => { cancelled = true; } }) } };
+  };
+  await assert.rejects(api.streamProbe('https://probe.example', {}, {}, 'test'), /timed out/);
+  assert.equal(signal.aborted, true);
+  assert.equal(cancelled, true);
+});
+
+test('The abort probe also times out and releases a reader that ignores cancellation', async () => {
+  api.CAPABILITY_TIMING.networkMs = 20;
+  let calls = 0, cancelled = false;
+  globalThis.__fetch = async () => {
+    if (++calls === 1) return new Response('finished');
+    let first = true;
+    return { ok: true, body: { getReader: () => ({
+      read: () => first ? (first = false, Promise.resolve({ done: false, value: new Uint8Array([1]) })) : new Promise(() => {}),
+      cancel: async () => { cancelled = true; },
+    }) } };
+  };
+  await assert.rejects(api.streamProbe('https://probe.example', {}, {}, 'test'), /timed out/);
+  assert.equal(calls, 2);
+  assert.equal(cancelled, true);
+});
+
+test('Successful streaming and an acknowledged abort report a passing capability probe', async () => {
+  let calls = 0;
+  globalThis.__fetch = async (_url, init) => {
+    if (++calls === 1) return new Response(new ReadableStream({ start(c) {
+      c.enqueue(new Uint8Array([1])); setTimeout(() => { c.enqueue(new Uint8Array([2])); c.close(); }, 5);
+    } }));
+    let first = true;
+    return { ok: true, body: { getReader: () => ({
+      read: async () => { if (first) { first = false; return { done: false, value: new Uint8Array([1]) }; }
+        if (init.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        return { done: true }; }, cancel: async () => {},
+    }) } };
+  };
+  const result = await api.streamProbe('https://probe.example', {}, {}, 'test');
+  assert.equal(result[0], 'ok');
+  assert.match(result[1], /abort works/);
+});
+
+afterEach(() => { delete globalThis.__fetch; });
 
 test('Ending while microphone permission is pending cancels startup and releases a late-granted stream', async () => {
   const original = navigator.mediaDevices.getUserMedia;

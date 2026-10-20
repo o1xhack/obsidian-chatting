@@ -24,6 +24,29 @@ export interface CapabilityKeys {
 
 const OPENAI = "https://api.openai.com/v1";
 const ANTHROPIC = "https://api.anthropic.com/v1";
+/** Per-network-probe deadline; tests shorten it. */
+export const CAPABILITY_TIMING = { networkMs: 15000 };
+
+async function probeDeadline<T>(work: (controller: AbortController) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer = 0;
+  let expired = false;
+  try {
+    return await Promise.race([work(controller), new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => {
+        expired = true;
+        controller.abort();
+        reject(new Error("The network capability check timed out."));
+      }, CAPABILITY_TIMING.networkMs);
+    })]);
+  } catch (error) {
+    if (expired) throw new Error("The network capability check timed out.");
+    throw error instanceof Error ? error : new Error(message(error));
+  } finally {
+    window.clearTimeout(timer);
+    controller.abort();
+  }
+}
 
 export async function runCapabilityCheck(app: App, keys: CapabilityKeys, voice: VoiceRoute | null): Promise<void> {
   const modal = new CapabilityModal(app);
@@ -110,10 +133,12 @@ function gatherCandidates(pc: RTCPeerConnection, timeoutMs: number): Promise<str
 /** Without a key: proves only that the browser may call the API (CORS). */
 async function checkOpenAIStreaming(apiKey: string): Promise<[Status, string]> {
   if (!apiKey) {
-    const res = await browserFetch(`${OPENAI}/responses`, { method: "POST", headers: { Authorization: "Bearer invalid", "Content-Type": "application/json" }, body: "{}" });
-    return ["ok", `CORS allowed (HTTP ${res.status} readable). Set an OpenAI key to test streaming.`];
+    return probeDeadline(async (controller) => {
+      const res = await browserFetch(`${OPENAI}/responses`, { method: "POST", headers: { Authorization: "Bearer invalid", "Content-Type": "application/json" }, body: "{}", signal: controller.signal });
+      return ["ok", `CORS allowed (HTTP ${res.status} readable). Set an OpenAI key to test streaming.`];
+    });
   }
-  const model = await newestModel(apiKey, (id) => /^gpt-/.test(id) && !/realtime|audio|transcri|search|image|tts/.test(id));
+  const model = await probeDeadline(() => newestModel(apiKey, (id) => /^gpt-/.test(id) && !/realtime|audio|transcri|search|image|tts/.test(id)));
   if (!model) return ["fail", "no chat model found in /v1/models"];
   return streamProbe(`${OPENAI}/responses`, { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     { model, input: "Count from 1 to 30, one number per line.", stream: true, store: false }, model);
@@ -127,11 +152,13 @@ async function checkAnthropicStreaming(apiKey: string): Promise<[Status, string]
     "content-type": "application/json",
   };
   if (!apiKey) {
-    const res = await browserFetch(`${ANTHROPIC}/messages`, { method: "POST", headers, body: "{}" });
-    return ["ok", `CORS allowed (HTTP ${res.status} readable). Set an Anthropic key to test streaming.`];
+    return probeDeadline(async (controller) => {
+      const res = await browserFetch(`${ANTHROPIC}/messages`, { method: "POST", headers, body: "{}", signal: controller.signal });
+      return ["ok", `CORS allowed (HTTP ${res.status} readable). Set an Anthropic key to test streaming.`];
+    });
   }
   // The model list through requestUrl(), like the plugin's own; only the probes use fetch.
-  const list = await requestUrl({ url: `${ANTHROPIC}/models?limit=20`, headers, throw: false });
+  const list = await probeDeadline(() => requestUrl({ url: `${ANTHROPIC}/models?limit=20`, headers, throw: false }));
   const data = asRecord(readJson(list)).data;
   const model = Array.isArray(data) ? asRecord(data[0]).id : undefined;
   if (typeof model !== "string") return ["fail", "no model found in /v1/models"];
@@ -140,27 +167,56 @@ async function checkAnthropicStreaming(apiKey: string): Promise<[Status, string]
 }
 
 /** Reads a streamed response chunk by chunk, then checks that abort works. */
-async function streamProbe(url: string, headers: Record<string, string>, body: unknown, model: string): Promise<[Status, string]> {
+export async function streamProbe(url: string, headers: Record<string, string>, body: unknown, model: string): Promise<[Status, string]> {
   const started = Date.now();
-  const res = await browserFetch(url, { method: "POST", headers, body: JSON.stringify(body) });
-  if (!res.ok || !res.body) return ["fail", `HTTP ${res.status} with ${model}: ${(await res.text()).slice(0, 200)}`];
-  const reader = res.body.getReader();
   let chunks = 0;
   let firstChunkMs = 0;
-  for (;;) {
-    const { done } = await reader.read();
-    if (done) break;
-    if (chunks++ === 0) firstChunkMs = Date.now() - started;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let failure = "";
+  try {
+    await probeDeadline(async (controller) => {
+      const res = await browserFetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
+      if (!res.ok || !res.body) {
+        failure = `HTTP ${res.status} with ${model}: ${(await res.text()).slice(0, 200)}`;
+        return;
+      }
+      reader = res.body.getReader();
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) break;
+        if (chunks++ === 0) firstChunkMs = Date.now() - started;
+      }
+    });
+  } finally {
+    // Also release a WebView reader that ignores the fetch abort signal.
+    void reader?.cancel().catch(() => undefined);
   }
+  if (failure) return ["fail", failure];
   const totalMs = Date.now() - started;
 
-  const controller = new AbortController();
-  const aborted = await browserFetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal })
-    .then(async (r) => { const rd = r.body!.getReader(); await rd.read(); controller.abort(); await rd.read(); return "not aborted"; })
-    .catch((e: unknown) => (e instanceof DOMException && e.name === "AbortError" ? "abort works" : `abort error: ${message(e)}`));
+  let abortReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let requestedAbort = false;
+  let aborted: string;
+  try {
+    aborted = await probeDeadline(async (controller) => {
+      const res = await browserFetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
+      if (!res.ok || !res.body) return `abort probe HTTP ${res.status}`;
+      abortReader = res.body.getReader();
+      await abortReader.read();
+      requestedAbort = true;
+      controller.abort();
+      await abortReader.read();
+      return "not aborted";
+    }).catch((error: unknown) => {
+      if (requestedAbort && error instanceof Error && error.name === "AbortError") return "abort works";
+      throw error instanceof Error ? error : new Error(message(error));
+    });
+  } finally {
+    void abortReader?.cancel().catch(() => undefined);
+  }
 
   const streamed = chunks > 1 && firstChunkMs < totalMs;
-  return [streamed ? "ok" : "fail",
+  return [streamed && aborted === "abort works" ? "ok" : "fail",
     `${model}: ${chunks} chunks, first after ${firstChunkMs} ms, done after ${totalMs} ms; ${aborted}`];
 }
 

@@ -63,7 +63,7 @@ export const bundled = await build({
     export * as voiceController from './src/voice/controller';
     export * as codexVoice from './src/voice/codex';
     export { DEFAULT_SETTINGS } from './src/types';
-    export { checkLiveVoice, checkMicrophone } from './src/diagnostics/capability-check';
+    export { checkLiveVoice, checkMicrophone, streamProbe, CAPABILITY_TIMING } from './src/diagnostics/capability-check';
   `, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
   plugins: [{ name: 'obsidian-test-transport', setup(build) {

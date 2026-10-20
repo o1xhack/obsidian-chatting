@@ -162,7 +162,7 @@ export function chunks(text: string, fits: (part: string) => boolean): string[] 
     }
   }
   if (current) parts.push(current);
-  return parts.map((part) => part.trim()).filter(Boolean);
+  return parts.filter((part) => part.length > 0);
 }
 
 /** The last few chat messages as text, so the voice model knows the context. */
