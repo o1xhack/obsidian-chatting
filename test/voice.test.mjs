@@ -59,6 +59,7 @@ async function until(condition, ms = 3000) {
 beforeEach(() => {
   rtc.pcs = [];
   Object.assign(S.SESSION_TIMING, { iceWait: 10, iceSettle: 5, startWait: 1000, closeWait: 300, quietLog: 5 });
+  Object.assign(S.SESSION_TIMING, { permissionWait: 1000, connectWait: 1000 });
   Object.assign(C.VOICE_TIMING, { speaking: 20, continuation: 30, reconnectAfter: 40, endAfter: 150 });
   appLifecycle.markVisible();
   api.resetStreamTransport();
@@ -159,6 +160,52 @@ const appended = (ch, kind) => ch.sent.filter((e) => e.type === 'delegation.cont
 const spoken = (ch) => appended(ch, 'speakable');
 /** Progress notes for the voice model, not to be said. */
 const notes = (ch) => appended(ch, 'commentary');
+
+test('Ending while microphone permission is pending cancels startup and releases a late-granted stream', async () => {
+  const original = navigator.mediaDevices.getUserMedia;
+  let grant;
+  navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { grant = resolve; });
+  const session = new S.VoiceSession({ name: 'pending', connect: async () => { throw Error('must not connect'); } }, {
+    onMessage() {}, onEnded() {}, onAudioBlocked() {}, log() {},
+  });
+  try {
+    const started = session.start('test', []);
+    const rejected = assert.rejects(started, S.VoiceCancelled);
+    await session.end();
+    await rejected;
+    const stream = new FakeStream();
+    grant(stream);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(stream.track.stopped, true);
+    assert.equal(rtc.pcs.length, 0);
+  } finally { navigator.mediaDevices.getUserMedia = original; }
+});
+
+test('A hung call-creation request times out without retrying or keeping the microphone', async () => {
+  S.SESSION_TIMING.connectWait = 10;
+  let calls = 0;
+  const session = new S.VoiceSession({ name: 'pending', connect: () => { calls++; return new Promise(() => {}); } }, {
+    onMessage() {}, onEnded() {}, onAudioBlocked() {}, log() {},
+  });
+  await assert.rejects(session.start('test', []), /voice service didn't answer/);
+  assert.equal(calls, 1);
+  assert.equal(rtc.mic.track.stopped, true);
+  assert.equal(pc().closed, true);
+});
+
+test('The capability microphone probe times out and closes a stream granted afterward', async () => {
+  const original = navigator.mediaDevices.getUserMedia;
+  let grant;
+  S.SESSION_TIMING.permissionWait = 10;
+  navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { grant = resolve; });
+  try {
+    await assert.rejects(api.checkMicrophone(), /Microphone access timed out/);
+    const stream = new FakeStream();
+    grant(stream);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(stream.track.stopped, true);
+  } finally { navigator.mediaDevices.getUserMedia = original; }
+});
 
 test('Hold mode is muted before SDP exchange, including reconnects', async () => {
   const { view, chat } = await voiceSetup({ micMode: 'hold' });

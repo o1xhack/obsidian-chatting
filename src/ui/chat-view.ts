@@ -1007,7 +1007,7 @@ export class ObsidianChatView extends ItemView {
       // The screen stays on while the answer is generated.
       releaseScreen: screenAwake.hold(),
       started: !draft, rollback: draft?.rollback,
-      onStopped: voice?.onStopped,
+      onStopped: voice ? () => voice.onStopped?.() : undefined,
     };
     this.turns.set(conversation.id, turn);
     chat.updateConversations();

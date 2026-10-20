@@ -34,6 +34,9 @@ export interface VoiceSessionHandlers {
 
 /** Timeouts in ms; tests shorten them. */
 export const SESSION_TIMING = {
+  /** Permission prompts and the call-creation POST must not hang forever. */
+  permissionWait: 30000,
+  connectWait: 30000,
   /** Use the ICE candidates gathered so far after this long… */
   iceWait: 2000,
   /** …or this long after the first one. */
@@ -69,6 +72,7 @@ export class VoiceSession {
   private onClosed?: () => void;
   private quietTimer?: number;
   private messageCount = 0;
+  private cancelOpening?: () => void;
 
   constructor(private readonly route: VoiceRoute, private readonly handlers: VoiceSessionHandlers) {}
 
@@ -85,11 +89,12 @@ export class VoiceSession {
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("This device offers no microphone access.");
       if (typeof RTCPeerConnection === "undefined") throw new Error("This device doesn't support live audio (WebRTC).");
-      this.mic = await navigator.mediaDevices.getUserMedia({
+      this.mic = await this.opening(navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       }).catch((error: unknown) => {
         throw new Error(isDenied(error) ? "Microphone access was denied." : `Couldn't use the microphone: ${message(error)}`);
-      });
+      }), SESSION_TIMING.permissionWait, "Microphone access timed out. Check the device's microphone permission and try again.",
+      (stream) => { for (const track of stream.getTracks()) track.stop(); });
       step("microphoneMs");
       this.checkEnded();
       this.setMicEnabled(this.micEnabled);
@@ -127,7 +132,8 @@ export class VoiceSession {
 
       // What the voice model starts with: our instructions and the recent chat.
       this.handlers.log("VOICE_START", { route: this.route.name, instructions, items });
-      const answer = await this.route.connect({ sdp: pc.localDescription?.sdp ?? "", instructions, items });
+      const answer = await this.opening(this.route.connect({ sdp: pc.localDescription?.sdp ?? "", instructions, items }),
+        SESSION_TIMING.connectWait, "The voice service didn't answer. Try again.");
       step("callMs");
       this.handlers.log("VOICE_CALL", { route: this.route.name, callId: answer.callId ?? null });
       this.checkEnded();
@@ -242,6 +248,37 @@ export class VoiceSession {
     if (this.ended || this.closing) throw new VoiceCancelled();
   }
 
+  /** Cancel startup promptly; a microphone granted late is still released. */
+  private opening<T>(pending: Promise<T>, ms: number, timeout: string, late?: (value: T) => void): Promise<T> {
+    let settled = false;
+    let timer = 0;
+    let cancel: () => void;
+    return new Promise<T>((resolve, reject) => {
+      cancel = this.cancelOpening = () => {
+        if (settled) return;
+        settled = true;
+        reject(new VoiceCancelled());
+      };
+      timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(timeout));
+      }, ms);
+      pending.then((value) => {
+        if (settled) { late?.(value); return; }
+        settled = true;
+        resolve(value);
+      }, (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      });
+    }).finally(() => {
+      window.clearTimeout(timer);
+      if (this.cancelOpening === cancel) this.cancelOpening = undefined;
+    });
+  }
+
   /** Release everything; tell the handlers once. */
   private finish(error?: string): void {
     this.cleanUp();
@@ -252,6 +289,7 @@ export class VoiceSession {
 
   private cleanUp(): void {
     this.ended = true;
+    this.cancelOpening?.();
     window.clearTimeout(this.quietTimer);
     // A start still waiting for the data channel gives up now.
     this.startWaiter?.reject(new VoiceCancelled());

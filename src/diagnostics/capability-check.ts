@@ -6,7 +6,7 @@
  */
 import { App, Modal, Notice, Platform, apiVersion, requestUrl } from "obsidian";
 import { browserFetch } from "../api/stream";
-import { VoiceSession, type VoiceRoute } from "../voice/session";
+import { SESSION_TIMING, VoiceSession, type VoiceRoute } from "../voice/session";
 import { asRecord, readJson } from "../json";
 
 type Status = "ok" | "fail" | "skip";
@@ -56,13 +56,29 @@ function describePlatform(): string {
   return [kind, os, form, `Obsidian API ${apiVersion}`, `origin ${window.location.origin}`].filter(Boolean).join("; ");
 }
 
-async function checkMicrophone(): Promise<[Status, string]> {
+export async function checkMicrophone(): Promise<[Status, string]> {
   if (!navigator.mediaDevices?.getUserMedia) return ["fail", "navigator.mediaDevices.getUserMedia is missing"];
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const tracks = stream.getAudioTracks();
-  const label = tracks[0]?.label || "unnamed device";
-  stream.getTracks().forEach((t) => t.stop());
-  return tracks.length > 0 ? ["ok", `audio track from ${label}`] : ["fail", "no audio track"];
+  let active = true;
+  let timer = 0;
+  const pending = navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    if (!active) {
+      stream.getTracks().forEach(t => t.stop());
+      throw new Error("Microphone check already timed out.");
+    }
+    return stream;
+  });
+  try {
+    const stream = await Promise.race([pending, new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error("Microphone access timed out. Check the device's microphone permission.")), SESSION_TIMING.permissionWait);
+    })]);
+    const tracks = stream.getAudioTracks();
+    const label = tracks[0]?.label || "unnamed device";
+    stream.getTracks().forEach((t) => t.stop());
+    return tracks.length > 0 ? ["ok", `audio track from ${label}`] : ["fail", "no audio track"];
+  } finally {
+    active = false;
+    window.clearTimeout(timer);
+  }
 }
 
 async function checkLocalWebRTC(): Promise<[Status, string]> {
