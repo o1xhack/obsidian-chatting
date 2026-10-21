@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 866,
-    "passed": 866,
+    "tests": 881,
+    "passed": 881,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -269,6 +269,18 @@
       "migration-chat-present-chat-mvhgrnj9-x2p1bz",
       "migration-visible-chat-mvhgrnj9-x2p1bz",
       "migration-api-chat-mvhgrnj9-x2p1bz",
+      "migration-chat-present-chat-mvieeso5-9kyqkd",
+      "migration-visible-chat-mvieeso5-9kyqkd",
+      "migration-api-chat-mvieeso5-9kyqkd",
+      "migration-chat-present-chat-mviefbj2-klbnhx",
+      "migration-visible-chat-mviefbj2-klbnhx",
+      "migration-api-chat-mviefbj2-klbnhx",
+      "migration-chat-present-chat-mviefmvv-knekar",
+      "migration-visible-chat-mviefmvv-knekar",
+      "migration-api-chat-mviefmvv-knekar",
+      "migration-chat-present-chat-mvif0vy8-g0chvr",
+      "migration-visible-chat-mvif0vy8-g0chvr",
+      "migration-api-chat-mvif0vy8-g0chvr",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -302,7 +314,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
+    "mainSha256": "4077a3743c1ff3b8f98d41370c6cf69851c3376e5cd1105f8c359f612b2e2e8c",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -378,6 +390,21 @@
       "held-microphone-muted-during-connect",
       "native-fresh-minus-fragment-preserved",
       "native-fresh-minus-reaches-backend",
+      "held-microphone-muted-during-connect",
+      "native-ambiguous-transcript-ends-call",
+      "native-ambiguous-fault-visible-in-chat",
+      "native-ambiguous-fault-mutes-mic",
+      "native-ambiguous-cleanup-keeps-only-typed",
+      "native-ambiguous-typed-followup-only",
+      "native-ambiguous-original-finishes-once",
+      "native-ambiguous-peer-closed",
+      "held-microphone-muted-during-connect",
+      "native-terminal-positive-correction-queued",
+      "native-terminal-positive-correction-reaches-backend",
+      "native-terminal-symbol-correction-keeps-call",
+      "held-microphone-muted-during-connect",
+      "native-complete-terminal-proves-expanded-request",
+      "native-complete-terminal-keeps-normal-followup",
       "native-stalled-webrtc-probe-closed-and-advanced",
       "native-stalled-stream-probe-timed-out",
       "native-diagnostic-advanced-after-timeout",
@@ -385,10 +412,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3"
+    "mainSha256": "4077a3743c1ff3b8f98d41370c6cf69851c3376e5cd1105f8c359f612b2e2e8c"
   },
   "liveVoice": {
-    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
+    "mainSha256": "4077a3743c1ff3b8f98d41370c6cf69851c3376e5cd1105f8c359f612b2e2e8c",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -403,7 +430,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvieeso5-9kyqkd",
+    "conversationId": "chat-mvif7s6z-shi87o",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -416,12 +443,12 @@
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": "The exact text is: “SAFE. Change TARGET to VERIFIED.”",
+    "reconnectTranscript": "It says: \"SAFE. Change TARGET to VERIFIED.\"",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 397,
-        "bytes": 13786
+        "packets": 329,
+        "bytes": 11406
       }
     ],
     "peerClosed": true
@@ -433,7 +460,7 @@
     "The available phone control service showed concurrent active operations; this task did not take over the phone.",
     "Automatic speech after reconnect is best effort. Latest-bundle foreground and reconnect speech completed. Earlier runs include both spoken and quiet results. Retained context and the visible recovery notice provide the deterministic recovery indication; no stable automatic-spoken acceptance is claimed."
   ],
-  "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready.",
+  "externalGates": "Current-head CI, an accepted final code review, zero unresolved threads and official Community Preview are verified separately on the PR. The maintainer approved independent local review as the replacement for the failed GitHub bot; that service failure is preserved, not relabeled as a pass.",
   "reviewFixes": [
     {
       "comment": 4330742541,
@@ -565,7 +592,7 @@
     }
   ],
   "liveReconnect": {
-    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
+    "mainSha256": "4077a3743c1ff3b8f98d41370c6cf69851c3376e5cd1105f8c359f612b2e2e8c",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -580,7 +607,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mviefbj2-klbnhx",
+    "conversationId": "chat-mvif8870-6ar76t",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,
@@ -594,7 +621,7 @@
     "peerClosed": true
   },
   "liveForeground": {
-    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
+    "mainSha256": "4077a3743c1ff3b8f98d41370c6cf69851c3376e5cd1105f8c359f612b2e2e8c",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -610,19 +637,19 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mviefmvv-knekar",
+    "conversationId": "chat-mvif8k6z-nc5hon",
     "connected": true,
     "foregroundTurnDone": true,
     "foregroundResultSpoken": true,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "foregroundTranscript": " It says, \"SAFE\" then \"Change TARGET to VERIFIED.\"",
+    "foregroundTranscript": " It says, “SAFE. Change TARGET to VERIFIED.”",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 961,
-        "bytes": 44348
+        "packets": 978,
+        "bytes": 46921
       }
     ],
     "peerClosed": true
@@ -634,6 +661,32 @@
       "nativeChecks": [
         "native-fresh-minus-fragment-preserved",
         "native-fresh-minus-reaches-backend"
+      ]
+    }
+  ],
+  "independentReviewFixes": [
+    {
+      "id": "IVR-1",
+      "priority": 2,
+      "fix": "Unseen or unconfirmed nonliteral transcript ownership cannot authorize another task. Unmatched input/terminal/new delegation ends voice with a persistent restart notice; the accepted task finishes once. Unsent voice additions are removed from controller, AgentLoop, preflight and stashed queues; typed additions survive. Real complete-terminal metadata admits normal paraphrased/expanded requests. Earlier dialogue cannot prove a current partial utterance complete.",
+      "regressions": 12,
+      "nativeChecks": [
+        "native-ambiguous-transcript-ends-call",
+        "native-ambiguous-typed-followup-only",
+        "native-ambiguous-original-finishes-once",
+        "native-complete-terminal-proves-expanded-request",
+        "native-complete-terminal-keeps-normal-followup"
+      ]
+    },
+    {
+      "id": "IVR-2",
+      "priority": 2,
+      "fix": "Terminal ownership preserves meaningful signs and path punctuation, so a +1 correction or changed file path is not deduplicated as the earlier request.",
+      "regressions": 3,
+      "nativeChecks": [
+        "native-terminal-positive-correction-queued",
+        "native-terminal-positive-correction-reaches-backend",
+        "native-terminal-symbol-correction-keeps-call"
       ]
     }
   ]

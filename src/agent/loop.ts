@@ -198,7 +198,7 @@ export class AgentLoop {
    */
   steer(text: string, context?: VoiceTurn[]): boolean {
     if (!this.loopVersion || this.loopVersion !== this.runVersion) return false;
-    this.steered.push({ text, ...(context?.length ? { context: context.map(turn => ({ ...turn })) } : {}) });
+    this.steered.push({ text, ...(context !== undefined ? { context: context.map(turn => ({ ...turn })) } : {}) });
     debugLog(this.app, "STEER", { text, context });
     return true;
   }
@@ -206,6 +206,13 @@ export class AgentLoop {
   /** Added messages the finished turn didn't get to; they need a turn of their own. */
   takeSteered(): SteeredMessage[] {
     return this.steered.splice(0);
+  }
+
+  /** An uncertain voice transcript cannot survive as a typed next turn. */
+  discardVoiceSteering(): SteeredMessage[] {
+    const dropped = this.steered.filter(item => item.context !== undefined);
+    this.steered = this.steered.filter(item => item.context === undefined);
+    return dropped;
   }
 
   /** Stop a running turn and clear the history. */

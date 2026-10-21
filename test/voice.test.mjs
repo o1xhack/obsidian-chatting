@@ -189,7 +189,7 @@ for (const terminal of ['user', 'assistant']) {
       : response('anthropic', [text('Done.')]) });
     await startListening(view, chat);
     const ch = channel();
-    delegated(ch, 'first', 'Read the note');
+    said(ch, 'Read the note'); delegated(ch, 'first', 'Read the note');
     await until(() => log.chat.length === 1);
     said(ch, 'Also keep the original title');
     ch.receive({ type: 'turn.done', turn: { role: terminal, transcript: terminal === 'user' ? 'Also keep the original title' : 'Okay.' } });
@@ -234,6 +234,7 @@ test('An open last-second correction runs next and its late terminal is not dupl
   await startListening(view, chat);
   const ch = channel();
   said(ch, 'Please read that note.');
+  ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Please read that note.' } });
   delegated(ch, 'first', 'Read the note');
   await until(() => log.chat.length === 1);
   said(ch, 'Also preserve the title');
@@ -1514,7 +1515,7 @@ for (const finished of [false, true]) {
       : response('anthropic', [text(finished && i === 1 ? 'Old task completed.' : 'Clarified work completed.')]) });
     await startListening(view, chat);
     const ch = channel();
-    delegated(ch, 'first', 'Read the first note');
+    said(ch, 'Read the first note'); delegated(ch, 'first', 'Read the first note');
     await until(() => release);
     const question = finished ? '要删除哪一篇笔记？' : 'Which note should I delete?';
     said(ch, 'Delete it');
@@ -1581,11 +1582,11 @@ test('A selection is consumed after the accepted voice edit, so the next voice r
     : response('anthropic', [text('Done.')]) });
   await startListening(view, chat);
   const ch = channel();
-  delegated(ch, 'selected', 'Change the selected text');
+  said(ch, 'Change the selected text'); delegated(ch, 'selected', 'Change the selected text');
   await until(() => spoken(ch).length > 0);
   assert.equal(note, 'before\nchanged\nafter');
   assert.equal(selection, null);
-  delegated(ch, 'whole-note', 'Replace the whole note');
+  said(ch, 'Replace the whole note'); delegated(ch, 'whole-note', 'Replace the whole note');
   await until(() => log.chat.length === 4 && spoken(ch).length === 2);
   assert.equal(note, 'Entire note replaced');
   assert.equal(clears, 1);
@@ -1601,12 +1602,12 @@ test('A voice preflight refusal keeps the selection for the next accepted reques
   const log = serve();
   await startListening(view, chat);
   view.compactions.set(plugin.activeConversationId, { agent: plugin.agent });
-  delegated(channel(), 'refused', 'Read selection');
+  said(channel(), 'Read selection'); delegated(channel(), 'refused', 'Read selection');
   await until(() => spoken(channel()).length > 0);
   assert.equal(clears, 0);
   assert.equal(selection.text, 'Original');
   view.compactions.clear();
-  delegated(channel(), 'accepted', 'Read selection');
+  said(channel(), 'Read selection'); delegated(channel(), 'accepted', 'Read selection');
   await until(() => log.chat.length === 1 && clears === 1);
   assert.equal(selection, null);
   assert.equal(plugin.chatHistory.find(row => row.turnId)?.selection.text, 'Original');
@@ -1621,7 +1622,7 @@ test('Stop discards an addition awaiting clarification and its later answer cann
     : response('anthropic', [text('New request completed.')]) });
   await startListening(view, chat);
   const ch = channel();
-  delegated(ch, 'first', 'Read the first note');
+  said(ch, 'Read the first note'); delegated(ch, 'first', 'Read the first note');
   await until(() => release);
   said(ch, 'Delete it');
   answered(ch, 'Which note?');
@@ -1647,7 +1648,7 @@ for (const order of [[0, 1], [1, 0]]) {
       ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')) })
       : response('anthropic', [text('Both requests processed once.')]) });
     await startListening(view, chat);
-    const ch = channel(), raw = ['Could you read that first note?', 'Please preserve its original title.'];
+    const ch = channel(), raw = ['Read the first note', 'Keep the original title'];
     said(ch, raw[0]); delegated(ch, 'a', 'Read the first note');
     await until(() => release);
     said(ch, raw[1]); delegated(ch, 'b', 'Keep the original title');
@@ -1671,7 +1672,7 @@ for (const finished of [false, true]) {
       : response('anthropic', [text('Constrained request completed.')]) });
     await startListening(view, chat);
     const ch = channel(), full = 'Delete the note after making a backup';
-    delegated(ch, 'first', 'Read the note');
+    said(ch, 'Read the note'); delegated(ch, 'first', 'Read the note');
     await until(() => release);
     said(ch, full); answered(ch, 'Okay.');
     await until(() => chat.queued.includes(full));
@@ -1698,7 +1699,7 @@ for (const finished of [false, true]) {
     await startListening(view, chat);
     pc().connectionState = 'connected';
     const old = channel();
-    delegated(old, 'original', 'Read the first note');
+    said(old, 'Read the first note'); delegated(old, 'original', 'Read the first note');
     await until(() => release);
     said(old, 'Delete it'); answered(old, 'Which note should I delete?');
     old.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'Which note should I delete?' } });
@@ -1795,7 +1796,7 @@ test('A fresh spoken repetition after a fallback result is an intentional new re
     : response('anthropic', [text(i === 1 ? 'First fallback done.' : 'Repeated request done.')]) });
   await startListening(view, chat);
   const ch = channel(), full = 'Read the note after checking its title';
-  delegated(ch, 'first', 'Read the first note');
+  said(ch, 'Read the first note'); delegated(ch, 'first', 'Read the first note');
   await until(() => release);
   said(ch, full); answered(ch, 'Okay.');
   await until(() => chat.queued.includes(full));
@@ -1878,7 +1879,7 @@ for (const afterNew of [false, true]) {
       : response('anthropic', [text(i === 1 ? 'Fallback completed.' : 'Fresh request completed.')]) });
     await startListening(view, chat);
     const ch = channel(), old = 'Preserve the original title', fresh = 'Archive the other test note';
-    delegated(ch, 'initial', 'Read the first note'); await until(() => release);
+    said(ch, 'Read the first note'); delegated(ch, 'initial', 'Read the first note'); await until(() => release);
     said(ch, old); answered(ch, 'Okay.'); await until(() => chat.queued.includes(old));
     release(); await until(() => !view.voice.voiceTurnRunning);
     said(ch, fresh);
@@ -1919,7 +1920,7 @@ for (const next of ['resume', 'end', 'switch']) {
     const log = serve({ chat: () => new Promise(resolve => { release = () => resolve(response('anthropic', [text('Finished while hidden again.')])); }) });
     await startListening(view, chat); pc().connectionState = 'connected';
     const old = view.voice;
-    delegated(channel(), 'initial', 'Read the note'); await until(() => release);
+    said(channel(), 'Read the note'); delegated(channel(), 'initial', 'Read the note'); await until(() => release);
     appLifecycle.markHidden(); await sleep(60); appLifecycle.markVisible();
     assert.equal(chat.voice.status, 'reconnecting');
     appLifecycle.markHidden(); release(); await until(() => !old.task); await sleep(30);
@@ -1999,7 +2000,7 @@ for (const ambiguous of ['empty', 'prefix', 'changed-symbol']) {
     await startListening(view, chat);
     const ch = channel(), old = ambiguous === 'changed-symbol' ? 'Append -1 to the score' : 'Read the first note';
     const fresh = ambiguous === 'changed-symbol' ? 'Append +1 to the score' : ambiguous === 'prefix' ? 'Read the first note and preserve every original heading' : 'Read the other safe test note';
-    delegated(ch, 'initial', 'Check the time'); await until(() => release);
+    said(ch, 'Check the time'); delegated(ch, 'initial', 'Check the time'); await until(() => release);
     said(ch, old); answered(ch, 'Okay.'); await until(() => chat.queued.includes(old));
     release(); await until(() => !view.voice.voiceTurnRunning);
     said(ch, fresh);
@@ -2036,7 +2037,7 @@ test('After fallback, an exact current reply delegates with its preceding clarif
     ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
     : response('anthropic', [text(i === 1 ? 'Old work finished.' : 'Clarified request finished.')]) });
   await startListening(view, chat); const ch = channel();
-  delegated(ch, 'initial', 'Read the first note'); await until(() => release);
+  said(ch, 'Read the first note'); delegated(ch, 'initial', 'Read the first note'); await until(() => release);
   said(ch, 'Preserve the original title'); answered(ch, 'Okay.'); await until(() => chat.queued.length === 1);
   release(); await until(() => !view.voice.voiceTurnRunning);
   said(ch, 'Use the other note'); answered(ch, 'Which one?'); said(ch, 'The left note');
@@ -2056,7 +2057,7 @@ for (const smallTalk of [false, true]) {
       ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
       : response('anthropic', [text(i === 1 ? 'Old work finished.' : 'Repeated work finished.')]) });
     await startListening(view, chat); const ch = channel();
-    delegated(ch, 'initial', 'Read the note'); await until(() => release);
+    said(ch, 'Read the note'); delegated(ch, 'initial', 'Read the note'); await until(() => release);
     said(ch, repeated); answered(ch, 'Okay.'); await until(() => chat.queued.includes(repeated));
     release(); await until(() => !view.voice.voiceTurnRunning);
     if (smallTalk) { said(ch, 'How are you?'); answered(ch, 'Fine.'); ch.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'Fine.' } }); }
@@ -2077,7 +2078,7 @@ for (const request of ['delete Backup.md', 'Move another note to Archive']) {
       ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
       : response('anthropic', [text(i === 1 ? 'Fallback finished.' : 'Fresh request finished.')]) });
     await startListening(view, chat); const ch = channel();
-    delegated(ch, 'initial', 'Read the first note'); await until(() => release);
+    said(ch, 'Read the first note'); delegated(ch, 'initial', 'Read the first note'); await until(() => release);
     said(ch, 'Remove the backup note'); answered(ch, 'Okay.'); await until(() => chat.queued.length === 1);
     release(); await until(() => !view.voice.voiceTurnRunning);
     delegated(ch, 'unverified', request); await sleep(50);
@@ -2122,43 +2123,23 @@ for (const terminalFirst of [false, true]) {
   }
 }
 
-test('Unseen delegated requests consume their out-of-order late transcript fragments once', async () => {
-  const { view, chat } = await voiceSetup(); let release;
-  const log = serve({ chat: (_body, i) => i === 0
-    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
-    : response('anthropic', [text('Both explicit requests processed.')]) });
-  try {
-    await startListening(view, chat); const ch = channel();
-    delegated(ch, 'one', 'Read the first note'); await until(() => release);
-    delegated(ch, 'two', 'Read the second note');
-    said(ch, 'Read the '); said(ch, 'second note'); answered(ch, 'Okay.');
-    said(ch, 'Read the first note');
-    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Read the first note' } });
-    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Read the second note' } });
-    await sleep(100); assert.deepEqual(chat.queued, ['Read the second note']);
-    release(); await until(() => !view.voice.voiceTurnRunning);
-    assert.equal(log.chat.length, 2);
-  } finally { view.endVoice(); view.handleStop(); release?.(); }
-});
-
-test('An unseen transcript prefix that diverges preserves the new request and its sign', async () => {
-  const { view, chat } = await voiceSetup(); let release;
-  const log = serve({ chat: (_body, i) => i === 0
-    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
-    : response('anthropic', [text('Updated request processed.')]) });
-  try {
-    await startListening(view, chat); const ch = channel();
-    delegated(ch, 'initial', 'Append -1 to the score.'); await until(() => release);
-    said(ch, 'Append '); said(ch, '+1 to the score.'); answered(ch, 'Okay.');
-    await until(() => chat.queued.includes('Append +1 to the score.'));
-    assert.deepEqual(chat.queued, ['Append +1 to the score.']);
-    said(ch, 'Append -1 to the score.');
-    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Append -1 to the score.' } });
-    await sleep(100); assert.deepEqual(chat.queued, ['Append +1 to the score.']);
-    release(); await until(() => !view.voice.voiceTurnRunning);
-    assert.equal(log.chat.length, 2);
-  } finally { view.endVoice(); view.handleStop(); release?.(); }
-});
+for (const kind of ['second delegation', 'divergent signed fragment']) {
+  test(`Unresolved unseen ownership requires a new call (${kind})`, async () => {
+    const { view, chat } = await voiceSetup(); let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('Original completed.')])) })
+      : response('anthropic', [text('Must not repeat.')]) });
+    try {
+      await startListening(view, chat); const ch = channel();
+      delegated(ch, 'unseen', 'Append -1 to the score.'); await until(() => release);
+      if (kind === 'second delegation') delegated(ch, 'second', 'Read the second note');
+      else { said(ch, 'Append '); said(ch, '+1 to the score.'); }
+      assert.equal(view.voice, null); assert.deepEqual(chat.queued, []);
+      assert.match(errorsShown(chat).at(-1), /Restart voice/);
+      release(); await until(() => !view.running); assert.equal(log.chat.length, 1);
+    } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}
 
 test('Unseen-transcript ownership is bounded and released when the call ends', async () => {
   const { view, chat } = await voiceSetup(); const log = serve();
@@ -2322,7 +2303,7 @@ for (const reason of ['rules', 'request budget']) {
     const log = serve();
     try {
       await startListening(view, chat); const ch = channel();
-      delegated(ch, 'preflight-refused', 'Read the selection');
+      said(ch, 'Read the selection'); delegated(ch, 'preflight-refused', 'Read the selection');
       await until(() => !view.voice.voiceTurnRunning && spoken(ch).length > 0);
       assert.equal(log.chat.length, 0);
       assert.equal(selection, newer ? replacement : original);
@@ -2367,5 +2348,130 @@ for (const [prefix, rest] of [['-', '1 dollars in the total'], ['+', '1 dollars 
       release(); await until(() => log.chat.length === 2 && !view.voice.voiceTurnRunning);
       assert.ok(userText(log.chat[1]).includes(prefix + rest));
     } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}
+
+for (const lateEvent of ['fragments', 'terminal-only', 'terminal-first', 'new-delegation', 'divergent-prefix']) {
+  test(`Ambiguous unseen speech cannot repeat a completed write (${lateEvent})`, async () => {
+    const { view, chat, app } = await voiceSetup(); let release, writes = 0, note = 'Original';
+    app.vault.cachedRead = async () => note;
+    app.vault.process = async (_file, edit) => { writes++; note = edit(note); };
+    const log = serve({ chat: (_body, i) => i === 1
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('Marker inserted.')])); })
+      : i % 2 === 0 ? response('anthropic', [call(`edit-${i}`, 'edit_document', { path: 'Untitled.md', operation: 'insert', position: 'end', content: '!' })], 'tool_use')
+      : response('anthropic', [text('Marker inserted.')]) });
+    try {
+      await startListening(view, chat); const ch = channel();
+      delegated(ch, 'unseen', 'Insert a marker in Untitled.md'); await until(() => release);
+      const raw = 'Could you add an exclamation mark to the current note?';
+      if (lateEvent === 'new-delegation') delegated(ch, 'new-id', raw);
+      else if (lateEvent === 'terminal-only' || lateEvent === 'terminal-first') ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: raw } });
+      else { if (lateEvent === 'divergent-prefix') said(ch, 'Insert a '); said(ch, raw); }
+      assert.equal(view.voice, null); assert.deepEqual(chat.queued, []);
+      assert.match(errorsShown(chat).at(-1), /avoid repeating work/);
+      // A new ID, terminal, or old fragment after the fault cannot revive work.
+      said(ch, raw); ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: raw } });
+      delegated(ch, 'after-fault', raw);
+      release(); await until(() => !view.running); await sleep(80);
+      assert.equal(writes, 1); assert.equal(note, 'Original\n!'); assert.equal(log.chat.length, 2);
+      await until(() => pc().closed);
+      assert.equal(rtc.mic.track.stopped, true);
+    } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}
+
+test('Ambiguous voice cleanup drops every unsent voice queue and preserves typed additions', async () => {
+  const { view, chat, plugin } = await voiceSetup(); let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('Original work completed.')])); })
+    : response('anthropic', [text('Typed work completed.')]) });
+  try {
+    await startListening(view, chat); const ch = channel();
+    delegated(ch, 'unseen', 'Read the note'); await until(() => release);
+    const turn = view.turn, conversation = plugin.activeConversation;
+    view.addToRunningTurn('Keep typed agent queue');
+    view.steerByVoice('Discard voice agent queue', []);
+    turn.unsteered.push({ text: 'Discard voice preflight queue', context: [] }, { text: 'Keep typed preflight queue' });
+    view.voiceLeftovers.set(conversation, [{ text: 'Discard voice stash', context: [] }, { text: 'Keep typed stash' }]);
+    conversation.pendingMessages = ['Discard voice stash', 'Keep typed stash'];
+    said(ch, 'Unattributed new words');
+    assert.equal(view.voice, null);
+    assert.deepEqual(turn.agent.steered, [{ text: 'Keep typed agent queue' }]);
+    assert.deepEqual(turn.unsteered, [{ text: 'Keep typed preflight queue' }]);
+    assert.deepEqual(conversation.pendingMessages, ['Keep typed stash']);
+    assert.deepEqual(chat.queued, ['Keep typed agent queue']);
+    release(); await until(() => !view.running && log.chat.length === 2);
+    assert.doesNotMatch(JSON.stringify(log.chat), /Discard voice/);
+    assert.match(JSON.stringify(log.chat[1]), /Keep typed preflight queue/);
+    assert.match(JSON.stringify(log.chat[1]), /Keep typed agent queue/);
+    assert.deepEqual(conversation.pendingMessages, ['Keep typed stash']);
+  } finally { view.endVoice(); view.handleStop(); release?.(); }
+});
+
+for (const [first, correction] of [
+  ['Append -1 to the score', 'Append +1 to the score'],
+  ['Read A/B.md now', 'Read A-B.md now'],
+  ['Read Folder/A.md now', 'Read FolderA.md now'],
+]) {
+  test(`A terminal-only correction preserves meaningful punctuation (${correction})`, async () => {
+    const { view, chat, plugin } = await voiceSetup(); let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('First done.')])); })
+      : response('anthropic', [text('Correction done.')]) });
+    try {
+      await startListening(view, chat); const ch = channel();
+      said(ch, first); delegated(ch, 'first', first); await until(() => release);
+      ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: correction } });
+      await until(() => chat.queued.includes(correction));
+      release(); await until(() => !view.voice.voiceTurnRunning && log.chat.length === 2);
+      assert.match(userText(log.chat[1]), new RegExp(correction.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === correction).length, 1);
+      assert.deepEqual(errorsShown(chat), []);
+    } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}
+
+for (const event of ['tail', 'acknowledged tail', 'terminal-only', 'earlier matching context']) {
+  test(`A partial paraphrased transcript cannot authorize a second write (${event})`, async () => {
+    const { view, chat, app } = await voiceSetup(); let release, writes = 0, note = 'Original';
+    app.vault.cachedRead = async () => note;
+    app.vault.process = async (_file, edit) => { writes++; note = edit(note); };
+    const log = serve({ chat: (_body, i) => i === 1
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('Marker inserted.')])); })
+      : response('anthropic', [call(`edit-${i}`, 'edit_document', { path: 'Untitled.md', operation: 'insert', position: 'end', content: '!' })], 'tool_use') });
+    try {
+      await startListening(view, chat); const ch = channel();
+      if (event === 'earlier matching context') {
+        said(ch, 'Insert a marker in Untitled.md');
+        ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Insert a marker in Untitled.md' } });
+        answered(ch, 'Which marker should I use?');
+        ch.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'Which marker should I use?' } });
+      }
+      said(ch, 'Could you add'); if (event === 'acknowledged tail') answered(ch, 'Okay.');
+      delegated(ch, 'partial-paraphrase', 'Insert a marker in Untitled.md'); await until(() => release);
+      if (event === 'terminal-only') ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Could you add an exclamation mark to the current note?' } });
+      else said(ch, ' an exclamation mark to the current note?');
+      assert.equal(view.voice, null); assert.match(errorsShown(chat).at(-1), /avoid repeating work/);
+      release(); await until(() => !view.running);
+      assert.equal(writes, 1); assert.equal(note, 'Original\n!'); assert.equal(log.chat.length, 2);
+    } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}
+
+for (const request of ['Read Untitled.md', 'Read the current note Untitled.md']) {
+  test(`A complete terminal before delegation permits normal later speech (${request})`, async () => {
+    const { view, chat } = await voiceSetup();
+    const log = serve();
+    try {
+      await startListening(view, chat); const ch = channel();
+      said(ch, 'Read the current note');
+      ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Read the current note' } });
+      delegated(ch, 'complete', request);
+      await until(() => !view.voice.voiceTurnRunning && log.chat.length === 1);
+      assert.equal(view.voice.missingTranscripts.size, 0);
+      said(ch, 'What is the current date?'); delegated(ch, 'next', 'What is the current date?');
+      await until(() => !view.voice.voiceTurnRunning && log.chat.length === 2);
+      assert.deepEqual(errorsShown(chat), []);
+    } finally { view.endVoice(); view.handleStop(); }
   });
 }

@@ -259,6 +259,7 @@ export interface VoiceTurn {
 /** An addition a running turn has not yet sent to the model. */
 export interface SteeredMessage {
   text: string;
+  /** Present (also empty) for voice additions, so uncertain unsent speech can be dropped separately from typed text. */
   context?: VoiceTurn[];
 }
 

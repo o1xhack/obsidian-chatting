@@ -655,6 +655,7 @@ export class ObsidianChatView extends ItemView {
       // A spoken request while the voice turn runs is added to it.
       steerTurn: (text, context) => this.running && this.steerByVoice(text, context),
       takeSteered: () => this.takeStashed(),
+      discardPendingVoice: () => this.discardPendingVoice(),
       stopTurn: () => this.handleStop(),
       turnRunning: () => !!this.turn,
       history: () => {
@@ -1458,6 +1459,28 @@ export class ObsidianChatView extends ItemView {
     this.voiceLeftovers.delete(conversation);
     delete conversation.pendingMessages;
     return later;
+  }
+
+  private discardPendingVoice(): void {
+    const conversation = this.plugin.activeConversation;
+    const turn = this.turn;
+    if (turn) {
+      const dropped = [...turn.agent.discardVoiceSteering(), ...turn.unsteered.filter(item => item.context !== undefined)];
+      turn.unsteered = turn.unsteered.filter(item => item.context === undefined);
+      const queued = [...turn.queued];
+      for (const item of dropped) {
+        const index = queued.indexOf(item.text);
+        if (index >= 0) queued.splice(index, 1);
+      }
+      this.showQueued(turn, queued);
+    }
+    const stashed = this.voiceLeftovers.get(conversation);
+    if (stashed) {
+      const kept = stashed.filter(item => item.context === undefined);
+      this.voiceLeftovers.delete(conversation);
+      if (kept.length) conversation.pendingMessages = kept.map(steeredText);
+      else delete conversation.pendingMessages;
+    }
   }
 
   /** Added messages the turn didn't take in; they leave the queue (they run next). */

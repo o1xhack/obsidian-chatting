@@ -66,6 +66,8 @@ export interface VoiceHost {
   steerTurn(text: string, context?: VoiceTurn[]): boolean;
   /** Steered requests the finished turn didn't get to. */
   takeSteered(): SteeredMessage[];
+  /** Drop only unsent voice additions when their transcript ownership is uncertain. */
+  discardPendingVoice?(): void;
   /** Stop the running turn, like Stop. */
   stopTurn(): void;
   turnRunning(): boolean;
@@ -142,6 +144,8 @@ export class VoiceController {
   /** Delegations accepted before their transcript arrived (also after an early terminal event). */
   private readonly missingTranscripts = new Set<string[]>();
   private readonly terminalTranscripts = new WeakSet<string[]>();
+  /** Already-heard nonliteral wording still needs its complete terminal before more work. */
+  private readonly unconfirmedTranscripts = new WeakMap<string[], string>();
   private lateTranscript?: { owner: string[]; text: string; complete: boolean; confirmed: boolean };
   private lastSpeaker: "user" | "assistant" | null = null;
   private voiceTurnRunning = false;
@@ -173,6 +177,7 @@ export class VoiceController {
   private unwatchOpenFile?: () => void;
   /** When each turn's first and last words arrived (ms). */
   private readonly turnTimes = new WeakMap<VoiceTurn, { first: number; last: number }>();
+  private readonly completedUserTranscripts = new WeakSet<VoiceTurn>();
 
   /**
    * `reconnecting`: this replaces a call lost in the background, shown as
@@ -396,6 +401,10 @@ export class VoiceController {
       if (previous.owner.some(request => latePrefix(request, candidate))) {
         return this.captureLateTranscript(previous.owner, candidate, previous.confirmed);
       }
+      if (!previous.complete) {
+        this.stopAmbiguousTranscript();
+        return null;
+      }
       this.lateTranscript = undefined;
       if (previous.complete || previous.confirmed) {
         this.missingTranscripts.delete(previous.owner);
@@ -404,7 +413,28 @@ export class VoiceController {
     }
     const owner = transcriptKey(candidate) && [...this.missingTranscripts].find(variants =>
       variants.some(request => latePrefix(request, candidate)));
-    return owner ? this.captureLateTranscript(owner, candidate, this.terminalTranscripts.has(owner)) : candidate;
+    if (owner) return this.captureLateTranscript(owner, candidate, this.terminalTranscripts.has(owner));
+    if (candidate.trim() && this.missingTranscripts.size) {
+      this.stopAmbiguousTranscript();
+      return null;
+    }
+    return candidate;
+  }
+
+  /** The wire has no shared utterance identity: never guess that unmatched
+   * late words authorize another action. The accepted task can finish, but
+   * unsent voice additions must not fall through as typed work after End.
+   */
+  private stopAmbiguousTranscript(): void {
+    this.pendingSteer = [];
+    this.fallbackLeftovers = [];
+    this.pendingInput = "";
+    this.spoken = [];
+    this.openTurn = null;
+    this.clarificationPending = false;
+    this.host.discardPendingVoice?.();
+    this.host.showError("Voice lost track of your last request and stopped to avoid repeating work. The current task continues in chat. Restart voice before making another request.");
+    void this.end();
   }
 
   private captureLateTranscript(owner: string[], text: string, confirmed: boolean): null {
@@ -528,15 +558,25 @@ export class VoiceController {
 
   /** A turn is complete (Codex sends its whole text): keep it. */
   private finishTurn(role: VoiceTurn["role"], text: string): void {
-    let consumed = this.consumed.findIndex(variants => variants.some(request => normalizedWords(request) === normalizedWords(text)));
-    if (consumed < 0) consumed = this.consumed.findIndex(variants => variants.some(request => sameWords(text, request)));
-    if (role === "user" && (consumed >= 0 || this.steeredSpoken.some(request => normalizedWords(request) === normalizedWords(text)))) {
+    let consumed = this.consumed.findIndex(variants => variants.some(request => lateComplete(request, text) || lateComplete(text, request)));
+    if (consumed < 0) consumed = this.consumed.findIndex(variants => variants.some(request => sameTranscriptPrefix(text, request)));
+    if (role === "user" && (consumed >= 0 || this.steeredSpoken.some(request => lateComplete(request, text) || lateComplete(text, request)))) {
       // The request a delegation already took, reported late.
       // A new partial transcript can intentionally repeat handled words.
       // The old delegation already consumed its own open turn; a late
       // terminal event must not erase speech received since then.
       if (consumed >= 0) {
-        const [owner] = this.consumed.splice(consumed, 1);
+        const owner = this.consumed[consumed];
+        const heard = this.unconfirmedTranscripts.get(owner);
+        if (heard !== undefined) {
+          if (!lateComplete(heard, text) && !lateComplete(text, heard)) {
+            this.stopAmbiguousTranscript();
+            return;
+          }
+          this.missingTranscripts.delete(owner);
+          this.unconfirmedTranscripts.delete(owner);
+        }
+        this.consumed.splice(consumed, 1);
         this.terminalTranscripts.add(owner);
         if (this.lateTranscript?.owner === owner) {
           if (this.lateTranscript.complete) this.lateTranscript = undefined;
@@ -545,13 +585,18 @@ export class VoiceController {
       }
       return;
     }
+    if (role === "user" && text.trim() && this.missingTranscripts.size) {
+      this.stopAmbiguousTranscript();
+      return;
+    }
     if (role === "user" && text.trim()) this.clarificationPending = false;
     if (this.openTurn?.role !== role) {
       // Reported after the other speaker started (the voice often answers
       // first): the turn is already kept from its pieces.
       const kept = [...this.spoken].reverse().find((turn) => turn.role === role);
-      if (kept && sameWords(kept.text, text)) {
+      if (kept && (lateComplete(kept.text, text) || lateComplete(text, kept.text) || sameTranscriptPrefix(kept.text, text))) {
         kept.text = text.trim();
+        if (role === "user") this.completedUserTranscripts.add(kept);
         return;
       }
       const closed = this.closeTurn();
@@ -561,6 +606,7 @@ export class VoiceController {
     this.openTurn = { role, text };
     if (times) this.turnTimes.set(this.openTurn, times);
     const kept = this.closeTurn();
+    if (kept?.role === "user") this.completedUserTranscripts.add(kept);
     if (kept?.role === "user" && (this.voiceTurnRunning || this.pendingSteer.length)) this.queueSteer(kept);
     if (role === "assistant" && this.pendingSteer.length && isQuestion(text)) this.clarificationPending = true;
   }
@@ -606,6 +652,7 @@ export class VoiceController {
     // A brief acknowledgement can close a still-incomplete user turn
     // before delegation. Its missing tail still belongs to this request.
     const partialTurn = openUser || (last >= 0 && turns.slice(last + 1).every(turn => turn.role === "assistant" && isBackchannel(turn.text)));
+    const completeHeard = last >= 0 && partialTurn && this.completedUserTranscripts.has(turns[last]);
     if (last >= 0 && (!request || sameWords(turns[last].text, request))) {
       const taken = !request;
       let first = this.turnTimes.get(turns[last])?.first ?? 0;
@@ -629,9 +676,10 @@ export class VoiceController {
     request ||= this.pendingInput.trim();
     this.pendingInput = "";
     const lastHeard = utterances.at(-1) ?? "";
-    const partial = partialTurn && !!lastHeard && transcriptKey(request).startsWith(transcriptKey(lastHeard)) && !lateComplete(request, lastHeard);
-    const observed = !partial && (openUser || utterances.some(heard => lateComplete(request, heard) || lateComplete(heard, request)));
-    const owner = this.rememberConsumed(utterances, request, observed);
+    const partial = !completeHeard && partialTurn && !!lastHeard && transcriptKey(request).startsWith(transcriptKey(lastHeard)) && !lateComplete(request, lastHeard);
+    const observed = !partial && (completeHeard || !!lastHeard && (lateComplete(request, lastHeard) || lateComplete(lastHeard, request)));
+    const unconfirmed = !partial && partialTurn && lastHeard && !observed ? lastHeard : undefined;
+    const owner = this.rememberConsumed(utterances, request, observed, unconfirmed);
     if (owner && partial) this.captureLateTranscript(owner, openUser ? openText : lastHeard + trailingInput, true);
     // The agent gets all of it: a request the voice only took up late
     // ("Then do it") needs what was asked before. The chat shows less (`requestContext`).
@@ -641,6 +689,10 @@ export class VoiceController {
   /** A delegation: run the request as a chat turn and send the answer back to speak. */
   private async delegate(id: string, text: string): Promise<void> {
     this.refreshOpenFile();
+    if (this.missingTranscripts.size) {
+      this.stopAmbiguousTranscript();
+      return;
+    }
     if (this.needsDelegation) {
       this.needsDelegation = false;
       this.answerTo = id;
@@ -693,10 +745,10 @@ export class VoiceController {
     await this.startTask(id, request, context);
   }
 
-  private rememberConsumed(utterances: string[], request: string, observed = utterances.length > 0): string[] | undefined {
+  private rememberConsumed(utterances: string[], request: string, observed = utterances.length > 0, unconfirmed?: string): string[] | undefined {
     const entries = utterances.map(text => [text]);
     if (request) {
-      if (entries.length && observed) entries[entries.length - 1].push(request);
+      if (entries.length && (observed || unconfirmed !== undefined)) entries[entries.length - 1].push(request);
       else entries.push([request]);
     }
     if (this.consumed.length + this.missingTranscripts.size + entries.length > 4096) {
@@ -710,6 +762,7 @@ export class VoiceController {
     if (!observed && request) {
       const owner = entries[entries.length - 1];
       this.missingTranscripts.add(owner);
+      if (unconfirmed !== undefined) this.unconfirmedTranscripts.set(owner, unconfirmed);
       return owner;
     }
   }
@@ -841,6 +894,14 @@ function lateComplete(request: string, text: string): boolean {
 
 function latePrefix(request: string, text: string): boolean {
   return transcriptKey(request).startsWith(transcriptKey(text)) || lateComplete(request, text);
+}
+
+/** A truncated terminal can own a word-boundary prefix, but changing a
+ * sign, path separator or other internal punctuation changes the request.
+ */
+function sameTranscriptPrefix(a: string, b: string): boolean {
+  const [shorter, longer] = [transcriptKey(a), transcriptKey(b)].sort((x, y) => x.length - y.length);
+  return shorter.split(/\s+/).length >= 3 && longer.startsWith(`${shorter} `);
 }
 
 /** A short interjection of the voice while the user speaks ("Okay,", "Mhm."), not an answer or a question. */
