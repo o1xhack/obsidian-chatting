@@ -84,6 +84,7 @@ function fakeChat() {
     addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
     updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
     removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
+    cutMessages(turnId) { const index = chat.shown.findIndex(m => m.turnId === turnId); if (index >= 0) chat.shown = chat.shown.slice(0, index); },
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
@@ -2295,5 +2296,58 @@ for (const answer of ['Plan.md.', 'The left note.', '左边的笔记。']) {
       assert.ok(userText(log.chat[0]).includes(answer));
       assert.ok(userText(log.chat[0]).includes('Which note?'));
     } finally { view.endVoice(); }
+  });
+}
+
+for (const reason of ['rules', 'request budget']) {
+ for (const newer of [false, true]) {
+  test(`Agent preflight rejection restores voice scope (${reason}, newer selection ${newer})`, async () => {
+    const { view, chat, app, plugin } = await voiceSetup();
+    const original = { filePath: 'Folder/Note.md', text: 'Selected original', from: 0, sourceText: 'Selected original' };
+    const replacement = { filePath: 'Other.md', text: 'New selection', from: 0, sourceText: 'New selection' };
+    let selection = original, rejected = true;
+    chat.getSelection = () => selection;
+    chat.clearSelection = () => { selection = newer ? replacement : null; };
+    chat.setSelection = value => { selection = value; };
+    const getFile = app.vault.getFileByPath, read = app.vault.cachedRead;
+    app.vault.getFileByPath = path => path === 'Folder/AGENTS.md' ? { path, extension: 'md' } : getFile(path);
+    app.vault.cachedRead = async file => {
+      if (file.path === 'Folder/AGENTS.md') {
+        if (reason === 'rules' && rejected) throw Error('Rules unavailable');
+        return 'Keep the selected scope.';
+      }
+      return read(file);
+    };
+    if (reason === 'request budget') plugin.agent.importMessages([{ role: 'user', turnId: 'oversized', content: 'x'.repeat(30_000_000) }]);
+    const log = serve();
+    try {
+      await startListening(view, chat); const ch = channel();
+      delegated(ch, 'preflight-refused', 'Read the selection');
+      await until(() => !view.voice.voiceTurnRunning && spoken(ch).length > 0);
+      assert.equal(log.chat.length, 0);
+      assert.equal(selection, newer ? replacement : original);
+      assert.equal(plugin.chatHistory.some(row => row.type === 'user' && row.text === 'Read the selection'), false);
+      assert.match(plugin.chatHistory.find(row => row.type === 'error').text, reason === 'rules' ? /Rules unavailable/ : /30 MB chat limit/);
+      rejected = false; plugin.agent.clear();
+      // A fresh retry keeps whichever selection the user now has.
+      said(ch, 'Read the selected text again'); delegated(ch, 'preflight-retry', 'Read the selected text again');
+      await until(() => !view.voice.voiceTurnRunning && log.chat.length === 1);
+      assert.match(userText(log.chat[0]), newer ? /New selection/ : /Selected original/);
+    } finally { view.endVoice(); view.handleStop(); }
+  });
+ }
+}
+
+for (const method of ['createOffer', 'setLocalDescription']) {
+  test(`The local WebRTC diagnostic closes a hung ${method} and ignores its late resolution`, async () => {
+    const original = FakePeerConnection.prototype[method]; let finish, calls = 0;
+    FakePeerConnection.prototype[method] = () => { calls++; return new Promise(resolve => { finish = resolve; }); };
+    S.SESSION_TIMING.negotiationWait = 10;
+    try {
+      await assert.rejects(api.checkLocalWebRTC(), /WebRTC capability check timed out/);
+      assert.equal(calls, 1); assert.equal(pc().closed, true); assert.equal(channel().readyState, 'closed');
+      finish(method === 'createOffer' ? { type: 'offer', sdp: 'late' } : undefined);
+      await sleep(10); assert.equal(pc().localDescription, undefined);
+    } finally { FakePeerConnection.prototype[method] = original; }
   });
 }

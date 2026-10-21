@@ -27,7 +27,8 @@ const ANTHROPIC = "https://api.anthropic.com/v1";
 /** Per-network-probe deadline; tests shorten it. */
 export const CAPABILITY_TIMING = { networkMs: 15000 };
 
-async function probeDeadline<T>(work: (controller: AbortController) => Promise<T>): Promise<T> {
+async function probeDeadline<T>(work: (controller: AbortController) => Promise<T>, timeoutMs = CAPABILITY_TIMING.networkMs,
+  timeoutMessage = "The network capability check timed out."): Promise<T> {
   const controller = new AbortController();
   let timer = 0;
   let expired = false;
@@ -36,11 +37,11 @@ async function probeDeadline<T>(work: (controller: AbortController) => Promise<T
       timer = window.setTimeout(() => {
         expired = true;
         controller.abort();
-        reject(new Error("The network capability check timed out."));
-      }, CAPABILITY_TIMING.networkMs);
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
     })]);
   } catch (error) {
-    if (expired) throw new Error("The network capability check timed out.");
+    if (expired) throw new Error(timeoutMessage);
     throw error instanceof Error ? error : new Error(message(error));
   } finally {
     window.clearTimeout(timer);
@@ -104,12 +105,13 @@ export async function checkMicrophone(): Promise<[Status, string]> {
   }
 }
 
-async function checkLocalWebRTC(): Promise<[Status, string]> {
+export async function checkLocalWebRTC(): Promise<[Status, string]> {
   if (typeof RTCPeerConnection === "undefined") return ["fail", "RTCPeerConnection is missing"];
   const pc = new RTCPeerConnection();
   try {
     pc.createDataChannel("probe");
-    await pc.setLocalDescription(await pc.createOffer());
+    const offer = await probeDeadline(() => pc.createOffer(), SESSION_TIMING.negotiationWait, "The WebRTC capability check timed out.");
+    await probeDeadline(() => pc.setLocalDescription(offer), SESSION_TIMING.negotiationWait, "The WebRTC capability check timed out.");
     const candidates = await gatherCandidates(pc, 3000);
     return ["ok", `offer created; ICE candidates: ${candidates.join(", ") || "none within 3 s"}`];
   } finally {

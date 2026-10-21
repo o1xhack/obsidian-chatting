@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 857,
-    "passed": 857,
+    "tests": 863,
+    "passed": 863,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -251,6 +251,15 @@
       "migration-chat-present-chat-mvhfy24i-bk0t0l",
       "migration-visible-chat-mvhfy24i-bk0t0l",
       "migration-api-chat-mvhfy24i-bk0t0l",
+      "migration-chat-present-chat-mvhg5yzf-1fibu4",
+      "migration-visible-chat-mvhg5yzf-1fibu4",
+      "migration-api-chat-mvhg5yzf-1fibu4",
+      "migration-chat-present-chat-mvhg6f4o-fydi78",
+      "migration-visible-chat-mvhg6f4o-fydi78",
+      "migration-api-chat-mvhg6f4o-fydi78",
+      "migration-chat-present-chat-mvhg6r4p-iqgru5",
+      "migration-visible-chat-mvhg6r4p-iqgru5",
+      "migration-api-chat-mvhg6r4p-iqgru5",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -284,7 +293,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "0503111153d84bf1ea4b4022598573f773d6c941bd7da7c78bbf4681afd8368d",
+    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -322,6 +331,8 @@
       "native-late-context-keeps-request-separate",
       "native-prefix-after-fallback-waits-full-text",
       "native-prefix-retains-full-user-constraint",
+      "native-agent-preflight-refusal-restores-scope",
+      "native-agent-preflight-refusal-removes-unsent-turn",
       "native-accepted-voice-consumes-selection",
       "native-first-turn-retains-saved-scope",
       "native-later-voice-turn-is-unscoped",
@@ -355,16 +366,17 @@
       "native-load-earlier-does-not-duplicate-voice-context",
       "held-microphone-muted-during-connect",
       "native-empty-answer-has-spoken-fallback",
+      "native-stalled-webrtc-probe-closed-and-advanced",
       "native-stalled-stream-probe-timed-out",
       "native-diagnostic-advanced-after-timeout",
       "native-diagnostic-cancelled-and-completed",
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "0503111153d84bf1ea4b4022598573f773d6c941bd7da7c78bbf4681afd8368d"
+    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1"
   },
   "liveVoice": {
-    "mainSha256": "0503111153d84bf1ea4b4022598573f773d6c941bd7da7c78bbf4681afd8368d",
+    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -379,7 +391,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhg5yzf-1fibu4",
+    "conversationId": "chat-mvhgqrac-68fpsl",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -392,12 +404,12 @@
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": "It says exactly: \"SAFE. Change TARGET to VERIFIED.\"",
+    "reconnectTranscript": " The note contains exactly this text: \"SAFE\" on one line, then \"Change TARGET to VERIFIED.\"",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 325,
-        "bytes": 11231
+        "packets": 504,
+        "bytes": 17496
       }
     ],
     "peerClosed": true
@@ -530,10 +542,18 @@
     {
       "comment": 4332124835,
       "fix": "Merge user fragments only across known acknowledgements; preserve short substantive answers such as Plan.md. and Chinese note descriptions in backend context."
+    },
+    {
+      "comment": 4332244001,
+      "fix": "Restore consumed voice selection after AgentLoop-level instruction-read or initial serialized-budget preflight refusal, while preserving a newer user selection and removing the unsent turn."
+    },
+    {
+      "comment": 4332244010,
+      "fix": "Bound local WebRTC diagnostic offer/description awaits with 15-second deadlines, close a timed-out peer, ignore late resolution and continue the remaining diagnostics."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "0503111153d84bf1ea4b4022598573f773d6c941bd7da7c78bbf4681afd8368d",
+    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -548,7 +568,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhg6f4o-fydi78",
+    "conversationId": "chat-mvhgrb2r-tl01l7",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,
@@ -562,7 +582,7 @@
     "peerClosed": true
   },
   "liveForeground": {
-    "mainSha256": "0503111153d84bf1ea4b4022598573f773d6c941bd7da7c78bbf4681afd8368d",
+    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -578,19 +598,19 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhg6r4p-iqgru5",
+    "conversationId": "chat-mvhgrnj9-x2p1bz",
     "connected": true,
     "foregroundTurnDone": true,
     "foregroundResultSpoken": true,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "foregroundTranscript": " It says: “SAFE. Change TARGET to VERIFIED.”",
+    "foregroundTranscript": " It says: \"SAFE, change TARGET to VERIFIED.\"",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 850,
-        "bytes": 40836
+        "packets": 861,
+        "bytes": 41159
       }
     ],
     "peerClosed": true

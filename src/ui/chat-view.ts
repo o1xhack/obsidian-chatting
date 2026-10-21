@@ -1000,7 +1000,6 @@ export class ObsidianChatView extends ItemView {
       this.plugin.touchConversation();
       chat.setTitle(conversation.title);
       begin();
-      if (voice && selection && chat.getSelection() === selection) chat.clearSelection?.();
       await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens, transcript ?? null);
     }, { text, selection, images, files, notes, rollback }, voice);
   }
@@ -1076,9 +1075,14 @@ export class ObsidianChatView extends ItemView {
         if (!voice) chat.restoreDraft?.([draft.text, ...queued].join("\n\n"), draft.selection, draft.images, draft.files);
       };
     }
+    let consumedVoiceScope: SelectionScope | null = null;
     const begin = () => {
       turn.started = true;
       conversation.pendingTurn = { turnId, startedAt: Date.now() };
+      if (voice && draft?.selection && chat.getSelection() === draft.selection) {
+        consumedVoiceScope = draft.selection;
+        chat.clearSelection?.();
+      }
       // An edit keeps its draft until answered: stopped before, it goes back to the input.
       if (!turn.rollback) turn.restoreDraft = undefined;
     };
@@ -1109,7 +1113,12 @@ export class ObsidianChatView extends ItemView {
             else shown.cutMessages(turnId);
             this.plugin.touchConversation();
             shown.setTitle(conversation.title);
+            // Agent-level preflight can still reject after begin(). A
+            // refused voice turn must keep its scope for the next attempt,
+            // without replacing a newer selection made in the meantime.
+            if (consumedVoiceScope && !shown.getSelection()) shown.setSelection(consumedVoiceScope);
           }
+          consumedVoiceScope = null;
           voice?.onError(error);
           this.setThinking(turn, null);
           shown?.addError(error);
