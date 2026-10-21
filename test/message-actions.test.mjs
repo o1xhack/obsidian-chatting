@@ -5,6 +5,13 @@ import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 import { api, settings, image, text, call, response, transport, vaultApp, chatFiles } from './harness.mjs';
 
+const voiceDialogue = () => [
+  { role: 'user', text: 'Draft a plan for Folder A/Left.md' },
+  { role: 'assistant', text: 'Should I preserve the headings?' },
+  { role: 'user', text: 'Use the original headings' },
+  { role: 'assistant', text: 'Shall I proceed?' },
+];
+
 beforeEach(() => {
   api.clearOpenAIState();
   globalThis.__notices = [];
@@ -22,7 +29,7 @@ function fakeChat() {
     addAssistantMessage(value) { chat.shown.push({ id: nextId, type: 'assistant', text: value }); return nextId++; },
     updateAssistantMessage(id, value) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.text = value; },
     removeMessage(id) { chat.shown = chat.shown.filter(m => m.id !== id); },
-    cutMessages(turnId) { const index = chat.shown.findIndex(m => m.type === 'user' && m.turnId === turnId); if (index >= 0) chat.shown.splice(index); },
+    cutMessages(turnId, leading = 0) { const index = chat.shown.findIndex(m => m.type === 'user' && m.turnId === turnId); if (index >= 0) chat.shown.splice(Math.max(0, index - leading)); },
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
@@ -79,6 +86,59 @@ function answering(provider, { withTool } = {}) {
     return response(provider, [text(`A${++answer}`)], 'end_turn', answer);
   });
 }
+
+for (const restart of [false, true]) {
+  for (const action of ['edit', 'regenerate']) {
+    test(`A voice turn retains its dialogue on ${action} (${restart ? 'after restart' : 'in memory'})`, async () => {
+      let current = await setup('anthropic');
+      answering('anthropic'); const context = voiceDialogue();
+      await current.view.handleUserMessage('Yes, do that', null, [], [], '', undefined, undefined, context);
+      context[0].text = 'Changed caller-owned context';
+      const original = current.plugin.chatHistory.find(row => row.turnId);
+      assert.deepEqual(original.voiceContext, voiceDialogue());
+      if (restart) {
+        await current.plugin.saveChatHistory();
+        assert.equal(current.writes.at(-1).version, 4);
+        current = await setup('anthropic', current.writes.at(-1)); current.view.renderHistory();
+      }
+      const requests = answering('anthropic');
+      const turn = current.plugin.chatHistory.find(row => row.turnId);
+      if (action === 'edit') await current.view.editMessage(turn.turnId, 'Yes, do that carefully');
+      else await current.view.regenerate();
+      assert.equal(requests.length, 1);
+      const sent = JSON.stringify(requests[0]);
+      assert.match(sent, /Folder A\/Left\.md/); assert.match(sent, /Should I preserve the headings/);
+      assert.match(sent, /Use the original headings/); assert.match(sent, /voice conversation/);
+      assert.doesNotMatch(sent, /Changed caller-owned context/);
+      const rows = current.plugin.chatHistory, request = rows.find(row => row.turnId);
+      assert.deepEqual(request.voiceContext, voiceDialogue());
+      assert.equal(rows.filter(row => row.voiceContextFor === request.turnId).length, 2);
+      assert.equal(rows.filter(row => row.text === 'Draft a plan for Folder A/Left.md').length, 1);
+      assert.deepEqual(current.chat.shown.filter(row => row.type === 'user').map(row => row.text), rows.filter(row => row.type === 'user').map(row => row.text));
+    });
+  }
+}
+
+test('A refused voice edit restores its original context group and API history', async () => {
+  const { plugin, view, chat } = await setup('anthropic'); answering('anthropic');
+  await view.handleUserMessage('Yes, do that', null, [], [], '', undefined, undefined, voiceDialogue());
+  const history = JSON.parse(JSON.stringify(plugin.chatHistory)), messages = plugin.agent.exportMessages();
+  const turn = plugin.chatHistory.find(row => row.turnId);
+  plugin.agent.run = async (_text, callbacks) => callbacks.onPreflightRejected('Synthetic voice edit refusal');
+  await view.editMessage(turn.turnId, 'Edited reference');
+  assert.deepEqual(plugin.agent.exportMessages(), messages);
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.chatHistory.slice(0, history.length))), history);
+  assert.match(plugin.chatHistory.at(-1).text, /Synthetic voice edit refusal/);
+  assert.deepEqual(chat.shown.filter(row => row.type === 'user').map(row => row.text), history.filter(row => row.type === 'user').map(row => row.text));
+});
+
+test('An empty voice context still restores the original voice mode on regeneration', async () => {
+  const { plugin, view } = await setup('anthropic'); answering('anthropic');
+  await view.handleUserMessage('Read the note', null, [], [], '', undefined, undefined, []);
+  const requests = answering('anthropic'); await view.regenerate();
+  assert.match(JSON.stringify(requests[0]), /This turn comes from a voice conversation/);
+  assert.deepEqual(plugin.chatHistory.find(row => row.turnId).voiceContext, []);
+});
 
 for (const [label, index] of [['first', 0], ['middle', 1], ['last', 2]]) {
   test(`Edit the ${label} turn: both histories are cut there and the edited text runs`, async () => {

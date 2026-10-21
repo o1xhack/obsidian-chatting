@@ -47,6 +47,7 @@ Don't delegate when:
 
 Order:
 - Delegate first. Say that you're on it only after you delegated in this same turn. Never say you'll do something that you haven't handed over.
+- Include the user's complete current request in the delegation text. Do not leave it empty or shorten it to a prefix.
 - Don't guess or invent a result. Say that something is done only when the result says so.
 
 Speaking:

@@ -295,6 +295,10 @@ export interface ChatHistoryEntry {
    * with the agent history; changes entries: the turn that made them.
    */
   turnId?: string;
+  /** Main voice request: dialogue needed to reproduce edit/regenerate (empty for a context-free voice turn). */
+  voiceContext?: VoiceTurn[];
+  /** Pre-request speech row belonging to this main turn, for paging and cuts. */
+  voiceContextFor?: string;
   /** User entries: the selection scope the turn ran with. */
   selection?: SelectionScope;
   toolName?: string;

@@ -528,9 +528,10 @@
   }
 
   /** Remove the turn `turnId` and everything after it (edit, regenerate). */
-  export function cutMessages(turnId: string): void {
-    const idx = messages.findIndex((m) => m.type === "user" && m.turnId === turnId);
+  export function cutMessages(turnId: string, leadingContextRows = 0): void {
+    let idx = messages.findIndex((m) => m.type === "user" && m.turnId === turnId);
     if (idx === -1) return;
+    idx = Math.max(0, idx - leadingContextRows);
     for (const msg of messages.slice(idx)) pendingText.delete(msg.id);
     messages.splice(idx);
     editingId = null;

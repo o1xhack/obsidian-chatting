@@ -1982,3 +1982,61 @@ test('Voice renews a prematurely rejected token through the shared ChatGPT sign-
   assert.equal(JSON.parse(secrets[CHATGPT_KEY]).accessToken, 'shared-renewed');
   assert.deepEqual(errorsShown(chat), []); view.endVoice();
 });
+
+for (const ambiguous of ['empty', 'prefix']) {
+  test(`A stale ${ambiguous} delegation cannot consume fresh speech after fallback`, async () => {
+    const { view, chat, plugin } = await voiceSetup(); let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+      : response('anthropic', [text(i === 1 ? 'Old work finished.' : 'New work finished.')]) });
+    await startListening(view, chat);
+    const ch = channel(), old = 'Read the first note';
+    const fresh = ambiguous === 'prefix' ? 'Read the first note and preserve every original heading' : 'Read the other safe test note';
+    delegated(ch, 'initial', 'Check the time'); await until(() => release);
+    said(ch, old); answered(ch, 'Okay.'); await until(() => chat.queued.includes(old));
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    said(ch, fresh);
+    const stale = ambiguous === 'empty' ? '' : 'Read the first';
+    delegated(ch, 'stale', stale); await sleep(50);
+    assert.equal(log.chat.length, 2, 'ambiguous events do not run fresh words under an old ID');
+    assert.equal(view.voice.pendingInput, fresh);
+    delegated(ch, 'actual-new', fresh);
+    await until(() => spoken(ch).some(([id, value]) => id === 'actual-new' && value === 'New work finished.'));
+    delegated(ch, 'stale-again', stale); await sleep(50);
+    assert.equal(log.chat.length, 3);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === fresh).length, 1);
+    view.endVoice();
+  });
+}
+
+for (const withTool of [false, true]) {
+  test(`An empty final answer sends a truthful speakable fallback (${withTool ? 'after a tool' : 'without tools'})`, async () => {
+    const { view, chat } = await voiceSetup();
+    const log = serve({ chat: (_body, i) => withTool && i === 0
+      ? response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')
+      : response('anthropic', [], 'end_turn') });
+    await startListening(view, chat); const ch = channel();
+    delegated(ch, 'empty-answer', 'Check the current date');
+    await until(() => spoken(ch).some(([id, value]) => id === 'empty-answer' && /ended without a final answer/.test(value)));
+    assert.equal(log.chat.length, withTool ? 2 : 1);
+    assert.deepEqual(errorsShown(chat), []); view.endVoice();
+  });
+}
+
+test('After fallback, an exact current reply delegates with its preceding clarification context', async () => {
+  const { view, chat, plugin } = await voiceSetup(); let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+    : response('anthropic', [text(i === 1 ? 'Old work finished.' : 'Clarified request finished.')]) });
+  await startListening(view, chat); const ch = channel();
+  delegated(ch, 'initial', 'Read the first note'); await until(() => release);
+  said(ch, 'Preserve the original title'); answered(ch, 'Okay.'); await until(() => chat.queued.length === 1);
+  release(); await until(() => !view.voice.voiceTurnRunning);
+  said(ch, 'Use the other note'); answered(ch, 'Which one?'); said(ch, 'The left note');
+  delegated(ch, 'current-reply', 'The left note');
+  await until(() => spoken(ch).some(([id, value]) => id === 'current-reply' && value === 'Clarified request finished.'));
+  assert.equal(log.chat.length, 3);
+  assert.match(JSON.stringify(log.chat[2]), /Use the other note/); assert.match(JSON.stringify(log.chat[2]), /Which one/);
+  assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.turnId).at(-1).text, 'The left note');
+  view.endVoice();
+});

@@ -98,7 +98,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   /** Replace an assistant message's text; `final` renders it at once and ends its streaming. */
   updateAssistantMessage(id: number, text: string, final?: boolean): void;
   removeMessage(id: number): void;
-  cutMessages(turnId: string): void;
+  cutMessages(turnId: string, leadingContextRows?: number): void;
   addToolCall(name: string, input: Record<string, unknown>): number;
   updateToolResult(msgId: number, name: string, result: ToolResult): void;
   addError(text: string, errorKind?: ChatErrorKind): void;
@@ -154,6 +154,14 @@ export type ChangesState = "undoable" | "undone" | "kept";
 /** A chat shows its last 20 turns, and 20 more each time it is scrolled near the top. */
 export const PAGE_TURNS = 20;
 
+/** A voice request's preceding speech stays with its main user entry. */
+function visibleTurnStart(history: ChatHistoryEntry[], index: number): number {
+  const turnId = history[index]?.turnId;
+  if (!turnId) return index;
+  while (index > 0 && history[index - 1].type === "user" && !history[index - 1].turnId && history[index - 1].voiceContextFor === turnId) index--;
+  return index;
+}
+
 /**
  * Where the `turns` turns before entry `end` start: the index of the
  * earliest of their user entries, or 0 when no turn comes before them
@@ -163,7 +171,7 @@ export function pageStart(history: ChatHistoryEntry[], end: number, turns = PAGE
   let count = 0;
   for (let index = end - 1; index > 0; index--) {
     if (history[index].type === "user" && history[index].turnId && ++count === turns) {
-      return history.slice(0, index).some((entry) => entry.type === "user" && entry.turnId) ? index : 0;
+      return history.slice(0, index).some((entry) => entry.type === "user" && entry.turnId) ? visibleTurnStart(history, index) : 0;
     }
   }
   return 0;
@@ -847,6 +855,7 @@ export class ObsidianChatView extends ItemView {
     // A turn the API history no longer holds can't be edited: cutting there
     // would leave the model without the chat.
     if (index < 0 || !agent.canEditTurn(turnId)) return;
+    const from = visibleTurnStart(history, index);
     const { selection = null } = history[index];
     // Images and files the saved API history no longer holds can't be sent again.
     const images = (history[index].images ?? []).filter((image) => image.data);
@@ -863,7 +872,7 @@ export class ObsidianChatView extends ItemView {
     agent.cutBeforeTurn(turnId);
     // The history is shorter now: the next answer counts its context anew.
     if (conversation.usage) conversation.usage = { ...conversation.usage, contextTokens: 0 };
-    conversation.chatHistory = history.slice(0, index);
+    conversation.chatHistory = history.slice(0, from);
     if (history[index].turnId === conversation.titleSourceTurnId) delete conversation.titleSourceTurnId;
     const replacementHistory = conversation.chatHistory;
     // In its own conversation, also when another one is shown by then.
@@ -877,15 +886,15 @@ export class ObsidianChatView extends ItemView {
       conversation.usage = originalUsage;
       if (originalNotes.length) conversation.notes = [...new Set([...originalNotes, ...conversation.notes ?? []])];
       // Preserve the rejection explanation alongside the original conversation.
-      history.push(...replacementHistory.slice(index).filter(row => row.type === "error"));
+      history.push(...replacementHistory.slice(from).filter(row => row.type === "error"));
       if (this.plugin.activeConversationId === conversation.id) {
         this.renderHistory();
         this.chatContainer?.setTitle(conversation.title);
       }
       void this.plugin.saveChatHistory();
     };
-    this.chatContainer?.cutMessages(turnId);
-    await this.handleUserMessage(text, selection, images, files, history[index].linkSource ?? "", rollback);
+    this.chatContainer?.cutMessages(turnId, index - from);
+    await this.handleUserMessage(text, selection, images, files, history[index].linkSource ?? "", rollback, undefined, history[index].voiceContext);
   }
 
   /** Regenerate the last answer: run the last user turn again, unchanged. */
@@ -916,8 +925,9 @@ export class ObsidianChatView extends ItemView {
     linkSource = this.plugin.app.workspace.getActiveFile()?.path ?? "",
     rollback?: () => void,
     voice?: VoiceTurnHooks,
-    voiceContext: VoiceTurn[] = []
+    voiceContext?: VoiceTurn[]
   ): Promise<void> {
+    const transcript = voiceContext?.map(turn => ({ ...turn })) ?? (voice ? [] : undefined);
     // An undo is running: the message waits in the input.
     if (this.undoing || this.compactions.has(this.plugin.activeConversationId)) {
       const error = "Please wait for the current response to complete.";
@@ -973,20 +983,20 @@ export class ObsidianChatView extends ItemView {
       // (A switch during the preflight stopped the turn, so it is shown here.)
       // A user turn at the end is the request itself, as the voice put it.
       // Of what was said before, the chat shows only what belongs to the request.
-      const shownContext = requestContext(voiceContext);
+      const shownContext = requestContext(transcript ?? []);
       const said = shownContext.at(-1)?.role === "user" ? shownContext.slice(0, -1) : shownContext;
       for (const spoken of said) {
         if (spoken.role !== "user") continue;
         chat.addUserMessage(spoken.text);
-        conversation.chatHistory.push({ type: "user", text: spoken.text });
+        conversation.chatHistory.push({ type: "user", text: spoken.text, voiceContextFor: turnId });
       }
       chat.addUserMessage(text, images, turnId, savedSelection, files);
-      conversation.chatHistory.push({ type: "user", text, images, turnId, linkSource, ...(savedSelection ? { selection: savedSelection } : {}), ...(files.length ? { attachedFiles: files } : {}) });
+      conversation.chatHistory.push({ type: "user", text, images, turnId, linkSource, ...(transcript ? { voiceContext: transcript } : {}), ...(savedSelection ? { selection: savedSelection } : {}), ...(files.length ? { attachedFiles: files } : {}) });
       this.plugin.touchConversation();
       chat.setTitle(conversation.title);
       begin();
       if (voice && selection && chat.getSelection() === selection) chat.clearSelection?.();
-      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens, voice ? voiceContext : null);
+      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens, transcript ?? null);
     }, { text, selection, images, files, notes, rollback }, voice);
   }
 
@@ -1086,7 +1096,7 @@ export class ObsidianChatView extends ItemView {
           let pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);
           // What was said before a voice request (rows without a turn ID right before it) goes with it.
           const spoken = pending;
-          while (voice && pending > visibleStart && history[pending - 1].type === "user" && !history[pending - 1].turnId) pending--;
+          if (pending !== -1) pending = Math.max(visibleStart, visibleTurnStart(history, pending));
           if (pending !== -1) history.splice(pending);
           const shown = ui();
           if (shown) {

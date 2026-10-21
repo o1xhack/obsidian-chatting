@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 815,
-    "passed": 815,
+    "tests": 828,
+    "passed": 828,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -185,6 +185,12 @@
       "migration-chat-present-chat-mvhcescr-6ysfnc",
       "migration-visible-chat-mvhcescr-6ysfnc",
       "migration-api-chat-mvhcescr-6ysfnc",
+      "migration-chat-present-chat-mvhcy90i-dsfjek",
+      "migration-visible-chat-mvhcy90i-dsfjek",
+      "migration-api-chat-mvhcy90i-dsfjek",
+      "migration-chat-present-chat-mvhcyqg7-iqv61e",
+      "migration-visible-chat-mvhcyqg7-iqv61e",
+      "migration-api-chat-mvhcyqg7-iqv61e",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -218,7 +224,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa",
+    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -241,12 +247,15 @@
       "completed-correction-sent-to-native-backend",
       "native-fresh-repetition-runs-again",
       "native-stale-request-keeps-new-utterance",
+      "native-ambiguous-empty-keeps-new-speech",
+      "native-ambiguous-prefix-keeps-new-speech",
       "native-new-utterance-dispatches-once",
       "native-stale-guard-survives-next-task",
       "native-open-last-second-correction-runs-next",
       "native-spoken-question-keeps-queued-addition",
       "native-late-addition-context-preserved",
       "native-late-context-keeps-request-separate",
+      "native-prefix-after-fallback-waits-full-text",
       "native-prefix-retains-full-user-constraint",
       "native-accepted-voice-consumes-selection",
       "native-first-turn-retains-saved-scope",
@@ -272,16 +281,24 @@
       "end-mutes-microphone-immediately",
       "end-removes-bar",
       "end-restores-composer",
+      "native-voice-context-stored",
+      "native-regenerate-keeps-context-without-duplicate-rows",
+      "native-edit-keeps-context-group",
+      "native-refused-edit-restores-context-group",
+      "native-page-start-retains-voice-context",
+      "native-load-earlier-does-not-duplicate-voice-context",
+      "held-microphone-muted-during-connect",
+      "native-empty-answer-has-spoken-fallback",
       "native-stalled-stream-probe-timed-out",
       "native-diagnostic-advanced-after-timeout",
       "native-diagnostic-cancelled-and-completed",
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa"
+    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55"
   },
   "liveVoice": {
-    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa",
+    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -296,7 +313,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhcy90i-dsfjek",
+    "conversationId": "chat-mvhdooem-n1bjiv",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -309,12 +326,12 @@
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": "The note says exactly: “SAFE. Change TARGET to VERIFIED.”",
+    "reconnectTranscript": " Here's the exact text in that note:\n\n“SAFE Change TARGET to VERIFIED.”",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 335,
-        "bytes": 11581
+        "packets": 353,
+        "bytes": 12246
       }
     ],
     "peerClosed": true,
@@ -410,10 +427,26 @@
     {
       "comment": 4331659244,
       "fix": "Renew a premature 401 through the shared ChatGPT sign-in and retry the same call once for the same account; preserve the original rejection if renewal fails or sign-in changes."
+    },
+    {
+      "comment": 4331742161,
+      "fix": "After fallback, require exact nonempty current-utterance text before ambiguous events can consume pending speech. Empty/prefix stale IDs request a full new delegation; preceding clarification context remains separate."
+    },
+    {
+      "comment": 4331742168,
+      "fix": "Persist optional voiceContext on the main user row and restore it for edit/regenerate, including after restart; preserve empty voice mode and rollback the original context group on refusal."
+    },
+    {
+      "comment": 4331742176,
+      "fix": "Send the computed no-final-answer fallback as speakable text even on a healthy connected call."
+    },
+    {
+      "comment": 4331742178,
+      "fix": "Associate preceding visible speech rows with voiceContextFor; page boundaries, history/UI cuts and rollback keep that group together without duplicate rows."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa",
+    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -428,7 +461,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhcyqg7-iqv61e",
+    "conversationId": "chat-mvhdpcyd-4cxcw3",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,

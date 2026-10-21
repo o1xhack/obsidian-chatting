@@ -1395,6 +1395,9 @@ function isChatHistoryEntry(entry: unknown, imagesWithData = true): boolean {
   if (!isRecord(entry) || Array.isArray(entry) || typeof entry.type !== "string") return false;
   if ("text" in entry && typeof entry.text !== "string") return false;
   if ("turnId" in entry && typeof entry.turnId !== "string") return false;
+  if ("voiceContextFor" in entry && (entry.type !== "user" || typeof entry.voiceContextFor !== "string")) return false;
+  if ("voiceContext" in entry && (entry.type !== "user" || !Array.isArray(entry.voiceContext) || !entry.voiceContext.every(turn =>
+    isRecord(turn) && !Array.isArray(turn) && (turn.role === "user" || turn.role === "assistant") && typeof turn.text === "string"))) return false;
   if ("selection" in entry && !isSavedSelection(entry.selection)) return false;
   if (["user", "assistant", "error"].includes(entry.type) && typeof entry.text !== "string") return false;
   if (entry.type === "tool-result" &&

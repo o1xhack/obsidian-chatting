@@ -569,7 +569,13 @@ export class VoiceController {
     // delegation of work already handled by fallback. A matching fresh
     // utterance after completion can intentionally request that work again.
     const candidate = text.trim() || this.pendingInput.trim();
-    const freshMatch = !this.voiceTurnRunning && !!this.pendingInput.trim() && sameWords(this.pendingInput, candidate);
+    const current = (this.openTurn?.role === "user" ? this.openTurn.text : [...this.spoken].reverse().find(turn => turn.role === "user")?.text)?.trim() || this.pendingInput.trim();
+    const exactFresh = !!text.trim() && !!current && normalizedWords(text) === normalizedWords(current);
+    if (this.steeredSpoken.length && (!text.trim() || (current && !exactFresh))) {
+      this.sendAll(progressEvents(id, `This ambiguous delegation has not run. Delegate the user's complete current request as nonempty exact text with a new delegation ID.\n${current}`));
+      return;
+    }
+    const freshMatch = !this.voiceTurnRunning && exactFresh;
     if (!freshMatch && this.steeredSpoken.some(said => sameWords(said, candidate) && normalizedWords(candidate).length <= normalizedWords(said).length)) {
       if (this.voiceTurnRunning) {
         this.answerTo = id;
@@ -682,7 +688,7 @@ export class VoiceController {
     if (!later.length) this.sendAll(progressEvents(this.answerTo, failed ? "The request failed. Do not claim the requested work succeeded." : TASK_DONE));
     if (failed) this.sendTaskResult("That didn't work; the error is shown in the chat.");
     else if (answer) this.sendTaskResult(spokenAnswer(answer));
-    else if (this.background || this.reconnecting) this.undeliveredResults.push(this.taskResult);
+    else this.sendTaskResult(this.taskResult);
     if (later.length) {
       await this.runVoiceTurn(this.answerTo, later.map(item => item.text).join("\n"), later.flatMap(item => item.context ?? []));
       return;
