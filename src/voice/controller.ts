@@ -588,6 +588,7 @@ export class VoiceController {
   private takeRequest(text: string): { request: string; context: VoiceTurn[] } {
     const openText = this.openTurn?.role === "user" ? this.openTurn.text : "";
     const openUser = this.openTurn?.role === "user" && !!this.openTurn.text.trim();
+    const trailingInput = this.pendingInput.match(/\s*$/)?.[0] ?? "";
     this.closeTurn();
     // Words waiting to be added to the running task go with this request instead.
     window.clearTimeout(this.steerTimer);
@@ -603,6 +604,9 @@ export class VoiceController {
         break;
       }
     }
+    // A brief acknowledgement can close a still-incomplete user turn
+    // before delegation. Its missing tail still belongs to this request.
+    const partialTurn = openUser || (last >= 0 && turns.slice(last + 1).every(turn => turn.role === "assistant" && isBackchannel(turn.text)));
     if (last >= 0 && (!request || sameWords(turns[last].text, request))) {
       const taken = !request;
       let first = this.turnTimes.get(turns[last])?.first ?? 0;
@@ -626,10 +630,10 @@ export class VoiceController {
     request ||= this.pendingInput.trim();
     this.pendingInput = "";
     const lastHeard = utterances.at(-1) ?? "";
-    const partial = openUser && !!lastHeard && transcriptKey(request).startsWith(transcriptKey(lastHeard)) && !lateComplete(request, lastHeard);
+    const partial = partialTurn && !!lastHeard && transcriptKey(request).startsWith(transcriptKey(lastHeard)) && !lateComplete(request, lastHeard);
     const observed = !partial && (openUser || utterances.some(heard => lateComplete(request, heard) || lateComplete(heard, request)));
     const owner = this.rememberConsumed(utterances, request, observed);
-    if (owner && partial) this.captureLateTranscript(owner, openText, true);
+    if (owner && partial) this.captureLateTranscript(owner, openUser ? openText : lastHeard + trailingInput, true);
     // The agent gets all of it: a request the voice only took up late
     // ("Then do it") needs what was asked before. The chat shows less (`requestContext`).
     return { request, context: turns };

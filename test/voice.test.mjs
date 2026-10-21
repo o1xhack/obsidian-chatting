@@ -2215,7 +2215,8 @@ test('Observed speech with an acknowledged paraphrase remains available for a la
 });
 
 for (const prefix of ['Insert ', 'Insert a marker']) {
-  test(`Remaining transcript after a partial request cannot repeat a vault edit (${prefix.trim()})`, async () => {
+ for (const earlyAck of [false, true]) {
+  test(`Remaining transcript after a partial request cannot repeat a vault edit (${prefix.trim()}, early acknowledgement ${earlyAck})`, async () => {
     const { view, chat, app } = await voiceSetup(); let release, writes = 0, note = 'Original';
     app.vault.cachedRead = async () => note;
     app.vault.process = async (_file, edit) => { writes++; note = edit(note); };
@@ -2225,7 +2226,7 @@ for (const prefix of ['Insert ', 'Insert a marker']) {
     ], 'tool_use')); }) : response('anthropic', [text('Marker inserted.')]) });
     try {
       await startListening(view, chat); const ch = channel();
-      said(ch, prefix); delegated(ch, 'partially-heard', request); await until(() => release);
+      said(ch, prefix); if (earlyAck) answered(ch, 'Okay.'); delegated(ch, 'partially-heard', request); await until(() => release);
       answered(ch, 'Okay.'); said(ch, request.slice(prefix.length));
       await sleep(100); assert.deepEqual(chat.queued, []);
       release(); await until(() => !view.voice.voiceTurnRunning);
@@ -2234,6 +2235,8 @@ for (const prefix of ['Insert ', 'Insert a marker']) {
       assert.equal(log.chat.length, 2); assert.equal(writes, 1); assert.equal(note, 'Original\n!');
     } finally { view.endVoice(); view.handleStop(); release?.(); }
   });
+}
+
 }
 
 for (const method of ['createOffer', 'setLocalDescription', 'setRemoteDescription']) {
