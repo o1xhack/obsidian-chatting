@@ -127,6 +127,11 @@ export function sessionSpeakEvents(text: string): Record<string, unknown>[] {
   return append(undefined, "speakable", text);
 }
 
+/** Silent context updates for the current live session. */
+export function sessionContextEvents(text: string): Record<string, unknown>[] {
+  return append(undefined, "commentary", text);
+}
+
 export const CLOSE_EVENT = { type: "session.close" };
 
 function append(delegationId: string | undefined, channel: "speakable" | "commentary", text: string): Record<string, unknown>[] {

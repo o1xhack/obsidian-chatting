@@ -37,6 +37,8 @@ export const SESSION_TIMING = {
   /** Permission prompts and the call-creation POST must not hang forever. */
   permissionWait: 30000,
   connectWait: 30000,
+  /** A broken WebRTC implementation must not retain the mic while negotiating forever. */
+  negotiationWait: 15000,
   /** Use the ICE candidates gathered so far after this long… */
   iceWait: 2000,
   /** …or this long after the first one. */
@@ -125,7 +127,9 @@ export class VoiceSession {
         if (!this.ended && !this.closing) this.finish("The voice connection was closed.");
       };
 
-      await pc.setLocalDescription(await pc.createOffer());
+      const offer = await this.opening(pc.createOffer(), SESSION_TIMING.negotiationWait, "The voice connection couldn't prepare its offer. Try again.");
+      this.checkEnded();
+      await this.opening(pc.setLocalDescription(offer), SESSION_TIMING.negotiationWait, "The voice connection couldn't set its local description. Try again.");
       await iceGathered(pc, SESSION_TIMING.iceWait, SESSION_TIMING.iceSettle);
       step("offerMs");
       this.checkEnded();
@@ -137,7 +141,7 @@ export class VoiceSession {
       step("callMs");
       this.handlers.log("VOICE_CALL", { route: this.route.name, callId: answer.callId ?? null });
       this.checkEnded();
-      await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+      await this.opening(pc.setRemoteDescription({ type: "answer", sdp: answer.sdp }), SESSION_TIMING.negotiationWait, "The voice connection couldn't accept its answer. Try again.");
       await this.waitForStart();
       step("startMs");
       this.handlers.log("VOICE_TIMING", { route: this.route.name, ...timing });
@@ -300,6 +304,7 @@ export class VoiceSession {
 
   private cleanUp(): void {
     this.ended = true;
+    this.setMicEnabled(false);
     this.cancelOpening?.();
     window.clearTimeout(this.quietTimer);
     // A start still waiting for the data channel gives up now.

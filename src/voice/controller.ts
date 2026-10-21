@@ -13,6 +13,7 @@ import {
   seedItems,
   speakEvents,
   sessionSpeakEvents,
+  sessionContextEvents,
   spokenAnswer,
   type OpenFile,
 } from "./protocol";
@@ -71,6 +72,7 @@ export interface VoiceHost {
   history(): ChatHistoryEntry[];
   /** The note or canvas the user has open, if any. */
   openFile(): OpenFile | null;
+  watchOpenFile?(changed: () => void): () => void;
   showError(message: string): void;
   /** Show the voice bar; null when the conversation has ended. */
   render(state: VoiceViewState | null): void;
@@ -167,6 +169,8 @@ export class VoiceController {
   private readonly resumeSpeech: string;
   private sessionReady = false;
   private resumeAnnounced = false;
+  private openFileContext = "";
+  private unwatchOpenFile?: () => void;
   /** When each turn's first and last words arrived (ms). */
   private readonly turnTimes = new WeakMap<VoiceTurn, { first: number; last: number }>();
 
@@ -208,14 +212,18 @@ export class VoiceController {
     this.render();
     try {
       this.session.setMicEnabled(this.state.micOn && !this.background);
-      await this.session.start(`${VOICE_INSTRUCTIONS}\n\n${openFileNote(this.host.openFile())}`, seedItems(this.host.history()));
+      this.openFileContext = openFileNote(this.host.openFile());
+      this.unwatchOpenFile = this.host.watchOpenFile?.(() => this.refreshOpenFile());
+      await this.session.start(`${VOICE_INSTRUCTIONS}\n\n${this.openFileContext}`, seedItems(this.host.history()));
       if (this.ended) return;
+      this.refreshOpenFile();
       this.session.setMicEnabled(this.state.micOn && !this.background);
       this.update({ status: "listening" });
       this.announceResume();
     } catch (error) {
       if (error instanceof VoiceCancelled || this.ended) return;
       this.ended = true;
+      this.unwatchOpenFile?.();
       this.host.render(null);
       this.host.showError(error instanceof Error ? error.message : String(error));
     }
@@ -251,6 +259,7 @@ export class VoiceController {
     // The last words said go to the debug log too.
     this.closeTurn();
     this.ended = true;
+    this.unwatchOpenFile?.();
     this.missingTranscripts.clear();
     this.lateTranscript = undefined;
     window.clearTimeout(this.speakingTimer);
@@ -299,7 +308,16 @@ export class VoiceController {
     this.background = false;
     if (this.ended || hiddenMs > VOICE_TIMING.reconnectAfter || this.undeliveredResults.length || !this.session.isConnected()) return false;
     this.setMic(this.state.micOn && !this.state.holdToTalk);
+    this.refreshOpenFile();
     return true;
+  }
+
+  /** Update the voice model silently when the user changes the active file. */
+  refreshOpenFile(): void {
+    if (this.ended || !this.sessionReady || this.background || this.reconnecting) return;
+    const current = openFileNote(this.host.openFile());
+    if (current === this.openFileContext) return;
+    if (this.sendAll(sessionContextEvents(`Active file changed. This replaces the earlier open-file context. ${current}`))) this.openFileContext = current;
   }
 
   private setMic(on: boolean): void {
@@ -313,9 +331,11 @@ export class VoiceController {
     switch (event.kind) {
       case "ready":
         this.sessionReady = true;
+        this.refreshOpenFile();
         this.announceResume();
         break;
       case "input": {
+        this.refreshOpenFile();
         const text = this.withoutLateTranscript(event.text);
         if (text === null) break;
         if (text.trim()) this.update({ resumeNotice: undefined });
@@ -566,6 +586,8 @@ export class VoiceController {
    * delegation usually brings as its text.
    */
   private takeRequest(text: string): { request: string; context: VoiceTurn[] } {
+    const openText = this.openTurn?.role === "user" ? this.openTurn.text : "";
+    const openUser = this.openTurn?.role === "user" && !!this.openTurn.text.trim();
     this.closeTurn();
     // Words waiting to be added to the running task go with this request instead.
     window.clearTimeout(this.steerTimer);
@@ -603,7 +625,11 @@ export class VoiceController {
     }
     request ||= this.pendingInput.trim();
     this.pendingInput = "";
-    this.rememberConsumed(utterances, request);
+    const lastHeard = utterances.at(-1) ?? "";
+    const partial = openUser && !!lastHeard && transcriptKey(request).startsWith(transcriptKey(lastHeard)) && !lateComplete(request, lastHeard);
+    const observed = !partial && (openUser || utterances.some(heard => lateComplete(request, heard) || lateComplete(heard, request)));
+    const owner = this.rememberConsumed(utterances, request, observed);
+    if (owner && partial) this.captureLateTranscript(owner, openText, true);
     // The agent gets all of it: a request the voice only took up late
     // ("Then do it") needs what was asked before. The chat shows less (`requestContext`).
     return { request, context: turns };
@@ -611,6 +637,7 @@ export class VoiceController {
 
   /** A delegation: run the request as a chat turn and send the answer back to speak. */
   private async delegate(id: string, text: string): Promise<void> {
+    this.refreshOpenFile();
     if (this.needsDelegation) {
       this.needsDelegation = false;
       this.answerTo = id;
@@ -663,10 +690,10 @@ export class VoiceController {
     await this.startTask(id, request, context);
   }
 
-  private rememberConsumed(utterances: string[], request: string): void {
+  private rememberConsumed(utterances: string[], request: string, observed = utterances.length > 0): string[] | undefined {
     const entries = utterances.map(text => [text]);
     if (request) {
-      if (entries.length) entries[entries.length - 1].push(request);
+      if (entries.length && observed) entries[entries.length - 1].push(request);
       else entries.push([request]);
     }
     if (this.consumed.length + this.missingTranscripts.size + entries.length > 4096) {
@@ -675,7 +702,13 @@ export class VoiceController {
       return;
     }
     this.consumed.push(...entries);
-    if (!utterances.length && entries.length) this.missingTranscripts.add(entries[0]);
+    // Earlier dialogue is context, not proof this request's transcript
+    // arrived. Keep an unseen request separate from those observed turns.
+    if (!observed && request) {
+      const owner = entries[entries.length - 1];
+      this.missingTranscripts.add(owner);
+      return owner;
+    }
   }
 
   private async startTask(id: string, request: string, context: VoiceTurn[] = []): Promise<void> {
@@ -774,6 +807,7 @@ export class VoiceController {
     // Lost in the background: the bar stays, the view reconnects on the return.
     if ((this.background || this.reconnecting) && !wasEnded) return;
     this.ended = true;
+    this.unwatchOpenFile?.();
     this.host.render(null);
     if (error && !wasEnded) this.host.showError(error);
   }
@@ -808,8 +842,8 @@ function latePrefix(request: string, text: string): boolean {
 
 /** A short interjection of the voice while the user speaks ("Okay,", "Mhm."), not an answer or a question. */
 function isBackchannel(text: string): boolean {
-  const trimmed = text.trim();
-  return !isQuestion(trimmed) && trimmed.split(/\s+/).filter(Boolean).length <= 3;
+  if (isQuestion(text)) return false;
+  return /^(?:ok(?:ay)?|yes|yeah|yep|sure|right|got it|uh huh|mhm|mm hmm|嗯|嗯嗯|好|好的|对|明白|知道了)$/.test(normalizedWords(text));
 }
 
 function isQuestion(text: string): boolean {

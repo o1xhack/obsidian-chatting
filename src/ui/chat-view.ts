@@ -664,6 +664,11 @@ export class ObsidianChatView extends ItemView {
         return history;
       },
       openFile: () => this.plugin.app.workspace.getActiveFile(),
+      watchOpenFile: (changed) => {
+        const workspace = this.plugin.app.workspace;
+        const event = workspace.on("file-open", changed);
+        return () => workspace.offref(event);
+      },
       showError: (message) => {
         this.chatContainer?.addError(message);
         this.plugin.chatHistory.push({ type: "error", text: message });

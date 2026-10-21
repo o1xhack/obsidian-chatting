@@ -62,6 +62,7 @@ beforeEach(() => {
   rtc.pcs = [];
   Object.assign(S.SESSION_TIMING, { iceWait: 10, iceSettle: 5, startWait: 1000, closeWait: 300, quietLog: 5 });
   Object.assign(S.SESSION_TIMING, { permissionWait: 1000, connectWait: 1000 });
+  S.SESSION_TIMING.negotiationWait = 1000;
   Object.assign(C.VOICE_TIMING, { speaking: 20, continuation: 30, reconnectAfter: 40, endAfter: 150 });
   appLifecycle.markVisible();
   api.resetStreamTransport();
@@ -106,6 +107,11 @@ const codexAnswer = () => ({ status: 201, text: 'answer-sdp', headers: { Locatio
 /** A plugin chatting with Anthropic, signed in to ChatGPT for voice, and a chat view with a fake component. */
 async function voiceSetup({ micMode = 'hands-free' } = {}) {
   const { app } = vaultApp();
+  const fileWatchers = new Set();
+  app.workspace.on = (_name, changed) => { fileWatchers.add(changed); return changed; };
+  app.workspace.offref = changed => fileWatchers.delete(changed);
+  app.workspace.changedFile = () => { for (const changed of fileWatchers) changed(); };
+  app.workspace.fileWatchers = fileWatchers;
   app.vault.adapter = { append: async () => {}, read: async () => { throw new Error('ENOENT'); }, exists: async () => false, write: async () => {} };
   const secrets = { [CHATGPT_KEY]: chatgptCredential() };
   app.secretStorage = { getSecret: (key) => secrets[key] ?? '', setSecret: (key, value) => { secrets[key] = value; } };
@@ -2163,3 +2169,128 @@ test('Unseen-transcript ownership is bounded and released when the call ends', a
   assert.equal(ctl.missingTranscripts.size, 0);
   assert.equal(ctl.lateTranscript, undefined);
 });
+
+for (const blank of [false, true]) {
+test(`Earlier dialogue cannot disguise an unseen request or clear its late-transcript ownership (${blank ? 'empty input event' : 'no input event'})`, async () => {
+  const { view, chat, app } = await voiceSetup(); let release, writes = 0, note = 'Original';
+  app.vault.cachedRead = async () => note;
+  app.vault.process = async (_file, edit) => { writes++; note = edit(note); };
+  const request = 'Insert a marker in the note.';
+  const log = serve({ chat: (_body, i) => i === 0 ? new Promise(resolve => { release = () => resolve(response('anthropic', [
+    call('once', 'edit_document', { path: 'Untitled.md', operation: 'insert', position: 'end', content: '!' }),
+  ], 'tool_use')); }) : response('anthropic', [text('Marker inserted.')]) });
+  try {
+    await startListening(view, chat); const ch = channel();
+    said(ch, 'Which note do I have open?'); answered(ch, 'The left note is open.');
+    ch.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'The left note is open.' } });
+    if (blank) said(ch, '');
+    delegated(ch, 'new-unseen', request); await until(() => release);
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Which note do I have open?' } });
+    said(ch, 'Insert a marker'); answered(ch, 'Okay.'); said(ch, ' in the note.');
+    await sleep(100); assert.deepEqual(chat.queued, []);
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: request } });
+    await sleep(100);
+    assert.equal(log.chat.length, 2); assert.equal(writes, 1); assert.equal(note, 'Original\n!');
+  } finally { view.endVoice(); view.handleStop(); release?.(); }
+});
+}
+
+test('Observed speech with an acknowledged paraphrase remains available for a later fresh repeat', async () => {
+  const { view, chat, plugin } = await voiceSetup();
+  const log = serve();
+  try {
+    await startListening(view, chat); const ch = channel();
+    said(ch, 'Please preserve the left note heading'); answered(ch, 'Okay.');
+    delegated(ch, 'paraphrased', 'Keep the heading of Left.md');
+    await until(() => !view.voice.voiceTurnRunning && log.chat.length === 1);
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Please preserve the left note heading' } });
+    said(ch, 'Please preserve the left note heading');
+    assert.equal(view.voice.openTurn?.text, 'Please preserve the left note heading');
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Please preserve the left note heading' } });
+    delegated(ch, 'fresh-literal', 'Please preserve the left note heading');
+    await until(() => !view.voice.voiceTurnRunning && log.chat.length === 2);
+    assert.equal(plugin.chatHistory.filter(row => row.turnId && row.type === 'user').length, 2);
+  } finally { view.endVoice(); view.handleStop(); }
+});
+
+for (const prefix of ['Insert ', 'Insert a marker']) {
+  test(`Remaining transcript after a partial request cannot repeat a vault edit (${prefix.trim()})`, async () => {
+    const { view, chat, app } = await voiceSetup(); let release, writes = 0, note = 'Original';
+    app.vault.cachedRead = async () => note;
+    app.vault.process = async (_file, edit) => { writes++; note = edit(note); };
+    const request = 'Insert a marker in the note.';
+    const log = serve({ chat: (_body, i) => i === 0 ? new Promise(resolve => { release = () => resolve(response('anthropic', [
+      call('once', 'edit_document', { path: 'Untitled.md', operation: 'insert', position: 'end', content: '!' }),
+    ], 'tool_use')); }) : response('anthropic', [text('Marker inserted.')]) });
+    try {
+      await startListening(view, chat); const ch = channel();
+      said(ch, prefix); delegated(ch, 'partially-heard', request); await until(() => release);
+      answered(ch, 'Okay.'); said(ch, request.slice(prefix.length));
+      await sleep(100); assert.deepEqual(chat.queued, []);
+      release(); await until(() => !view.voice.voiceTurnRunning);
+      ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: request } });
+      await sleep(100);
+      assert.equal(log.chat.length, 2); assert.equal(writes, 1); assert.equal(note, 'Original\n!');
+    } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}
+
+for (const method of ['createOffer', 'setLocalDescription', 'setRemoteDescription']) {
+  for (const cancel of [false, true]) {
+    test(`A pending ${method} ${cancel ? 'cancels promptly' : 'times out'} and releases startup resources`, async () => {
+      const original = FakePeerConnection.prototype[method]; let finish, entered = false, calls = 0;
+      FakePeerConnection.prototype[method] = () => { entered = true; return new Promise(resolve => { finish = resolve; }); };
+      S.SESSION_TIMING.negotiationWait = cancel ? 1000 : 15;
+      const session = new S.VoiceSession({ name: 'pending-sdp', connect: async () => { calls++; return { sdp: 'answer' }; } }, {
+        onMessage() {}, onEnded() {}, onAudioBlocked() {}, log() {},
+      });
+      session.setMicEnabled(true);
+      try {
+        const rejected = assert.rejects(session.start('test', []), cancel ? S.VoiceCancelled : /voice connection couldn't/);
+        await until(() => entered);
+        if (cancel) await session.end();
+        await rejected;
+        assert.equal(rtc.mic.track.enabled, false); assert.equal(rtc.mic.track.stopped, true);
+        assert.equal(pc().closed, true); assert.equal(channel().readyState, 'closed');
+        finish(method === 'createOffer' ? { type: 'offer', sdp: 'late-offer' } : undefined);
+        await sleep(10);
+        assert.equal(calls, method === 'setRemoteDescription' ? 1 : 0);
+        assert.equal(pc().remoteDescription, undefined);
+      } finally { FakePeerConnection.prototype[method] = original; await session.end(); }
+    });
+  }
+}
+
+test('Switching active notes and canvases silently updates the live voice context and removes its watcher on End', async () => {
+  const { view, chat, app } = await voiceSetup(); serve();
+  let active = { path: 'First.md', extension: 'md' };
+  app.workspace.getActiveFile = () => active;
+  try {
+    await startListening(view, chat); const ch = channel();
+    const updates = () => ch.sent.filter(e => e.type === 'session.context.append' && e.channel === 'commentary');
+    assert.equal(updates().length, 0); assert.equal(app.workspace.fileWatchers.size, 1);
+    for (const file of [{ path: 'Second.md', extension: 'md' }, { path: 'Board.canvas', extension: 'canvas' }, null]) {
+      active = file; app.workspace.changedFile();
+      assert.ok(updates().at(-1).content[0].text.endsWith(P.openFileNote(file)));
+    }
+    const count = updates().length; app.workspace.changedFile(); assert.equal(updates().length, count);
+    assert.equal(ch.sent.some(e => e.type === 'session.context.append' && e.channel === 'speakable'), false);
+    view.endVoice(); assert.equal(app.workspace.fileWatchers.size, 0);
+    active = { path: 'Later.md', extension: 'md' }; app.workspace.changedFile(); assert.equal(updates().length, count);
+  } finally { view.endVoice(); }
+});
+
+for (const answer of ['Plan.md.', 'The left note.', '左边的笔记。']) {
+  test(`A short substantive voice answer stays in context (${answer})`, async () => {
+    const { view, chat } = await voiceSetup(); const log = serve();
+    try {
+      await startListening(view, chat); const ch = channel();
+      said(ch, 'Which note?'); answered(ch, answer); said(ch, 'Delete it'); delegated(ch, 'short-answer');
+      await until(() => !view.voice.voiceTurnRunning && log.chat.length === 1);
+      assert.match(userText(log.chat[0]), /Delete it$/);
+      assert.ok(userText(log.chat[0]).includes(answer));
+      assert.ok(userText(log.chat[0]).includes('Which note?'));
+    } finally { view.endVoice(); }
+  });
+}
