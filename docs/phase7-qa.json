@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 833,
-    "passed": 833,
+    "tests": 840,
+    "passed": 840,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -215,6 +215,15 @@
       "migration-chat-present-chat-mvhedvhr-i8ak8u",
       "migration-visible-chat-mvhedvhr-i8ak8u",
       "migration-api-chat-mvhedvhr-i8ak8u",
+      "migration-chat-present-chat-mvhef64p-r0yc9y",
+      "migration-visible-chat-mvhef64p-r0yc9y",
+      "migration-api-chat-mvhef64p-r0yc9y",
+      "migration-chat-present-chat-mvhefnjn-pgmpq8",
+      "migration-visible-chat-mvhefnjn-pgmpq8",
+      "migration-api-chat-mvhefnjn-pgmpq8",
+      "migration-chat-present-chat-mvhefznb-lw8kmv",
+      "migration-visible-chat-mvhefznb-lw8kmv",
+      "migration-api-chat-mvhefznb-lw8kmv",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -248,7 +257,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "434f12a486822ae723c713ccb36fc02bd7e2d275a51da460c57b1869dce9b2d0",
+    "mainSha256": "91ed7dbce83a348d356fbf94ad043ca6cbeacd9754573f340622679b39379f45",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -264,8 +273,10 @@
       "hold-key-enables-microphone",
       "blur-releases-held-microphone",
       "window-blur-releases-held-microphone",
+      "native-late-original-transcript-not-steered",
       "delegated-answer-rendered",
       "answer-returned-to-voice",
+      "native-late-original-transcript-does-not-run-twice",
       "duplicate-delegation-no-second-request",
       "completed-user-turn-queued-native",
       "completed-correction-sent-to-native-backend",
@@ -307,6 +318,7 @@
       "voice-375px-no-overflow",
       "end-mutes-microphone-immediately",
       "end-removes-bar",
+      "native-end-releases-late-transcript-ownership",
       "end-restores-composer",
       "native-voice-context-stored",
       "native-regenerate-keeps-context-without-duplicate-rows",
@@ -322,10 +334,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "434f12a486822ae723c713ccb36fc02bd7e2d275a51da460c57b1869dce9b2d0"
+    "mainSha256": "91ed7dbce83a348d356fbf94ad043ca6cbeacd9754573f340622679b39379f45"
   },
   "liveVoice": {
-    "mainSha256": "434f12a486822ae723c713ccb36fc02bd7e2d275a51da460c57b1869dce9b2d0",
+    "mainSha256": "91ed7dbce83a348d356fbf94ad043ca6cbeacd9754573f340622679b39379f45",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -340,7 +352,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhef64p-r0yc9y",
+    "conversationId": "chat-mvhfdcj8-zm2giq",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -348,17 +360,17 @@
     "recoveredNotice": "Previous task ended — see the result in chat",
     "recoveredNoticeVisible": true,
     "reconnectAudioContext": "running",
-    "reconnectedTurnDone": true,
-    "reconnectedResultSpoken": true,
+    "speechObservation": "The service did not finish automatic speech within 30 seconds; the visible recovery notice remains available.",
+    "reconnectedResultSpoken": false,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": " The note contains exactly: SAFE. Change TARGET to VERIFIED.",
+    "reconnectTranscript": "",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 315,
-        "bytes": 10881
+        "packets": 1528,
+        "bytes": 52916
       }
     ],
     "peerClosed": true,
@@ -371,7 +383,7 @@
     "Physical iOS/Android and Bluetooth have not been accepted in this maintainer run.",
     "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account.",
     "The available phone control service showed concurrent active operations; this task did not take over the phone.",
-    "Automatic speech after reconnect is best effort. Latest-bundle foreground and reconnect speech completed; earlier consecutive candidates stayed quiet despite healthy transport. Retained context and the visible recovery notice provide a deterministic recovery indication. This is not stable automatic-spoken acceptance."
+    "Automatic speech after reconnect is best effort. Latest-bundle foreground speech completed but reconnect speech stayed quiet for 30 seconds. Earlier reconnect speech completed. Retained context and the visible recovery notice provide the deterministic recovery indication; no stable automatic-spoken acceptance is claimed."
   ],
   "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready.",
   "reviewFixes": [
@@ -478,10 +490,14 @@
     {
       "comment": 4331880572,
       "fix": "Once fallback guards exist, a delegation requires exact current speech. No-current paraphrases/unrelated requests cannot dispatch, and the frontend must wait for the user rather than retry old work."
+    },
+    {
+      "comment": 4331990338,
+      "fix": "Track bounded ownership when delegation precedes its transcript. Matching late fragments never enter open/pending steering, even around acknowledgements, case/sentence-ending changes or an early terminal. Divergent signed prefixes and later independent repeats remain fresh; End releases ownership. Sandbox write-count regressions prove one edit per requested turn."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "434f12a486822ae723c713ccb36fc02bd7e2d275a51da460c57b1869dce9b2d0",
+    "mainSha256": "91ed7dbce83a348d356fbf94ad043ca6cbeacd9754573f340622679b39379f45",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -496,7 +512,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhefnjn-pgmpq8",
+    "conversationId": "chat-mvhfecl9-c3wshc",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,
@@ -513,7 +529,7 @@
     ]
   },
   "liveForeground": {
-    "mainSha256": "434f12a486822ae723c713ccb36fc02bd7e2d275a51da460c57b1869dce9b2d0",
+    "mainSha256": "91ed7dbce83a348d356fbf94ad043ca6cbeacd9754573f340622679b39379f45",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -529,19 +545,19 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhefznb-lw8kmv",
+    "conversationId": "chat-mvhfep3f-u7h5jc",
     "connected": true,
     "foregroundTurnDone": true,
     "foregroundResultSpoken": true,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "foregroundTranscript": " It says: \" SAFE, change TARGET to VERIFIED.\"",
+    "foregroundTranscript": " It says, \"SAFE\" on the first line, then \"Change TARGET to VERIFIED.\" on the second line.",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 892,
-        "bytes": 42151
+        "packets": 1040,
+        "bytes": 48952
       }
     ],
     "peerClosed": true,

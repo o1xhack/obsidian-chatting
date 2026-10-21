@@ -137,6 +137,10 @@ export class VoiceController {
   private openTurn: VoiceTurn | null = null;
   /** Every consumed utterance until its terminal event, including paraphrases. */
   private consumed: string[][] = [];
+  /** Delegations accepted before their transcript arrived (also after an early terminal event). */
+  private readonly missingTranscripts = new Set<string[]>();
+  private readonly terminalTranscripts = new WeakSet<string[]>();
+  private lateTranscript?: { owner: string[]; text: string; complete: boolean; confirmed: boolean };
   private lastSpeaker: "user" | "assistant" | null = null;
   private voiceTurnRunning = false;
   /** The newest delegation in the running voice turn: progress and the answer go to it. */
@@ -247,6 +251,8 @@ export class VoiceController {
     // The last words said go to the debug log too.
     this.closeTurn();
     this.ended = true;
+    this.missingTranscripts.clear();
+    this.lateTranscript = undefined;
     window.clearTimeout(this.speakingTimer);
     window.clearTimeout(this.steerTimer);
     this.host.render(null);
@@ -309,15 +315,18 @@ export class VoiceController {
         this.sessionReady = true;
         this.announceResume();
         break;
-      case "input":
-        if (event.text.trim()) this.update({ resumeNotice: undefined });
+      case "input": {
+        const text = this.withoutLateTranscript(event.text);
+        if (text === null) break;
+        if (text.trim()) this.update({ resumeNotice: undefined });
         // Still speaking: words waiting to be added to the task wait for the rest.
         if (this.pendingSteer.length) this.restartSteerTimer();
-        if (event.text.trim()) this.clarificationPending = false;
-        this.pendingInput += event.text;
-        this.addSpoken("user", event.text);
-        this.caption("user", event.text);
+        if (text.trim()) this.clarificationPending = false;
+        this.pendingInput += text;
+        this.addSpoken("user", text);
+        this.caption("user", text);
         break;
+      }
       case "output":
         if (event.text.trim()) this.update({ resumeNotice: undefined });
         this.addSpoken("assistant", event.text);
@@ -353,6 +362,42 @@ export class VoiceController {
         if (event.reason && event.reason !== "close_requested" && !this.background) this.host.showError(`The voice conversation ended (${event.reason.replace(/_/g, " ")}).`);
         break;
     }
+  }
+
+  /** Keep delayed fragments of an already-dispatched, previously unseen
+   * transcript out of steering. A divergent prefix is fresh speech;
+   * after the owned sentence is complete, subsequent words are fresh too.
+   */
+  private withoutLateTranscript(text: string): string | null {
+    let candidate = text;
+    const previous = this.lateTranscript;
+    if (previous) {
+      if (previous.complete && !/[\p{L}\p{N}]/u.test(text)) return null;
+      candidate = previous.text + text;
+      if (previous.owner.some(request => latePrefix(request, candidate))) {
+        return this.captureLateTranscript(previous.owner, candidate, previous.confirmed);
+      }
+      this.lateTranscript = undefined;
+      if (previous.complete || previous.confirmed) {
+        this.missingTranscripts.delete(previous.owner);
+        candidate = text;
+      }
+    }
+    const owner = transcriptKey(candidate) && [...this.missingTranscripts].find(variants =>
+      variants.some(request => latePrefix(request, candidate)));
+    return owner ? this.captureLateTranscript(owner, candidate, this.terminalTranscripts.has(owner)) : candidate;
+  }
+
+  private captureLateTranscript(owner: string[], text: string, confirmed: boolean): null {
+    if (text.length > Math.max(4096, ...owner.map(request => request.length * 4))) {
+      this.host.showError("Please restart voice to continue this long call.");
+      void this.end();
+      return null;
+    }
+    const complete = owner.some(request => lateComplete(request, text));
+    if (complete) this.missingTranscripts.delete(owner);
+    this.lateTranscript = { owner, text, complete, confirmed };
+    return null;
   }
 
   /** Append words to the caption; a new speaker starts a new line. */
@@ -471,7 +516,14 @@ export class VoiceController {
       // A new partial transcript can intentionally repeat handled words.
       // The old delegation already consumed its own open turn; a late
       // terminal event must not erase speech received since then.
-      if (consumed >= 0) this.consumed.splice(consumed, 1);
+      if (consumed >= 0) {
+        const [owner] = this.consumed.splice(consumed, 1);
+        this.terminalTranscripts.add(owner);
+        if (this.lateTranscript?.owner === owner) {
+          if (this.lateTranscript.complete) this.lateTranscript = undefined;
+          else this.lateTranscript.confirmed = true;
+        }
+      }
       return;
     }
     if (role === "user" && text.trim()) this.clarificationPending = false;
@@ -617,12 +669,13 @@ export class VoiceController {
       if (entries.length) entries[entries.length - 1].push(request);
       else entries.push([request]);
     }
-    if (this.consumed.length + entries.length > 4096) {
+    if (this.consumed.length + this.missingTranscripts.size + entries.length > 4096) {
       this.host.showError("Please restart voice to continue this long call.");
       void this.end();
       return;
     }
     this.consumed.push(...entries);
+    if (!utterances.length && entries.length) this.missingTranscripts.add(entries[0]);
   }
 
   private async startTask(id: string, request: string, context: VoiceTurn[] = []): Promise<void> {
@@ -737,6 +790,20 @@ export class VoiceController {
 
 function normalizedWords(text: string): string {
   return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(" ");
+}
+
+/** Case/spacing and sentence endings may differ; signs and path punctuation remain significant. */
+function transcriptKey(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function lateComplete(request: string, text: string): boolean {
+  const expected = transcriptKey(request), actual = transcriptKey(text);
+  return actual.startsWith(expected) && /^[.!?。！？,，:：;；]*$/.test(actual.slice(expected.length));
+}
+
+function latePrefix(request: string, text: string): boolean {
+  return transcriptKey(request).startsWith(transcriptKey(text)) || lateComplete(request, text);
 }
 
 /** A short interjection of the voice while the user speaks ("Okay,", "Mhm."), not an answer or a question. */

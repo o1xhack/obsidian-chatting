@@ -2081,3 +2081,85 @@ for (const request of ['delete Backup.md', 'Move another note to Archive']) {
     assert.equal(log.chat.length, 3); view.endVoice();
   });
 }
+
+for (const terminalFirst of [false, true]) {
+  for (const acknowledgement of [false, true]) {
+    test(`Late original transcript cannot repeat a vault edit (${terminalFirst ? 'terminal first' : 'terminal last'}, ${acknowledgement ? 'with' : 'without'} acknowledgement)`, async () => {
+      const { view, chat, app } = await voiceSetup(); let release, writes = 0, note = 'Original';
+      app.vault.cachedRead = async () => note;
+      app.vault.process = async (_file, edit) => { writes++; note = edit(note); };
+      const request = 'Insert a marker in the note.';
+      const edit = i => response('anthropic', [call(`edit-${i}`, 'edit_document', { path: 'Untitled.md', operation: 'insert', position: 'end', content: '!' })], 'tool_use');
+      const log = serve({ chat: (_body, i) => i === 0 ? new Promise(resolve => { release = () => resolve(edit(i)); })
+        : i % 2 === 0 ? edit(i) : response('anthropic', [text('Marker inserted.')]) });
+      try {
+        await startListening(view, chat); const ch = channel();
+        delegated(ch, 'before-transcript', request); await until(() => release);
+        if (terminalFirst) ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: request } });
+        said(ch, 'insert a marker');
+        if (acknowledgement) answered(ch, 'Okay.');
+        said(ch, ' in the note'); said(ch, '.');
+        await sleep(100);
+        assert.deepEqual(chat.queued, [], 'owned late fragments never become steering');
+        assert.equal(view.voice.pendingInput, '');
+        release(); await until(() => !view.voice.voiceTurnRunning);
+        if (!terminalFirst) ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: request } });
+        await sleep(100);
+        assert.equal(log.chat.length, 2); assert.equal(writes, 1); assert.equal(note, 'Original\n!');
+        // The owned transcript is complete: an independent repeat still works.
+        said(ch, request); delegated(ch, 'fresh-repeat', request);
+        await until(() => !view.voice.voiceTurnRunning && log.chat.length === 4);
+        assert.equal(writes, 2); assert.equal(note, 'Original\n!\n!');
+      } finally { view.endVoice(); view.handleStop(); release?.(); }
+    });
+  }
+}
+
+test('Unseen delegated requests consume their out-of-order late transcript fragments once', async () => {
+  const { view, chat } = await voiceSetup(); let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+    : response('anthropic', [text('Both explicit requests processed.')]) });
+  try {
+    await startListening(view, chat); const ch = channel();
+    delegated(ch, 'one', 'Read the first note'); await until(() => release);
+    delegated(ch, 'two', 'Read the second note');
+    said(ch, 'Read the '); said(ch, 'second note'); answered(ch, 'Okay.');
+    said(ch, 'Read the first note');
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Read the first note' } });
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Read the second note' } });
+    await sleep(100); assert.deepEqual(chat.queued, ['Read the second note']);
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    assert.equal(log.chat.length, 2);
+  } finally { view.endVoice(); view.handleStop(); release?.(); }
+});
+
+test('An unseen transcript prefix that diverges preserves the new request and its sign', async () => {
+  const { view, chat } = await voiceSetup(); let release;
+  const log = serve({ chat: (_body, i) => i === 0
+    ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+    : response('anthropic', [text('Updated request processed.')]) });
+  try {
+    await startListening(view, chat); const ch = channel();
+    delegated(ch, 'initial', 'Append -1 to the score.'); await until(() => release);
+    said(ch, 'Append '); said(ch, '+1 to the score.'); answered(ch, 'Okay.');
+    await until(() => chat.queued.includes('Append +1 to the score.'));
+    assert.deepEqual(chat.queued, ['Append +1 to the score.']);
+    said(ch, 'Append -1 to the score.');
+    ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Append -1 to the score.' } });
+    await sleep(100); assert.deepEqual(chat.queued, ['Append +1 to the score.']);
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    assert.equal(log.chat.length, 2);
+  } finally { view.endVoice(); view.handleStop(); release?.(); }
+});
+
+test('Unseen-transcript ownership is bounded and released when the call ends', async () => {
+  const { view, chat } = await voiceSetup(); const log = serve();
+  await startListening(view, chat); const ctl = view.voice;
+  for (let i = 0; i < 4096; i++) ctl.missingTranscripts.add([`Expected late transcript ${i}`]);
+  delegated(channel(), 'over-budget', 'Read a new note');
+  await until(() => !chat.voice);
+  assert.equal(log.chat.length, 0);
+  assert.equal(ctl.missingTranscripts.size, 0);
+  assert.equal(ctl.lateTranscript, undefined);
+});
