@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 863,
-    "passed": 863,
+    "tests": 866,
+    "passed": 866,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -260,6 +260,15 @@
       "migration-chat-present-chat-mvhg6r4p-iqgru5",
       "migration-visible-chat-mvhg6r4p-iqgru5",
       "migration-api-chat-mvhg6r4p-iqgru5",
+      "migration-chat-present-chat-mvhgqrac-68fpsl",
+      "migration-visible-chat-mvhgqrac-68fpsl",
+      "migration-api-chat-mvhgqrac-68fpsl",
+      "migration-chat-present-chat-mvhgrb2r-tl01l7",
+      "migration-visible-chat-mvhgrb2r-tl01l7",
+      "migration-api-chat-mvhgrb2r-tl01l7",
+      "migration-chat-present-chat-mvhgrnj9-x2p1bz",
+      "migration-visible-chat-mvhgrnj9-x2p1bz",
+      "migration-api-chat-mvhgrnj9-x2p1bz",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -293,7 +302,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
+    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -366,6 +375,9 @@
       "native-load-earlier-does-not-duplicate-voice-context",
       "held-microphone-muted-during-connect",
       "native-empty-answer-has-spoken-fallback",
+      "held-microphone-muted-during-connect",
+      "native-fresh-minus-fragment-preserved",
+      "native-fresh-minus-reaches-backend",
       "native-stalled-webrtc-probe-closed-and-advanced",
       "native-stalled-stream-probe-timed-out",
       "native-diagnostic-advanced-after-timeout",
@@ -373,10 +385,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1"
+    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3"
   },
   "liveVoice": {
-    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
+    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -391,7 +403,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhgqrac-68fpsl",
+    "conversationId": "chat-mvieeso5-9kyqkd",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -404,12 +416,12 @@
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": " The note contains exactly this text: \"SAFE\" on one line, then \"Change TARGET to VERIFIED.\"",
+    "reconnectTranscript": "The exact text is: “SAFE. Change TARGET to VERIFIED.”",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 504,
-        "bytes": 17496
+        "packets": 397,
+        "bytes": 13786
       }
     ],
     "peerClosed": true
@@ -419,7 +431,7 @@
     "Physical iOS/Android and Bluetooth have not been accepted in this maintainer run.",
     "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account.",
     "The available phone control service showed concurrent active operations; this task did not take over the phone.",
-    "Automatic speech after reconnect is best effort. Latest-bundle foreground speech completed. Reconnect speech also completed in this run. Earlier runs include both spoken and quiet results. Retained context and the visible recovery notice provide the deterministic recovery indication; no stable automatic-spoken acceptance is claimed."
+    "Automatic speech after reconnect is best effort. Latest-bundle foreground and reconnect speech completed. Earlier runs include both spoken and quiet results. Retained context and the visible recovery notice provide the deterministic recovery indication; no stable automatic-spoken acceptance is claimed."
   ],
   "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready.",
   "reviewFixes": [
@@ -553,7 +565,7 @@
     }
   ],
   "liveReconnect": {
-    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
+    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -568,7 +580,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhgrb2r-tl01l7",
+    "conversationId": "chat-mviefbj2-klbnhx",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,
@@ -582,7 +594,7 @@
     "peerClosed": true
   },
   "liveForeground": {
-    "mainSha256": "458947db729ade4ebd83db1ad200f78d039750cdee6b0efcc4f2a47e37b3c1a1",
+    "mainSha256": "dc6ae7fcb6608b5095b22d6de10d677490e06d03a4ac215dafbb6e9a847bcaa3",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -598,21 +610,31 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhgrnj9-x2p1bz",
+    "conversationId": "chat-mviefmvv-knekar",
     "connected": true,
     "foregroundTurnDone": true,
     "foregroundResultSpoken": true,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "foregroundTranscript": " It says: \"SAFE, change TARGET to VERIFIED.\"",
+    "foregroundTranscript": " It says, \"SAFE\" then \"Change TARGET to VERIFIED.\"",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 861,
-        "bytes": 41159
+        "packets": 961,
+        "bytes": 44348
       }
     ],
     "peerClosed": true
-  }
+  },
+  "selfReviewFixes": [
+    {
+      "fix": "Fresh minus/plus and slash fragments after a completed owned delayed transcript are preserved. Only a matching sentence suffix remains owned, rather than dropping every non-alphanumeric fragment.",
+      "regressions": 3,
+      "nativeChecks": [
+        "native-fresh-minus-fragment-preserved",
+        "native-fresh-minus-reaches-backend"
+      ]
+    }
+  ]
 }

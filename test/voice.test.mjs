@@ -2351,3 +2351,21 @@ for (const method of ['createOffer', 'setLocalDescription']) {
     } finally { FakePeerConnection.prototype[method] = original; }
   });
 }
+
+for (const [prefix, rest] of [['-', '1 dollars in the total'], ['+', '1 dollars in the total'], ['/', 'Archive/Note.md']]) {
+  test(`A fresh symbolic fragment after an owned late transcript is preserved (${prefix})`, async () => {
+    const { view, chat } = await voiceSetup(); let release;
+    const request = 'Read the current note';
+    const log = serve({ chat: (_body, i) => i === 0 ? new Promise(resolve => { release = () => resolve(response('anthropic', [text('First done.')])) }) : response('anthropic', [text('Second done.')]) });
+    try {
+      await startListening(view, chat); const ch = channel();
+      delegated(ch, 'late-original', request); await until(() => release);
+      said(ch, request);
+      said(ch, prefix); said(ch, rest); answered(ch, 'Okay.');
+      await sleep(100);
+      assert.ok(chat.queued.includes(prefix + rest), JSON.stringify(chat.queued));
+      release(); await until(() => log.chat.length === 2 && !view.voice.voiceTurnRunning);
+      assert.ok(userText(log.chat[1]).includes(prefix + rest));
+    } finally { view.endVoice(); view.handleStop(); release?.(); }
+  });
+}

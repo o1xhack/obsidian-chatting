@@ -392,7 +392,6 @@ export class VoiceController {
     let candidate = text;
     const previous = this.lateTranscript;
     if (previous) {
-      if (previous.complete && !/[\p{L}\p{N}]/u.test(text)) return null;
       candidate = previous.text + text;
       if (previous.owner.some(request => latePrefix(request, candidate))) {
         return this.captureLateTranscript(previous.owner, candidate, previous.confirmed);
