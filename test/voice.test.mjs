@@ -990,7 +990,7 @@ test('Said during a running task without a delegation: it still reaches the task
   // The old terminal/delegation arrives late, without a fresh user utterance.
   ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: 'Also, add a card to the right' } });
   delegated(ch, 'del_2', 'Also, add a card to the right');
-  await until(() => spoken(ch).some(([id]) => id === 'del_2'));
+  await until(() => appended(ch, 'commentary').some(([id]) => id === 'del_2'));
   assert.equal(log.chat.length, 2);
   view.endVoice();
 });
@@ -2040,3 +2040,44 @@ test('After fallback, an exact current reply delegates with its preceding clarif
   assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.turnId).at(-1).text, 'The left note');
   view.endVoice();
 });
+
+for (const smallTalk of [false, true]) {
+  test(`A fresh repeated utterance survives its terminal before delegation (${smallTalk ? 'after small talk' : 'directly'})`, async () => {
+    const { view, chat, plugin } = await voiceSetup(); let release;
+    const repeated = 'Preserve the original title';
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+      : response('anthropic', [text(i === 1 ? 'Old work finished.' : 'Repeated work finished.')]) });
+    await startListening(view, chat); const ch = channel();
+    delegated(ch, 'initial', 'Read the note'); await until(() => release);
+    said(ch, repeated); answered(ch, 'Okay.'); await until(() => chat.queued.includes(repeated));
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    if (smallTalk) { said(ch, 'How are you?'); answered(ch, 'Fine.'); ch.receive({ type: 'turn.done', turn: { role: 'assistant', transcript: 'Fine.' } }); }
+    said(ch, repeated); ch.receive({ type: 'turn.done', turn: { role: 'user', transcript: repeated } });
+    assert.equal(view.voice.openTurn?.text, repeated);
+    delegated(ch, 'repeat', repeated);
+    await until(() => spoken(ch).some(([id, value]) => id === 'repeat' && value === 'Repeated work finished.'));
+    assert.equal(log.chat.length, 3);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === repeated).length, 2);
+    view.endVoice();
+  });
+}
+
+for (const request of ['delete Backup.md', 'Move another note to Archive']) {
+  test(`After fallback, a delegation without current speech cannot dispatch (${request})`, async () => {
+    const { view, chat } = await voiceSetup(); let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+      : response('anthropic', [text(i === 1 ? 'Fallback finished.' : 'Fresh request finished.')]) });
+    await startListening(view, chat); const ch = channel();
+    delegated(ch, 'initial', 'Read the first note'); await until(() => release);
+    said(ch, 'Remove the backup note'); answered(ch, 'Okay.'); await until(() => chat.queued.length === 1);
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    delegated(ch, 'unverified', request); await sleep(50);
+    assert.equal(log.chat.length, 2, 'paraphrases and unrelated requests cannot invent user intent');
+    assert.match(appended(ch, 'commentary').find(([id]) => id === 'unverified')[1], /Wait for the user to speak/);
+    said(ch, request); delegated(ch, 'verified', request);
+    await until(() => spoken(ch).some(([id, value]) => id === 'verified' && value === 'Fresh request finished.'));
+    assert.equal(log.chat.length, 3); view.endVoice();
+  });
+}

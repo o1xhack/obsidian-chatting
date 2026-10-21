@@ -468,7 +468,9 @@ export class VoiceController {
     if (consumed < 0) consumed = this.consumed.findIndex(variants => variants.some(request => sameWords(text, request)));
     if (role === "user" && (consumed >= 0 || this.steeredSpoken.some(request => normalizedWords(request) === normalizedWords(text)))) {
       // The request a delegation already took, reported late.
-      if (this.openTurn?.role === "user" && normalizedWords(this.openTurn.text) === normalizedWords(text)) this.openTurn = null;
+      // A new partial transcript can intentionally repeat handled words.
+      // The old delegation already consumed its own open turn; a late
+      // terminal event must not erase speech received since then.
       if (consumed >= 0) this.consumed.splice(consumed, 1);
       return;
     }
@@ -571,8 +573,11 @@ export class VoiceController {
     const candidate = text.trim() || this.pendingInput.trim();
     const current = (this.openTurn?.role === "user" ? this.openTurn.text : [...this.spoken].reverse().find(turn => turn.role === "user")?.text)?.trim() || this.pendingInput.trim();
     const exactFresh = !!text.trim() && !!current && text.trim() === current;
-    if (this.steeredSpoken.length && (!text.trim() || (current && !exactFresh))) {
-      this.sendAll(progressEvents(id, `This ambiguous delegation has not run. Delegate the user's complete current request as nonempty exact text with a new delegation ID.\n${current}`));
+    if (this.steeredSpoken.length && !exactFresh) {
+      const next = current
+        ? `Delegate the user's complete current request as nonempty exact text with a new delegation ID.\n${current}`
+        : "There is no current user utterance. Wait for the user to speak; do not delegate the previous request again.";
+      this.sendAll(progressEvents(id, `This ambiguous delegation has not run. ${next}`));
       return;
     }
     const freshMatch = !this.voiceTurnRunning && exactFresh;
