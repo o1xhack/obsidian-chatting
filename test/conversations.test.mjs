@@ -758,7 +758,9 @@ test('At start only the open chat\'s file is read; another chat\'s when it is op
 });
 
 test('A chat whose file can\'t be read leaves the list, its file kept aside; one from a newer version is left as it is', async () => {
-  for (const [content, corrupt] of [['{"version": 4, "conv', true], [JSON.stringify({ version: 4, conversation: { id: 'x', chatHistory: [{ type: 'user', text: 42 }] } }), true], [JSON.stringify({ version: 99, conversation: {} }), false]]) {
+  for (const [content, corrupt] of [['{"version": 4, "conv', true], [JSON.stringify({ version: 4, conversation: { id: 'x', chatHistory: [{ type: 'user', text: 42 }] } }), true],
+    ...[{ voiceContext: [{ role: 'system', text: 'Invalid role' }] }, { voiceContext: {} }, { voiceContextFor: {} }].map(fields => [JSON.stringify({ version: 4, conversation: { id: 'x', chatHistory: [{ type: 'user', text: 'Q', ...fields }] } }), true]),
+    [JSON.stringify({ version: 99, conversation: {} }), false]]) {
     const first = await setup('anthropic');
     answering('anthropic');
     await first.view.handleUserMessage('Broken later', null);

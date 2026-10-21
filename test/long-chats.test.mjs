@@ -5,6 +5,34 @@ import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
 import { api, sse, streamEvents, text, transport, withCatalog, settings, settingsApp, vaultApp, callbacks, chatFiles } from './harness.mjs';
 
+test('A voice page boundary includes its context but keeps unrelated earlier replies on the previous page', () => {
+  const history = [
+    { type: 'user', text: 'Earlier', turnId: 'old' }, { type: 'assistant', text: 'Which?' },
+    { type: 'user', text: 'An unrelated ask_user reply' },
+    { type: 'user', text: 'Voice context', voiceContextFor: 'voice' },
+    { type: 'user', text: 'Do it', turnId: 'voice', voiceContext: [] }, { type: 'assistant', text: 'Done' },
+    { type: 'user', text: 'Latest', turnId: 'latest' }, { type: 'assistant', text: 'Answer' },
+  ];
+  assert.equal(api.pageStart(history, history.length, 2), 3);
+  assert.equal(api.pageStart(history, 3, 2), 0);
+});
+
+test('Paging a long chat keeps voice context with its boundary turn without duplicating it on load earlier', async () => {
+  const { plugin, view, chat } = await chatSetup('anthropic');
+  const history = [];
+  for (let i = 0; i < 25; i++) {
+    if (i === 5) history.push({ type: 'user', text: 'Context A', voiceContextFor: 't5' }, { type: 'user', text: 'Context B', voiceContextFor: 't5' });
+    history.push({ type: 'user', text: `Q${i}`, turnId: `t${i}` }, { type: 'assistant', text: `A${i}` });
+  }
+  plugin.chatHistory = history; view.renderHistory();
+  assert.deepEqual(chat.shown.slice(0, 3).map(row => row.text), ['Context A', 'Context B', 'Q5']);
+  assert.equal(chat.shown.filter(row => row.type === 'user' && row.turnId).length, 20);
+  view.loadEarlier();
+  assert.deepEqual(chat.shown.map(row => row.text), history.map(row => row.text));
+  assert.equal(chat.shown.filter(row => row.text === 'Context A').length, 1);
+  assert.equal(chat.hasEarlier, false);
+});
+
 beforeEach(() => {
   api.clearOpenAIState();
   api.resetStreamTransport();
@@ -205,7 +233,7 @@ test('Settings: the Chats group in both settings paths; Saved chats counts the c
   const ignore = () => {};
   Object.assign(tab, { containerEl: { empty: ignore }, renderProvider: ignore, renderApiKeySection: ignore, renderModelSection: ignore,
     renderWebSearch: ignore, renderEnterSends: ignore, renderFollowEdits: ignore, renderInstructions: ignore, renderSkills: ignore, renderMaxIterations: ignore,
-    renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
+    renderVoice: ignore, renderMcpServers: ignore, renderDebugLog: ignore, loadCatalog: async () => {},
     renderCompactionPoint: setting => drawn.push(['point', setting]), renderSavedChats: setting => drawn.push(['saved', setting]) });
   tab.display();
   assert.deepEqual(drawn.map(([what]) => what), ['point', 'saved']);

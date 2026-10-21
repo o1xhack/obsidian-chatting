@@ -3,7 +3,7 @@ import { mount, unmount } from "svelte";
 import type { Component } from "svelte";
 import type ChatPlugin from "../main";
 import ChatContainer from "./ChatContainer.svelte";
-import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry, ChatErrorKind } from "../types";
+import type { AgentCallbacks, ToolResult, SelectionScope, ImageAttachment, FileAttachment, ConversationSummary, ViewTarget, ChatHistoryEntry, ChatErrorKind, VoiceTurn, SteeredMessage } from "../types";
 import type { ConversationRecord } from "../chat-state";
 import type { AgentLoop } from "../agent/loop";
 import { showInView } from "./show-in-view";
@@ -18,8 +18,20 @@ import { findSkills, invokedSkillsContext, type Skill } from "../agent/skills";
 import { addRequest } from "../agent/usage";
 import { compactThreshold } from "../agent/compaction";
 import { catalogModel } from "../api/model-catalog";
+import { voiceTranscriptText } from "../agent/system-prompt";
+import { debugLog } from "../debug";
+import { appLifecycle } from "../platform/lifecycle";
+import { VoiceController, VOICE_TIMING, requestContext, type VoiceTurnHooks, type VoiceViewState, type VoiceResumeState } from "../voice/controller";
 
 export const VIEW_TYPE_CHAT = "ochatting-view";
+
+/** Saved/typed fallback stays compatible with pendingMessages' string format. */
+function steeredText(item: SteeredMessage): string {
+  return item.context?.length ? `${voiceTranscriptText(item.context)}\n\n${item.text}` : item.text;
+}
+
+/** Voice bar controls and the voice button. */
+export type VoiceAction = "start" | "end" | "mute" | "talk-start" | "talk-end" | "play";
 
 const SAVED_INPUT_TEXT = 300;
 const SAVED_INPUT_ITEMS = 10;
@@ -76,6 +88,7 @@ interface ChatContainerProps {
   onContinue: () => void;
   onCompact: () => void;
   onLoadEarlier: () => void;
+  onVoice: (action: VoiceAction) => void;
 }
 
 interface ChatContainerApi extends Record<string, unknown> {
@@ -85,7 +98,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   /** Replace an assistant message's text; `final` renders it at once and ends its streaming. */
   updateAssistantMessage(id: number, text: string, final?: boolean): void;
   removeMessage(id: number): void;
-  cutMessages(turnId: string): void;
+  cutMessages(turnId: string, leadingContextRows?: number): void;
   addToolCall(name: string, input: Record<string, unknown>): number;
   updateToolResult(msgId: number, name: string, result: ToolResult): void;
   addError(text: string, errorKind?: ChatErrorKind): void;
@@ -109,6 +122,7 @@ interface ChatContainerApi extends Record<string, unknown> {
   setTitle(title: string): void;
   setSelection(selection: SelectionScope): void;
   getSelection(): SelectionScope | null;
+  clearSelection?(): void;
   setEnterSends(on: boolean): void;
   /** Offer Continue for a turn that was cut off when Obsidian was ended. */
   setContinue(show: boolean): void;
@@ -129,12 +143,24 @@ interface ChatContainerApi extends Record<string, unknown> {
   setHasEarlier?(value: boolean): void;
   /** Rows added by `fill` go above the shown ones; the view keeps its place. */
   prependMessages?(fill: () => void): void;
+  /** Show the voice bar (null hides it). */
+  setVoice(state: VoiceViewState | null): void;
+  /** Show the voice button (signed in to ChatGPT). */
+  setVoiceAvailable(available: boolean): void;
 }
 
 export type ChangesState = "undoable" | "undone" | "kept";
 
 /** A chat shows its last 20 turns, and 20 more each time it is scrolled near the top. */
 export const PAGE_TURNS = 20;
+
+/** A voice request's preceding speech stays with its main user entry. */
+function visibleTurnStart(history: ChatHistoryEntry[], index: number): number {
+  const turnId = history[index]?.turnId;
+  if (!turnId) return index;
+  while (index > 0 && history[index - 1].type === "user" && !history[index - 1].turnId && history[index - 1].voiceContextFor === turnId) index--;
+  return index;
+}
 
 /**
  * Where the `turns` turns before entry `end` start: the index of the
@@ -145,7 +171,7 @@ export function pageStart(history: ChatHistoryEntry[], end: number, turns = PAGE
   let count = 0;
   for (let index = end - 1; index > 0; index--) {
     if (history[index].type === "user" && history[index].turnId && ++count === turns) {
-      return history.slice(0, index).some((entry) => entry.type === "user" && entry.turnId) ? index : 0;
+      return history.slice(0, index).some((entry) => entry.type === "user" && entry.turnId) ? visibleTurnStart(history, index) : 0;
     }
   }
   return 0;
@@ -203,7 +229,7 @@ interface RunningTurn {
   /** Typed while it runs, until the agent takes them in or they run next (shown as queued). */
   queued: string[];
   /** Typed when no loop step could take them (the turn was ending): they run next. */
-  unsteered: string[];
+  unsteered: SteeredMessage[];
   /** Lets the screen sleep again (the turn holds it on). */
   releaseScreen: () => void;
   /** Past its preflight (linked files read, the request allowed): its user row is in the history. */
@@ -213,6 +239,7 @@ interface RunningTurn {
   /** Puts the unsent message back in the input, until the turn has started. */
   /** Puts the unsent message back in the input, with `queued` texts typed meanwhile, until the turn has started (an edit: until answered). */
   restoreDraft?: (queued: string[]) => void;
+  onStopped?: () => void;
 }
 
 /**
@@ -231,6 +258,13 @@ export class ObsidianChatView extends ItemView {
    * or replace it, and a stopped turn that ends late changes nothing.
    */
   private turns = new Map<string, RunningTurn>();
+  /** The live voice conversation, while one runs. */
+  private voice: VoiceController | null = null;
+  private reconnectingVoice?: VoiceController;
+  /** Stops following the background for voice; set once voice was first started. */
+  private unwatchBackground?: () => void;
+  /** Lets the screen sleep again: the call holds it on until it ends, however it ends. */
+  private releaseVoiceScreen?: () => void;
   private compactions = new Map<string, { agent: AgentLoop }>();
   /** Resolves once onOpen() has mounted the chat UI, or failed to. */
   readonly ready: Promise<void>;
@@ -350,12 +384,14 @@ export class ObsidianChatView extends ItemView {
         onContinue: () => void this.continueTurn(),
         onCompact: () => void this.compactNow(),
         onLoadEarlier: () => this.loadEarlier(),
+        onVoice: (action: VoiceAction) => this.handleVoice(action),
       },
     });
 
     this.renderHistory();
     this.updateEnterSends();
     this.updateFollowEdits();
+    this.updateVoiceAvailable();
     this.chatContainer.focus();
   }
 
@@ -530,6 +566,8 @@ export class ObsidianChatView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.endVoice();
+    this.unwatchBackground?.();
     this.handleStop();
     for (const { agent } of this.compactions.values()) agent.abort();
     this.compactions.clear();
@@ -590,13 +628,151 @@ export class ObsidianChatView extends ItemView {
     this.handleClear();
   }
 
+  // ─── Voice ──────────────────────────────────────────────────────────
+  // A voice conversation belongs to the shown conversation: switching,
+  // a new chat, clearing or closing the view ends it.
+
+  /** Show or hide the voice button (signed in to ChatGPT or not). */
+  updateVoiceAvailable(): void {
+    const available = this.plugin.voiceRoute() !== null;
+    if (!available) this.endVoice();
+    this.chatContainer?.setVoiceAvailable(available);
+  }
+
+  /** Start a voice conversation in the current conversation. */
+  startVoice(options: { reconnecting?: boolean; micOn?: boolean; finishedTask?: string; resume?: VoiceResumeState } = {}): void {
+    if (this.voice) return;
+    const route = this.plugin.voiceRoute();
+    if (!route) {
+      new Notice("Connect your ChatGPT account in Chatting with AI settings to use voice.");
+      return;
+    }
+    // The screen stays on during the call (released when it ends).
+    const releaseScreen = screenAwake.hold();
+    this.releaseVoiceScreen = releaseScreen;
+    const controller: VoiceController = new VoiceController({
+      runTurn: (text, hooks, context) => this.handleUserMessage(text, this.chatContainer?.getSelection() ?? null, [], [], undefined, undefined, hooks, context),
+      // A spoken request while the voice turn runs is added to it.
+      steerTurn: (text, context) => this.running && this.steerByVoice(text, context),
+      takeSteered: () => this.takeStashed(),
+      discardPendingVoice: () => this.discardPendingVoice(),
+      stopTurn: () => this.handleStop(),
+      turnRunning: () => !!this.turn,
+      history: () => {
+        const history = [...this.plugin.chatHistory];
+        if (options.finishedTask) history.push({ type: "assistant", text: `The previous backend task ended: ${options.finishedTask}` });
+        for (const turn of options.resume?.turns ?? []) history.push({ type: turn.role, text: turn.text });
+        return history;
+      },
+      openFile: () => this.plugin.app.workspace.getActiveFile(),
+      watchOpenFile: (changed) => {
+        const workspace = this.plugin.app.workspace;
+        const event = workspace.on("file-open", changed);
+        return () => workspace.offref(event);
+      },
+      showError: (message) => {
+        this.chatContainer?.addError(message);
+        this.plugin.chatHistory.push({ type: "error", text: message });
+        void this.plugin.saveChatHistory();
+      },
+      render: (state) => {
+        if (this.voice !== controller) return;
+        if (!state) {
+          this.voice = null;
+          releaseScreen();
+        }
+        this.chatContainer?.setVoice(state);
+      },
+      log: (label, data) => debugLog(this.app, label, data),
+    }, route, this.plugin.settings.voiceMicMode === "hold", options);
+    this.voice = controller;
+    this.unwatchBackground ??= this.watchVoiceBackground();
+    void controller.start();
+  }
+
+  /**
+   * Mobile: in the background the microphone records only silence and
+   * the call may drop. Leaving turns the microphone off and ends the call
+   * after `endAfter` while nobody is listening.
+   * Back sooner, a working call gets its microphone back; one that
+   * dropped, or after more than `reconnectAfter`, is replaced. Desktop: a
+   * minimised window keeps the call. Returns the unsubscribe.
+   */
+  private watchVoiceBackground(): () => void {
+    let endTimer = 0;
+    const offHidden = appLifecycle.onHidden(() => {
+      if (!Platform.isMobileApp || !this.voice) return;
+      this.voice.enterBackground();
+      endTimer = window.setTimeout(() => this.endVoice(), VOICE_TIMING.endAfter);
+    });
+    const offVisible = appLifecycle.onVisible((hiddenMs) => {
+      window.clearTimeout(endTimer);
+      const voice = this.voice;
+      if (!Platform.isMobileApp || !voice) return;
+      if (hiddenMs >= VOICE_TIMING.endAfter) this.endVoice();
+      else if (!voice.leaveBackground(hiddenMs)) this.reconnectVoice();
+    });
+    return () => {
+      offHidden();
+      offVisible();
+      window.clearTimeout(endTimer);
+    };
+  }
+
+  /**
+   * Replace the voice conversation: the old call ends quietly, a new one
+   * starts ("Reconnecting…"), seeded with the chat as it is now, so an
+   * answer finished meanwhile is included. Running work retains its original
+   * hooks until it finishes; the new call gets its result without replay.
+   * If it fails, the error shows.
+   */
+  private reconnectVoice(): void {
+    const old = this.voice;
+    if (!old || this.reconnectingVoice === old) return;
+    this.reconnectingVoice = old;
+    void old.prepareReconnect().then(async ({ result: finishedTask, resume }) => {
+      while (Platform.isMobileApp && appLifecycle.isHidden()) await appLifecycle.whenVisible();
+      if (this.voice !== old) return;
+      this.voice = null;
+      this.releaseVoiceScreen?.();
+      void old.end();
+      this.startVoice({ reconnecting: true, micOn: old.isMicOn(), finishedTask, resume });
+    }).finally(() => {
+      if (this.reconnectingVoice === old) this.reconnectingVoice = undefined;
+    });
+  }
+
+  /** End the voice conversation, if one runs. */
+  endVoice(): void {
+    const voice = this.voice;
+    if (!voice) return;
+    this.voiceLeftovers.delete(this.plugin.activeConversation);
+    this.voice = null;
+    this.releaseVoiceScreen?.();
+    this.releaseVoiceScreen = undefined;
+    this.chatContainer?.setVoice(null);
+    void voice.end();
+  }
+
+  /** The voice button and the voice bar's controls. */
+  handleVoice(action: VoiceAction): void {
+    if (action === "start") this.startVoice();
+    else if (action === "end") this.endVoice();
+    else if (action === "mute") this.voice?.toggleMute();
+    else if (action === "talk-start") this.voice?.setTalking(true);
+    else if (action === "talk-end") this.voice?.setTalking(false);
+    else this.voice?.resumeAudio();
+  }
+
   // ─── Conversations ──────────────────────────────────────────────────
   // A running turn keeps running when the user switches: it goes on in its
-  // conversation, which shows it again on the return.
+  // conversation, which shows it again on the return. The voice
+  // conversation belongs to the shown chat and ends.
 
   /** Start a new conversation (an empty current one is kept instead). */
   newChat(): void {
     if (this.undoing) return;
+    this.endVoice();
     const restore = this.cancelPreflight();
     if (!this.running) this.dismissContinue();
     this.plugin.startNewConversation();
@@ -609,6 +785,7 @@ export class ObsidianChatView extends ItemView {
   async openConversation(id: string): Promise<void> {
     if (this.undoing) return;
     if (id === this.plugin.activeConversationId) return;
+    this.endVoice();
     const restore = this.cancelPreflight();
     if (!this.running) this.dismissContinue();
     if (await this.plugin.openConversation(id)) this.showConversation();
@@ -628,6 +805,7 @@ export class ObsidianChatView extends ItemView {
   async deleteConversation(id: string): Promise<void> {
     if (this.undoing) return;
     const active = id === this.plugin.activeConversationId;
+    if (active) this.endVoice();
     // Its turn stops, shown or not.
     this.compactions.get(id)?.agent.abort();
     this.compactions.delete(id);
@@ -659,8 +837,9 @@ export class ObsidianChatView extends ItemView {
     // Typed after its turn's last step while it ran in the background: they run now.
     const conversation = this.plugin.activeConversation;
     const later = conversation.pendingMessages;
-    if (later?.length && !turn) {
+    if (later?.length && !turn && !this.voice) {
       delete conversation.pendingMessages;
+      this.voiceLeftovers.delete(conversation);
       void this.handleUserMessage(later.join("\n\n"), null);
     }
   }
@@ -682,6 +861,7 @@ export class ObsidianChatView extends ItemView {
     // A turn the API history no longer holds can't be edited: cutting there
     // would leave the model without the chat.
     if (index < 0 || !agent.canEditTurn(turnId)) return;
+    const from = visibleTurnStart(history, index);
     const { selection = null } = history[index];
     // Images and files the saved API history no longer holds can't be sent again.
     const images = (history[index].images ?? []).filter((image) => image.data);
@@ -698,7 +878,7 @@ export class ObsidianChatView extends ItemView {
     agent.cutBeforeTurn(turnId);
     // The history is shorter now: the next answer counts its context anew.
     if (conversation.usage) conversation.usage = { ...conversation.usage, contextTokens: 0 };
-    conversation.chatHistory = history.slice(0, index);
+    conversation.chatHistory = history.slice(0, from);
     if (history[index].turnId === conversation.titleSourceTurnId) delete conversation.titleSourceTurnId;
     const replacementHistory = conversation.chatHistory;
     // In its own conversation, also when another one is shown by then.
@@ -712,15 +892,15 @@ export class ObsidianChatView extends ItemView {
       conversation.usage = originalUsage;
       if (originalNotes.length) conversation.notes = [...new Set([...originalNotes, ...conversation.notes ?? []])];
       // Preserve the rejection explanation alongside the original conversation.
-      history.push(...replacementHistory.slice(index).filter(row => row.type === "error"));
+      history.push(...replacementHistory.slice(from).filter(row => row.type === "error"));
       if (this.plugin.activeConversationId === conversation.id) {
         this.renderHistory();
         this.chatContainer?.setTitle(conversation.title);
       }
       void this.plugin.saveChatHistory();
     };
-    this.chatContainer?.cutMessages(turnId);
-    await this.handleUserMessage(text, selection, images, files, history[index].linkSource ?? "", rollback);
+    this.chatContainer?.cutMessages(turnId, index - from);
+    await this.handleUserMessage(text, selection, images, files, history[index].linkSource ?? "", rollback, undefined, history[index].voiceContext);
   }
 
   /** Regenerate the last answer: run the last user turn again, unchanged. */
@@ -737,18 +917,32 @@ export class ObsidianChatView extends ItemView {
     );
   }
 
+  /**
+   * Run one turn; `voice`: it comes from the voice conversation, which gets
+   * its progress and answer. `voiceContext`: what was said there since the
+   * last request; the agent gets it all, the chat shows the user's words
+   * before the request.
+   */
   private async handleUserMessage(
     text: string,
     selection: SelectionScope | null,
     images: ImageAttachment[] = [],
     files: FileAttachment[] = [],
     linkSource = this.plugin.app.workspace.getActiveFile()?.path ?? "",
-    rollback?: () => void
+    rollback?: () => void,
+    voice?: VoiceTurnHooks,
+    voiceContext?: VoiceTurn[]
   ): Promise<void> {
+    const transcript = voiceContext?.map(turn => ({ ...turn })) ?? (voice ? [] : undefined);
     // An undo is running: the message waits in the input.
     if (this.undoing || this.compactions.has(this.plugin.activeConversationId)) {
-      this.chatContainer?.restoreDraft?.(text, selection, images, files);
-      new Notice("Please wait for the current response to complete.");
+      const error = "Please wait for the current response to complete.";
+      if (voice) {
+        voice.onError(error);
+        this.chatContainer?.addError(error);
+        this.plugin.chatHistory.push({ type: "error", text: error });
+      } else this.chatContainer?.restoreDraft?.(text, selection, images, files);
+      new Notice(error);
       return;
     }
     // While a turn runs, a typed message is added to it (steering).
@@ -761,6 +955,7 @@ export class ObsidianChatView extends ItemView {
     if (!chat) {
       // No UI (mounting it failed): nothing to show the turn in.
       new Notice("The chat panel couldn't be shown, so the message wasn't sent.");
+      voice?.onError("The chat panel couldn't be shown, so the message wasn't sent.");
       return;
     }
     const conversation = this.plugin.activeConversation;
@@ -784,6 +979,7 @@ export class ObsidianChatView extends ItemView {
         : linked;
       const budgetError = attachmentBudgetError([...images, ...mentioned?.images ?? []], [...files, ...mentioned?.files ?? []]);
       if (budgetError) {
+        voice?.onError(budgetError);
         chat.addError(budgetError);
         conversation.chatHistory.push({ type: "error", text: budgetError });
         return;
@@ -791,13 +987,22 @@ export class ObsidianChatView extends ItemView {
       // Only consume the submitted draft after its linked context is valid.
       // A rejected draft must not become an uneditable visible-only turn.
       // (A switch during the preflight stopped the turn, so it is shown here.)
+      // A user turn at the end is the request itself, as the voice put it.
+      // Of what was said before, the chat shows only what belongs to the request.
+      const shownContext = requestContext(transcript ?? []);
+      const said = shownContext.at(-1)?.role === "user" ? shownContext.slice(0, -1) : shownContext;
+      for (const spoken of said) {
+        if (spoken.role !== "user") continue;
+        chat.addUserMessage(spoken.text);
+        conversation.chatHistory.push({ type: "user", text: spoken.text, voiceContextFor: turnId });
+      }
       chat.addUserMessage(text, images, turnId, savedSelection, files);
-      conversation.chatHistory.push({ type: "user", text, images, turnId, linkSource, ...(savedSelection ? { selection: savedSelection } : {}), ...(files.length ? { attachedFiles: files } : {}) });
+      conversation.chatHistory.push({ type: "user", text, images, turnId, linkSource, ...(transcript ? { voiceContext: transcript } : {}), ...(savedSelection ? { selection: savedSelection } : {}), ...(files.length ? { attachedFiles: files } : {}) });
       this.plugin.touchConversation();
       chat.setTitle(conversation.title);
       begin();
-      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens);
-    }, { text, selection, images, files, notes, rollback });
+      await agent.run(text, callbacks, selection, images, turnId, mentioned, notes, files, conversation.usage?.contextTokens, transcript ?? null);
+    }, { text, selection, images, files, notes, rollback }, voice);
   }
 
   /**
@@ -827,6 +1032,7 @@ export class ObsidianChatView extends ItemView {
     turnId: string,
     start: (agent: AgentLoop, callbacks: AgentCallbacks, turn: { isCurrent: () => boolean; begin: () => void }) => Promise<void>,
     draft?: { text: string; selection: SelectionScope | null; images: ImageAttachment[]; files: FileAttachment[]; notes: string[]; rollback?: () => void },
+    voice?: VoiceTurnHooks,
   ): Promise<void> {
     const chat = this.chatContainer;
     if (!chat) return;
@@ -840,6 +1046,7 @@ export class ObsidianChatView extends ItemView {
       // The screen stays on while the answer is generated.
       releaseScreen: screenAwake.hold(),
       started: !draft, rollback: draft?.rollback,
+      onStopped: voice ? () => voice.onStopped?.() : undefined,
     };
     this.turns.set(conversation.id, turn);
     chat.updateConversations();
@@ -848,6 +1055,7 @@ export class ObsidianChatView extends ItemView {
     const isCurrent = () => this.turns.get(conversation.id) === turn;
     const ui = () => this.shownChat(turn);
     const history = turn.history;
+    const visibleStart = history.length;
     // Saved with the chat when the app goes to the background; still there
     // at the next start, the turn was cut off. A new message only once it
     // is sent (`begin`).
@@ -865,12 +1073,17 @@ export class ObsidianChatView extends ItemView {
     if (draft) {
       turn.restoreDraft = (queued) => {
         restoreNotes();
-        chat.restoreDraft?.([draft.text, ...queued].join("\n\n"), draft.selection, draft.images, draft.files);
+        if (!voice) chat.restoreDraft?.([draft.text, ...queued].join("\n\n"), draft.selection, draft.images, draft.files);
       };
     }
+    let consumedVoiceScope: SelectionScope | null = null;
     const begin = () => {
       turn.started = true;
       conversation.pendingTurn = { turnId, startedAt: Date.now() };
+      if (voice && draft?.selection && chat.getSelection() === draft.selection) {
+        consumedVoiceScope = draft.selection;
+        chat.clearSelection?.();
+      }
       // An edit keeps its draft until answered: stopped before, it goes back to the input.
       if (!turn.rollback) turn.restoreDraft = undefined;
     };
@@ -890,14 +1103,24 @@ export class ObsidianChatView extends ItemView {
         },
         onPreflightRejected: (error) => {
           turn.started = false;
-          const pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);
+          let pending = history.findIndex(row => row.type === "user" && row.turnId === turnId);
+          // What was said before a voice request (rows without a turn ID right before it) goes with it.
+          const spoken = pending;
+          if (pending !== -1) pending = Math.max(visibleStart, visibleTurnStart(history, pending));
           if (pending !== -1) history.splice(pending);
           const shown = ui();
           if (shown) {
-            shown.cutMessages(turnId);
+            if (pending !== spoken) this.renderHistory(true);
+            else shown.cutMessages(turnId);
             this.plugin.touchConversation();
             shown.setTitle(conversation.title);
+            // Agent-level preflight can still reject after begin(). A
+            // refused voice turn must keep its scope for the next attempt,
+            // without replacing a newer selection made in the meantime.
+            if (consumedVoiceScope && !shown.getSelection()) shown.setSelection(consumedVoiceScope);
           }
+          consumedVoiceScope = null;
+          voice?.onError(error);
           this.setThinking(turn, null);
           shown?.addError(error);
           history.push({ type: "error", text: error });
@@ -949,6 +1172,7 @@ export class ObsidianChatView extends ItemView {
           if (name === "ask_user") return;
           // A tool step on screen shows that the turn did something.
           turn.answerShown = true;
+          voice?.onToolCall(name);
           turn.tools.set(name, { id: ui()?.addToolCall(name, input) ?? -1, input });
         },
         onToolResult: (name, { focus, ...result }: ToolResult) => {
@@ -971,6 +1195,7 @@ export class ObsidianChatView extends ItemView {
           else shown?.addAssistantMessage(text);
           turn.streaming = null;
           history.push({ type: "assistant", text });
+          voice?.onText(text);
         },
         onAskUser: async (question) => {
           answering();
@@ -997,8 +1222,9 @@ export class ObsidianChatView extends ItemView {
           this.endStream(turn, true);
           ui()?.addError(error);
           history.push({ type: "error", text: error });
+          voice?.onError(error);
         },
-        // Added to the running turn: shown where the agent took it in.
+        // Added to the running turn (typed or spoken): shown where the agent took it in.
         onSteered: (text) => {
           this.endStream(turn, false);
           ui()?.addUserMessage(text);
@@ -1011,6 +1237,7 @@ export class ObsidianChatView extends ItemView {
       if (!isCurrent()) return;
       if (turn.rollback) turn.started = false;
       const msg = e instanceof Error ? e.message : String(e);
+      voice?.onError(msg);
       ui()?.addError(`Unexpected error: ${msg}`);
       history.push({ type: "error", text: `Unexpected error: ${msg}` });
     } finally {
@@ -1023,8 +1250,8 @@ export class ObsidianChatView extends ItemView {
         back?.();
         // Rollback renders history, which clears attachment chips. Restore after it.
         // Typed meanwhile, added to a message that was never sent: back in the input with it.
-        const unsent = [draft.text, ...this.takeLeftovers(turn)].join("\n\n");
-        if (ui()) chat.restoreDraft?.(unsent, draft.selection, draft.images, draft.files);
+        const unsent = [draft.text, ...this.takeLeftovers(turn).map(steeredText)].join("\n\n");
+        if (ui() && !voice) chat.restoreDraft?.(unsent, draft.selection, draft.images, draft.files);
         else conversation.chatHistory.push({ type: "error", text: `This message wasn't sent: "${unsent}"` });
       }
       turn.releaseScreen();
@@ -1037,7 +1264,8 @@ export class ObsidianChatView extends ItemView {
       if (isCurrent()) {
         const shown = ui();
         // Typed after the turn's last step: they run as the next turn, here
-        // or when its conversation is shown again.
+        // or when its conversation is shown again. (A voice turn's
+        // controller takes its leftovers itself, unless the call has ended.)
         const later = this.takeLeftovers(turn);
         this.turns.delete(conversation.id);
         this.chatContainer?.updateConversations();
@@ -1058,10 +1286,15 @@ export class ObsidianChatView extends ItemView {
           new Notice(`Answer ready in "${conversation.title}".`);
         }
         // Not shown: saved with the chat, they run when it's shown again.
-        if (later.length && !shown) conversation.pendingMessages = [...conversation.pendingMessages ?? [], ...later];
+        // A voice conversation takes them itself; not shown, they wait in its chat.
+        if (later.length && (!shown || voice?.active())) {
+          const earlier = this.voiceLeftovers.get(conversation) ?? (conversation.pendingMessages ?? []).map(text => ({ text }));
+          conversation.pendingMessages = [...conversation.pendingMessages ?? [], ...later.map(steeredText)];
+          if (shown && voice?.active()) this.voiceLeftovers.set(conversation, [...earlier, ...later]);
+        }
         // Persist after each turn
         void this.plugin.saveChatHistory();
-        if (later.length && shown) void this.handleUserMessage(later.join("\n\n"), null);
+        if (later.length && shown && !voice?.active()) void this.handleUserMessage(later.map(steeredText).join("\n\n"), null);
       }
     }
   }
@@ -1203,13 +1436,57 @@ export class ObsidianChatView extends ItemView {
     const turn = this.turn;
     if (!turn) return;
     this.showQueued(turn, [...turn.queued, text]);
-    if (!turn.agent.steer(text)) turn.unsteered.push(text);
+    if (!turn.agent.steer(text)) turn.unsteered.push({ text });
+  }
+
+  /** A spoken request while the voice's turn runs: added to it with what was said before it. */
+  private steerByVoice(text: string, context: VoiceTurn[] = []): boolean {
+    const turn = this.turn;
+    if (!turn) return false;
+    this.showQueued(turn, [...turn.queued, text]);
+    // Before the loop has started (its message still being checked, a
+    // summary written): it waits and runs next, as typed text does.
+    if (!turn.agent.steer(text, context)) turn.unsteered.push({ text, context: context.map(item => ({ ...item })) });
+    return true;
+  }
+
+  /** What the shown conversation's last turn left over (for the voice conversation). */
+  private voiceLeftovers = new WeakMap<ConversationRecord, SteeredMessage[]>();
+
+  private takeStashed(): SteeredMessage[] {
+    const conversation = this.plugin.activeConversation;
+    const later = this.voiceLeftovers.get(conversation) ?? (conversation.pendingMessages ?? []).map(text => ({ text }));
+    this.voiceLeftovers.delete(conversation);
+    delete conversation.pendingMessages;
+    return later;
+  }
+
+  private discardPendingVoice(): void {
+    const conversation = this.plugin.activeConversation;
+    const turn = this.turn;
+    if (turn) {
+      const dropped = [...turn.agent.discardVoiceSteering(), ...turn.unsteered.filter(item => item.context !== undefined)];
+      turn.unsteered = turn.unsteered.filter(item => item.context === undefined);
+      const queued = [...turn.queued];
+      for (const item of dropped) {
+        const index = queued.indexOf(item.text);
+        if (index >= 0) queued.splice(index, 1);
+      }
+      this.showQueued(turn, queued);
+    }
+    const stashed = this.voiceLeftovers.get(conversation);
+    if (stashed) {
+      const kept = stashed.filter(item => item.context === undefined);
+      this.voiceLeftovers.delete(conversation);
+      if (kept.length) conversation.pendingMessages = kept.map(steeredText);
+      else delete conversation.pendingMessages;
+    }
   }
 
   /** Added messages the turn didn't take in; they leave the queue (they run next). */
-  private takeLeftovers(turn: RunningTurn): string[] {
+  private takeLeftovers(turn: RunningTurn): SteeredMessage[] {
     const later = [...turn.unsteered.splice(0), ...turn.agent.takeSteered()];
-    if (later.length) this.showQueued(turn, turn.queued.filter((text) => !later.includes(text)));
+    if (later.length) this.showQueued(turn, turn.queued.filter((text) => !later.some(item => item.text === text)));
     return later;
   }
 
@@ -1237,6 +1514,7 @@ export class ObsidianChatView extends ItemView {
    * the returned function instead (after the next conversation rendered).
    */
   private stopTurn(turn: RunningTurn, deferRestore = false): (() => void) | undefined {
+    turn.onStopped?.();
     const restoreDraft = turn.restoreDraft;
     const rollback = turn.rollback;
     turn.restoreDraft = undefined;
@@ -1290,6 +1568,7 @@ export class ObsidianChatView extends ItemView {
 
   private handleClear(): void {
     if (this.undoing) return;
+    this.endVoice();
     const id = this.plugin.activeConversationId;
     this.compactions.get(id)?.agent.abort();
     this.compactions.delete(id);

@@ -118,6 +118,11 @@ export function normalizeCatalogState(value: unknown): CatalogState {
 export function getCatalogModels(provider: Provider): ModelOption[] | undefined { return activeModels.get(provider); }
 export function clearCatalogModels(provider: Provider): void { activeModels.delete(provider); }
 export function getCodexClientVersion(): string { return clientVersion; }
+/** Read the cached/fallback version immediately; refresh metadata without delaying voice. */
+export function codexClientVersion(state: CatalogState | undefined): string {
+  if (state) void updateClientVersion(state, false).catch(() => undefined);
+  return clientVersion;
+}
 export function migrateOAuthModel(slug: string): string {
   return slug ? slug.replace(/^gpt-(\d+)-(\d{1,2})(?=-|$)/, "gpt-$1.$2") : DEFAULT_PROVIDER_MODELS["chatgpt-oauth"];
 }

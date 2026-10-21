@@ -26,6 +26,21 @@ Assistant
 
 The agent reads before it edits, prefers small surgical changes over rewrites, and doesn't re-ask once you confirm.
 
+## 🎤 Voice
+
+Talk with the assistant in the current chat and hear the answer. Voice needs the **ChatGPT account** sign-in (the same as the ChatGPT provider; connect it there or under **Settings → Chatting with AI → Voice**), whichever provider you chat with. It uses Codex's voice service with that account; access and limits depend on the account. The chat model uses your selected provider as usual. Like the ChatGPT provider's Codex route, OpenAI doesn't document it for other apps, so it may change or stop working.
+
+- **Start:** the voice button (a circle with sound-wave bars) sits where Send is. It shows while the input is empty, nothing is attached, no answer is running and the AI isn't waiting for your answer to a question.
+- **During a call** the voice bar replaces the input row: the microphone button (tap to mute) or, with *Hold to talk*, the button you hold while speaking; a line showing your current words, or else whether the assistant is listening, working or speaking; and a red **✕** to end.
+- **In the chat:** your requests and the answers appear as chat messages, tool steps included, and the voice reads the answer out in short. Small talk the voice handles itself is only heard.
+- **Say more while it works:** what you add is passed to the running task instead of starting over. If the AI asks you a question, answer it by voice.
+- **Editing or regenerating a voice request:** retains the preceding voice dialogue, also after restarting Obsidian, so references such as “do that” keep their context.
+- **If voice stops and asks you to restart:** it could not safely tell whether your words were a new request. The accepted task continues in chat; unsent voice additions are discarded. Check its result, then start voice again before making another request.
+- **Ending:** the **✕**, switching or starting a chat, Clear, or closing the chat panel. On a phone the microphone goes off while Obsidian is in the background; the call reconnects when you come back and ends after a minute away. If delegated work is still running, reconnection waits for its result, then includes that result in the new call without rerunning the task. A pending clarification is kept, so your reply after returning can continue that request. The voice bar shows a task-ended notice or the pending question after reconnecting. Automatic spoken recovery can stay quiet; the result is in chat, and you can ask the voice to read it.
+- **Settings:** **ChatGPT account for voice** (connected or not), **Voice** (how it sounds) and **Microphone** (*Hands-free* or *Hold to talk*).
+
+The contributor reports desktop and Android testing, including a Bluetooth headset. Maintainer verification for this candidate is recorded in [the voice review](phase7-review.md); physical iOS support has not been verified. The phone asks for microphone access the first time. **Check device capabilities (voice, streaming)** in the command palette shows what the device supports (microphone, live audio, streaming) in a window you can copy; with your keys it sends short test requests (which cost a little), and with the ChatGPT account it starts a voice call for a moment.
+
 ## 🎯 Selection scope
 
 Highlight text in any note, right-click, choose **Send selection to chat**. The selection becomes a pill above the input, and the tools restrict direct edits of that note to the selected range.
@@ -156,9 +171,10 @@ Below **Model**, **Thinking level** offers *Default* plus the levels the model l
 - **MCP servers** — remote MCP servers for Anthropic and OpenAI: a name, a public https address, an optional token and on/off each (see [MCP servers](#-mcp-servers)).
 - **Compaction point** — when a long chat is summarized: a share of the selected model's context (80 % by default, 50k tokens at least), set with a slider or as a number of tokens; for a model whose context size is unknown, a number of tokens (empty: only when a request is too long). Earlier saves cost and time per answer; the model then keeps fewer details.
 - **Saved chats** — how many chats are saved and their size. A chat over 5 MB shows its size in the chats list, so you can delete it if you no longer need it.
-- **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
+- **Voice** — the ChatGPT account voice uses, the voice and the microphone mode (see [Voice](#-voice)).
+- **Debug log** — off by default. For troubleshooting it writes what is needed to follow a problem to `debug.log` in the plugin folder: your messages as sent (with their context), the model's answers and tool calls, tool results and errors, and in voice every event and what was said on both sides (never keys). **Copy** (or the *Copy debug log* command) puts it on the clipboard; **Clear** deletes it.
 
-While an answer is being generated, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.
+While an answer is being generated or a voice call runs, the screen doesn't go to sleep (where the device allows it). Stopping before any of the answer is shown leaves a quiet *Stopped.* note in the chat.
 
 ## 🚀 Quick start
 
