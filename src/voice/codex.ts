@@ -30,6 +30,8 @@ export const VOICES = ["juniper", "maple", "spruce", "ember", "vale", "breeze", 
 export interface CodexVoiceAuth {
   /** The credential, refreshed when it is about to expire; null when signed out. */
   getUsableCredential(): Promise<{ accessToken: string; accountId?: string } | null>;
+  /** Shared one-shot renewal after a server rejection before local expiry. */
+  renewRejected(rejected: { accessToken: string; accountId?: string }): Promise<{ accessToken: string; accountId?: string } | null>;
 }
 
 /** A route that creates calls on Codex's voice service. */
@@ -58,13 +60,13 @@ export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersi
       if (!credential.accountId) throw new Error("The ChatGPT sign-in has no account ID. Disconnect and connect it again.");
       // Not crypto.randomUUID(): mobile WebViews may lack it.
       const sessionId = uuidV4();
-      const response = await requestUrl({
+      const create = (accessToken: string, accountId: string) => requestUrl({
         url: CALL_URL,
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${credential.accessToken}`,
-          "ChatGPT-Account-ID": credential.accountId,
+          Authorization: `Bearer ${accessToken}`,
+          "ChatGPT-Account-ID": accountId,
           "openai-alpha": "quicksilver=v2",
           "x-session-id": sessionId,
           "session-id": sessionId,
@@ -85,6 +87,12 @@ export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersi
         }),
         throw: false,
       });
+      let response = await create(credential.accessToken, credential.accountId);
+      if (response.status === 401) {
+        let renewed;
+        try { renewed = await auth.renewRejected(credential); } catch { /* Keep the rejected-call status. */ }
+        if (renewed?.accountId === credential.accountId) response = await create(renewed.accessToken, renewed.accountId);
+      }
       if (response.status < 200 || response.status >= 300) {
         throw new Error(`Couldn't start voice (HTTP ${response.status}).`);
       }

@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 803,
-    "passed": 803,
+    "tests": 815,
+    "passed": 815,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -179,6 +179,12 @@
       "migration-chat-present-chat-mvhc62ak-accasu",
       "migration-visible-chat-mvhc62ak-accasu",
       "migration-api-chat-mvhc62ak-accasu",
+      "migration-chat-present-chat-mvhceccv-hy98yh",
+      "migration-visible-chat-mvhceccv-hy98yh",
+      "migration-api-chat-mvhceccv-hy98yh",
+      "migration-chat-present-chat-mvhcescr-6ysfnc",
+      "migration-visible-chat-mvhcescr-6ysfnc",
+      "migration-api-chat-mvhcescr-6ysfnc",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -212,7 +218,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d",
+    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -234,6 +240,9 @@
       "completed-user-turn-queued-native",
       "completed-correction-sent-to-native-backend",
       "native-fresh-repetition-runs-again",
+      "native-stale-request-keeps-new-utterance",
+      "native-new-utterance-dispatches-once",
+      "native-stale-guard-survives-next-task",
       "native-open-last-second-correction-runs-next",
       "native-spoken-question-keeps-queued-addition",
       "native-late-addition-context-preserved",
@@ -269,10 +278,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d"
+    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa"
   },
   "liveVoice": {
-    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d",
+    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -287,7 +296,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhceccv-hy98yh",
+    "conversationId": "chat-mvhcy90i-dsfjek",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -300,12 +309,12 @@
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": "It says: \"SAFE. Change TARGET to VERIFIED.\"",
+    "reconnectTranscript": "The note says exactly: “SAFE. Change TARGET to VERIFIED.”",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 344,
-        "bytes": 7542
+        "packets": 335,
+        "bytes": 11581
       }
     ],
     "peerClosed": true,
@@ -384,15 +393,27 @@
     },
     {
       "comment": 4331408194,
-      "fix": "Fresh user speech after completion clears fallback suppression, while stale late delegation events remain deduplicated."
+      "fix": "A fresh matching utterance after completion permits intentional repetition; unrelated speech retains old fallback suppression."
     },
     {
       "comment": 4331408201,
       "fix": "Read the cached/fallback client version immediately and refresh GitHub metadata in the background without blocking call startup."
+    },
+    {
+      "comment": 4331659236,
+      "fix": "Keep bounded fallback guards across unrelated speech and subsequent tasks. Reject stale delegations before consuming new utterances; matching fresh post-result speech can repeat intentionally."
+    },
+    {
+      "comment": 4331659241,
+      "fix": "Share a pending reconnect, wait for mobile visibility again after the old task finishes, and recheck controller ownership before constructing the replacement."
+    },
+    {
+      "comment": 4331659244,
+      "fix": "Renew a premature 401 through the shared ChatGPT sign-in and retry the same call once for the same account; preserve the original rejection if renewal fails or sign-in changes."
     }
   ],
   "liveReconnect": {
-    "mainSha256": "80fbe099010a1dcb7cca445639c9190f00a2dd42ce62ed0ec677da593f71715d",
+    "mainSha256": "e5dd253de63f7de1a3478ee2b043f3a7be60b8903eae909f57d18623e80e54aa",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -407,7 +428,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhcescr-6ysfnc",
+    "conversationId": "chat-mvhcyqg7-iqv61e",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,

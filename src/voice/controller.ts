@@ -311,7 +311,6 @@ export class VoiceController {
         break;
       case "input":
         if (event.text.trim()) this.update({ resumeNotice: undefined });
-        if (!this.voiceTurnRunning && !this.pendingSteer.length && event.text.trim()) this.steeredSpoken = [];
         // Still speaking: words waiting to be added to the task wait for the rest.
         if (this.pendingSteer.length) this.restartSteerTimer();
         if (event.text.trim()) this.clarificationPending = false;
@@ -451,8 +450,14 @@ export class VoiceController {
     this.pendingInput = "";
     this.clarificationPending = false;
     const text = turns.map((turn) => turn.text).join(" ");
+    const variants = [...new Set([...turns.map(turn => turn.text), text])];
+    if (this.steeredSpoken.length + variants.length > 4096) {
+      this.host.showError("Please restart voice to continue this long call.");
+      void this.end();
+      return;
+    }
     this.rememberConsumed(turns.map(turn => turn.text), text);
-    this.steeredSpoken.push(...new Set([...turns.map(turn => turn.text), text]));
+    this.steeredSpoken.push(...variants);
     this.host.log("VOICE_STEER_SPOKEN", { text });
     return { text, ...(context.length ? { context } : {}) };
   }
@@ -560,6 +565,20 @@ export class VoiceController {
       this.sendAll(speakEvents(id, "Wait for the user's answer to the pending clarification before delegating the request."));
       return;
     }
+    // Do not consume an unrelated new utterance as context for a delayed
+    // delegation of work already handled by fallback. A matching fresh
+    // utterance after completion can intentionally request that work again.
+    const candidate = text.trim() || this.pendingInput.trim();
+    const freshMatch = !this.voiceTurnRunning && !!this.pendingInput.trim() && sameWords(this.pendingInput, candidate);
+    if (!freshMatch && this.steeredSpoken.some(said => sameWords(said, candidate) && normalizedWords(candidate).length <= normalizedWords(said).length)) {
+      if (this.voiceTurnRunning) {
+        this.answerTo = id;
+        this.sendAll(progressEvents(id, ADDED_TO_TASK));
+      } else {
+        this.sendAll(speakEvents(id, "That was part of the last task; the result is in the chat."));
+      }
+      return;
+    }
     // As Codex does: the request plus what was said since the last one.
     const { request, context } = this.takeRequest(text);
     if (this.ended) return;
@@ -571,16 +590,6 @@ export class VoiceController {
     // While the voice's turn runs, a new request steers it, as in the chat
     // apps: the agent takes it in after its current step, nothing is
     // stopped, and the answer goes to this newest delegation.
-    // Already passed to the task as the user said it (`queueSteer`): not twice.
-    if (this.steeredSpoken.some((said) => sameWords(said, request) && normalizedWords(request).length <= normalizedWords(said).length)) {
-      if (this.voiceTurnRunning) {
-        this.answerTo = id;
-        this.sendAll(progressEvents(id, ADDED_TO_TASK));
-      } else {
-        this.sendAll(speakEvents(id, "That was part of the last task; the result is in the chat."));
-      }
-      return;
-    }
     if (this.voiceTurnRunning && this.host.steerTurn(request, context)) {
       this.answerTo = id;
       this.sendAll(progressEvents(id, ADDED_TO_TASK));
@@ -588,8 +597,6 @@ export class VoiceController {
     }
     // A typed turn is stopped, as Stop does.
     if (this.host.turnRunning()) this.host.stopTurn();
-    // A new task: what was added to the last one no longer counts as taken.
-    this.steeredSpoken = [];
     await this.startTask(id, request, context);
   }
 

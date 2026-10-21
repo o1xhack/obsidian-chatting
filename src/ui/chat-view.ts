@@ -252,6 +252,7 @@ export class ObsidianChatView extends ItemView {
   private turns = new Map<string, RunningTurn>();
   /** The live voice conversation, while one runs. */
   private voice: VoiceController | null = null;
+  private reconnectingVoice?: VoiceController;
   /** Stops following the background for voice; set once voice was first started. */
   private unwatchBackground?: () => void;
   /** Lets the screen sleep again: the call holds it on until it ends, however it ends. */
@@ -713,13 +714,17 @@ export class ObsidianChatView extends ItemView {
    */
   private reconnectVoice(): void {
     const old = this.voice;
-    if (!old) return;
-    void old.prepareReconnect().then(({ result: finishedTask, resume }) => {
+    if (!old || this.reconnectingVoice === old) return;
+    this.reconnectingVoice = old;
+    void old.prepareReconnect().then(async ({ result: finishedTask, resume }) => {
+      while (Platform.isMobileApp && appLifecycle.isHidden()) await appLifecycle.whenVisible();
       if (this.voice !== old) return;
       this.voice = null;
       this.releaseVoiceScreen?.();
       void old.end();
       this.startVoice({ reconnecting: true, micOn: old.isMicOn(), finishedTask, resume });
+    }).finally(() => {
+      if (this.reconnectingVoice === old) this.reconnectingVoice = undefined;
     });
   }
 

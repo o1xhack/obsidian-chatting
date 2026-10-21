@@ -1861,3 +1861,124 @@ test('A replacement waits for server readiness and announces its result only onc
     assert.equal(chat.voice.resumeNotice, undefined);
   } finally { view.endVoice(); FakePeerConnection.prototype.setRemoteDescription = original; }
 });
+
+for (const afterNew of [false, true]) {
+  test(`A late fallback delegation preserves unrelated fresh speech (${afterNew ? 'after' : 'before'} its delegation)`, async () => {
+    const { view, chat, plugin } = await voiceSetup();
+    let release;
+    const log = serve({ chat: (_body, i) => i === 0
+      ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
+      : response('anthropic', [text(i === 1 ? 'Fallback completed.' : 'Fresh request completed.')]) });
+    await startListening(view, chat);
+    const ch = channel(), old = 'Preserve the original title', fresh = 'Archive the other test note';
+    delegated(ch, 'initial', 'Read the first note'); await until(() => release);
+    said(ch, old); answered(ch, 'Okay.'); await until(() => chat.queued.includes(old));
+    release(); await until(() => !view.voice.voiceTurnRunning);
+    said(ch, fresh);
+    if (afterNew) {
+      delegated(ch, 'fresh', fresh);
+      await until(() => spoken(ch).some(([id, value]) => id === 'fresh' && value === 'Fresh request completed.'));
+    }
+    delegated(ch, 'late-old', old);
+    await sleep(50);
+    assert.equal(log.chat.length, afterNew ? 3 : 2, 'old work cannot run twice');
+    if (!afterNew) {
+      delegated(ch, 'fresh', fresh);
+      await until(() => spoken(ch).some(([id, value]) => id === 'fresh' && value === 'Fresh request completed.'));
+    }
+    assert.equal(log.chat.length, 3);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === fresh).length, 1);
+    assert.equal(plugin.chatHistory.filter(row => row.type === 'user' && row.text === old).length, 1);
+    view.endVoice();
+  });
+}
+
+test('Fallback delegation guards are bounded without forgetting earlier work', async () => {
+  const { view, chat } = await voiceSetup();
+  const log = serve(); await startListening(view, chat);
+  const ctl = view.voice, turn = { role: 'user', text: 'One more addition' };
+  ctl.steeredSpoken = Array(4096).fill('An earlier handled request');
+  ctl.spoken = [turn]; ctl.pendingSteer = [turn];
+  assert.equal(ctl.takePendingSteer(), undefined);
+  await until(() => !chat.voice);
+  assert.equal(log.chat.length, 0);
+  assert.match(errorsShown(chat).at(-1), /restart voice/);
+});
+
+for (const next of ['resume', 'end', 'switch']) {
+  test(`Mobile reconnect waits through a second hidden interval (${next})`, async () => {
+    api.Platform.isMobileApp = true; C.VOICE_TIMING.endAfter = 1000;
+    const { view, chat } = await voiceSetup(); let release;
+    const log = serve({ chat: () => new Promise(resolve => { release = () => resolve(response('anthropic', [text('Finished while hidden again.')])); }) });
+    await startListening(view, chat); pc().connectionState = 'connected';
+    const old = view.voice;
+    delegated(channel(), 'initial', 'Read the note'); await until(() => release);
+    appLifecycle.markHidden(); await sleep(60); appLifecycle.markVisible();
+    assert.equal(chat.voice.status, 'reconnecting');
+    appLifecycle.markHidden(); release(); await until(() => !old.task); await sleep(30);
+    assert.equal(rtc.pcs.length, 1, 'no replacement starts while hidden');
+    assert.equal(rtc.mic.track.enabled, false);
+    if (next === 'end') view.endVoice();
+    if (next === 'switch') view.newChat();
+    appLifecycle.markVisible();
+    if (next === 'resume') {
+      await until(() => rtc.pcs.length === 2 && chat.voice?.status === 'listening');
+      assert.match(JSON.stringify(JSON.parse(log.live[1].body).session.initial_items), /Finished while hidden again/);
+    } else {
+      await sleep(30); assert.equal(rtc.pcs.length, 1); assert.equal(chat.voice, null);
+    }
+    assert.equal(log.chat.length, 1); view.endVoice();
+  });
+}
+
+for (const outcome of ['success', 'second-401', 'refresh-failed', 'signed-out', 'account-changed']) {
+  test(`A rejected voice credential renews only once (${outcome})`, async () => {
+    const original = { accessToken: 'rejected', accountId: 'acct_1' }, requests = []; let renewals = 0;
+    const auth = {
+      getUsableCredential: async () => original,
+      renewRejected: async rejected => {
+        assert.equal(rejected, original); renewals++;
+        if (outcome === 'refresh-failed') throw Error('Refresh unavailable');
+        if (outcome === 'signed-out') return null;
+        return { accessToken: 'renewed', accountId: outcome === 'account-changed' ? 'acct_2' : 'acct_1' };
+      },
+    };
+    globalThis.__providerRequest = async request => {
+      requests.push(request);
+      return requests.length === 1 || outcome === 'second-401' ? { status: 401, text: 'Unauthorized' } : codexAnswer();
+    };
+    const route = X.codexVoiceRoute(auth, 'cove', () => '1.2.3');
+    const call = route.connect({ sdp: 'same-offer', instructions: 'same instructions', items: [] });
+    if (outcome === 'success') assert.equal((await call).sdp, 'answer-sdp');
+    else await assert.rejects(call, /HTTP 401/);
+    assert.equal(renewals, 1);
+    assert.equal(requests.length, ['success', 'second-401'].includes(outcome) ? 2 : 1);
+    if (requests.length === 2) {
+      assert.equal(requests[1].headers.Authorization, 'Bearer renewed');
+      assert.equal(requests[1].headers['ChatGPT-Account-ID'], 'acct_1');
+      assert.equal(requests[1].body, requests[0].body);
+      assert.equal(requests[1].headers['session-id'], requests[0].headers['session-id']);
+    }
+  });
+}
+
+test('Voice renews a prematurely rejected token through the shared ChatGPT sign-in', async () => {
+  const { view, chat, secrets } = await voiceSetup(); let calls = 0, refreshes = 0;
+  globalThis.__providerRequest = async request => {
+    if (request.url.includes('/oauth/token')) {
+      refreshes++;
+      return { status: 200, json: { access_token: 'shared-renewed', refresh_token: 'shared-refresh', expires_in: 3600 } };
+    }
+    if (request.url.includes('/realtime/calls')) {
+      calls++;
+      if (calls === 1) return { status: 401, text: 'Unauthorized' };
+      assert.equal(request.headers.Authorization, 'Bearer shared-renewed');
+      return codexAnswer();
+    }
+    throw Error('Unexpected request');
+  };
+  await startListening(view, chat);
+  assert.equal(calls, 2); assert.equal(refreshes, 1);
+  assert.equal(JSON.parse(secrets[CHATGPT_KEY]).accessToken, 'shared-renewed');
+  assert.deepEqual(errorsShown(chat), []); view.endVoice();
+});
