@@ -11,8 +11,8 @@
   },
   "status": "local-and-live-validated",
   "automated": {
-    "tests": 828,
-    "passed": 828,
+    "tests": 829,
+    "passed": 829,
     "typescript": "pass",
     "svelteErrors": 0,
     "svelteWarnings": 0,
@@ -191,6 +191,12 @@
       "migration-chat-present-chat-mvhcyqg7-iqv61e",
       "migration-visible-chat-mvhcyqg7-iqv61e",
       "migration-api-chat-mvhcyqg7-iqv61e",
+      "migration-chat-present-chat-mvhdooem-n1bjiv",
+      "migration-visible-chat-mvhdooem-n1bjiv",
+      "migration-api-chat-mvhdooem-n1bjiv",
+      "migration-chat-present-chat-mvhdpcyd-4cxcw3",
+      "migration-visible-chat-mvhdpcyd-4cxcw3",
+      "migration-api-chat-mvhdpcyd-4cxcw3",
       "migration-index-v4",
       "migration-v3-backup",
       "stream-visible-before-completion",
@@ -224,7 +230,7 @@
       "synthetic-qa-original-history-preserved",
       "protected-files-unchanged"
     ],
-    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55",
+    "mainSha256": "ed5346cb263a3553901293867d268907d4188a94e57cfd5b5bc4a0344a100005",
     "protectedFiles": {
       "checked": 1809,
       "changed": 0
@@ -249,6 +255,7 @@
       "native-stale-request-keeps-new-utterance",
       "native-ambiguous-empty-keeps-new-speech",
       "native-ambiguous-prefix-keeps-new-speech",
+      "native-symbol-different-delegation-keeps-new-speech",
       "native-new-utterance-dispatches-once",
       "native-stale-guard-survives-next-task",
       "native-open-last-second-correction-runs-next",
@@ -295,10 +302,10 @@
       "original-chat-history-preserved"
     ],
     "passed": true,
-    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55"
+    "mainSha256": "ed5346cb263a3553901293867d268907d4188a94e57cfd5b5bc4a0344a100005"
   },
   "liveVoice": {
-    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55",
+    "mainSha256": "ed5346cb263a3553901293867d268907d4188a94e57cfd5b5bc4a0344a100005",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -313,7 +320,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhdooem-n1bjiv",
+    "conversationId": "chat-mvhdtxhq-3pvpwh",
     "connected": true,
     "completedBeforeReconnect": true,
     "reconnectedAfterCompletion": true,
@@ -321,17 +328,17 @@
     "recoveredNotice": "Previous task ended — see the result in chat",
     "recoveredNoticeVisible": true,
     "reconnectAudioContext": "running",
-    "reconnectedTurnDone": true,
-    "reconnectedResultSpoken": true,
+    "speechObservation": "The service did not finish automatic speech within 30 seconds; the visible recovery notice remains available.",
+    "reconnectedResultSpoken": false,
     "answerReadNote": true,
     "delegated": true,
     "toolCount": 1,
-    "reconnectTranscript": " Here's the exact text in that note:\n\n“SAFE Change TARGET to VERIFIED.”",
+    "reconnectTranscript": "",
     "finalAudioContext": "running",
     "audioStats": [
       {
-        "packets": 353,
-        "bytes": 12246
+        "packets": 1532,
+        "bytes": 53021
       }
     ],
     "peerClosed": true,
@@ -344,7 +351,7 @@
     "Physical iOS/Android and Bluetooth have not been accepted in this maintainer run.",
     "Anthropic/OpenAI API-key chat providers are simulated; the live backend used the existing ChatGPT account.",
     "The available phone control service showed concurrent active operations; this task did not take over the phone.",
-    "Automatic speech after reconnect is best effort. Current-bundle full speech passed; an earlier consecutive run on the readiness-gated candidate stayed quiet. The result remains in chat/seed and the mounted recovery notice provides a deterministic indication. This is not stable automatic-spoken acceptance."
+    "Automatic speech after reconnect is best effort. Complete speech passed on earlier candidates. On the latest bundle the service stayed quiet for 30 seconds; the result seed, visible recovery notice and no-replay checks passed. This is not stable automatic-spoken acceptance."
   ],
   "externalGates": "Current-head CI, Codex review, unresolved-thread count and official Community Preview are verified separately on the PR. A pending gate does not mean merge-ready.",
   "reviewFixes": [
@@ -430,7 +437,7 @@
     },
     {
       "comment": 4331742161,
-      "fix": "After fallback, require exact nonempty current-utterance text before ambiguous events can consume pending speech. Empty/prefix stale IDs request a full new delegation; preceding clarification context remains separate."
+      "fix": "After fallback, require literal nonempty current-utterance text before ambiguous events consume pending speech, preserving signs/punctuation such as +1 versus -1. Empty/prefix/changed-symbol stale IDs request a full new delegation; preceding clarification context stays separate."
     },
     {
       "comment": 4331742168,
@@ -446,7 +453,7 @@
     }
   ],
   "liveReconnect": {
-    "mainSha256": "856e88ea53f43f0e1a72c65d2657dc769c29a7ca11a77b489b192fe1b53d7e55",
+    "mainSha256": "ed5346cb263a3553901293867d268907d4188a94e57cfd5b5bc4a0344a100005",
     "scope": "real ChatGPT/Codex WebRTC, synthetic spoken audio fixture, real selected chat backend; no physical microphone or mobile acceptance",
     "audioClock": "continuous silent WebAudio source",
     "events": [
@@ -461,7 +468,7 @@
       "session.closed"
     ],
     "passed": true,
-    "conversationId": "chat-mvhdpcyd-4cxcw3",
+    "conversationId": "chat-mvhduwfu-hvvf3q",
     "connected": true,
     "syntheticPendingTranscript": true,
     "retainedController": true,

@@ -570,7 +570,7 @@ export class VoiceController {
     // utterance after completion can intentionally request that work again.
     const candidate = text.trim() || this.pendingInput.trim();
     const current = (this.openTurn?.role === "user" ? this.openTurn.text : [...this.spoken].reverse().find(turn => turn.role === "user")?.text)?.trim() || this.pendingInput.trim();
-    const exactFresh = !!text.trim() && !!current && normalizedWords(text) === normalizedWords(current);
+    const exactFresh = !!text.trim() && !!current && text.trim() === current;
     if (this.steeredSpoken.length && (!text.trim() || (current && !exactFresh))) {
       this.sendAll(progressEvents(id, `This ambiguous delegation has not run. Delegate the user's complete current request as nonempty exact text with a new delegation ID.\n${current}`));
       return;

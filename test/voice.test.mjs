@@ -1983,20 +1983,20 @@ test('Voice renews a prematurely rejected token through the shared ChatGPT sign-
   assert.deepEqual(errorsShown(chat), []); view.endVoice();
 });
 
-for (const ambiguous of ['empty', 'prefix']) {
+for (const ambiguous of ['empty', 'prefix', 'changed-symbol']) {
   test(`A stale ${ambiguous} delegation cannot consume fresh speech after fallback`, async () => {
     const { view, chat, plugin } = await voiceSetup(); let release;
     const log = serve({ chat: (_body, i) => i === 0
       ? new Promise(resolve => { release = () => resolve(response('anthropic', [call('clock', 'get_current_datetime', {})], 'tool_use')); })
       : response('anthropic', [text(i === 1 ? 'Old work finished.' : 'New work finished.')]) });
     await startListening(view, chat);
-    const ch = channel(), old = 'Read the first note';
-    const fresh = ambiguous === 'prefix' ? 'Read the first note and preserve every original heading' : 'Read the other safe test note';
+    const ch = channel(), old = ambiguous === 'changed-symbol' ? 'Append -1 to the score' : 'Read the first note';
+    const fresh = ambiguous === 'changed-symbol' ? 'Append +1 to the score' : ambiguous === 'prefix' ? 'Read the first note and preserve every original heading' : 'Read the other safe test note';
     delegated(ch, 'initial', 'Check the time'); await until(() => release);
     said(ch, old); answered(ch, 'Okay.'); await until(() => chat.queued.includes(old));
     release(); await until(() => !view.voice.voiceTurnRunning);
     said(ch, fresh);
-    const stale = ambiguous === 'empty' ? '' : 'Read the first';
+    const stale = ambiguous === 'empty' ? '' : ambiguous === 'changed-symbol' ? old : 'Read the first';
     delegated(ch, 'stale', stale); await sleep(50);
     assert.equal(log.chat.length, 2, 'ambiguous events do not run fresh words under an old ID');
     assert.equal(view.voice.pendingInput, fresh);
