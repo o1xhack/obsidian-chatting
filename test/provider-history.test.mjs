@@ -608,3 +608,22 @@ test('OpenAI: a single long tool turn breaks the chain when its image budget is 
   assert.ok(!replay.includes('picture-0'));
   for(let i=1;i<5;i++)assert.ok(replay.includes(`picture-${i}`));
 });
+
+test('chatgpt-oauth: every request of a chat names it as Codex does, so the backend caches the conversation', async () => {
+  const { app } = vaultApp();
+  const seen = [];
+  transport((body, index, request) => {
+    seen.push({ key: body.prompt_cache_key, session: request.headers.session_id });
+    return index === 0 ? response('chatgpt-oauth', [call('read', 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use') : response('chatgpt-oauth', [text('Done')]);
+  });
+  await new api.AgentLoop(app, settings('chatgpt-oauth'), 'chat-1').run('Read the template', callbacks());
+  assert.deepEqual(seen, [{ key: 'chat-1', session: 'chat-1' }, { key: 'chat-1', session: 'chat-1' }]);
+  // The plugin's loop of a conversation takes its ID.
+  const plugin = new api.ChatPlugin();
+  plugin.app = app;
+  plugin.settings = settings('chatgpt-oauth');
+  seen.length = 0;
+  await plugin.agentFor({ id: 'conv-7', agentMessages: [] }).run('Hi', callbacks());
+  assert.equal(seen[0].key, 'conv-7');
+  assert.equal(seen[0].session, 'conv-7');
+});
