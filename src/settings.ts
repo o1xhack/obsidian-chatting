@@ -341,7 +341,7 @@ export class ChatSettingTab extends PluginSettingTab {
     const s = this.plugin.settings;
     setting
       .setName("Max tool iterations")
-      .setDesc("Safety limit for the agent loop (default: 20)")
+      .setDesc("Steps per answer before it pauses; Continue goes on (default: 20)")
       .addText((text) =>
         text
           .setPlaceholder("20")

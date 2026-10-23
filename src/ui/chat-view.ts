@@ -218,6 +218,8 @@ interface RunningTurn {
   agent: AgentLoop;
   /** Some of the answer is on screen (streamed or whole, a step or a question). */
   answerShown: boolean;
+  /** The turn used all its steps: it keeps its pending mark, so Continue goes on. */
+  paused?: boolean;
   /** The answer being streamed, until the loop delivers it whole; `id` is its message while shown. */
   streaming: { id: number; text: string } | null;
   /** Tool steps still running, by tool name, with their row while shown. */
@@ -544,7 +546,8 @@ export class ObsidianChatView extends ItemView {
 
   /**
    * The shown conversation's turn was cut off (Obsidian was ended in the
-   * middle of it) and the model still owes an answer.
+   * middle of it) or paused after all its steps, and the model still owes
+   * an answer.
    */
   private canContinue(): boolean {
     const pending = this.plugin.activeConversation.pendingTurn;
@@ -1007,8 +1010,9 @@ export class ObsidianChatView extends ItemView {
 
   /**
    * Continue the turn that was cut off when Obsidian was ended in the
-   * middle of it: the agent runs on its history as saved, with no new user
-   * message; tool results already there aren't run again.
+   * middle of it, or paused after all its steps: the agent runs on its
+   * history as saved, with no new user message; tool results already there
+   * aren't run again.
    */
   async continueTurn(): Promise<void> {
     const pending = this.plugin.activeConversation.pendingTurn;
@@ -1224,6 +1228,15 @@ export class ObsidianChatView extends ItemView {
           history.push({ type: "error", text: error });
           voice?.onError(error);
         },
+        onStepLimit: (steps) => {
+          this.setThinking(turn, null);
+          this.endStream(turn, true);
+          const note = `Paused after ${steps} steps.`;
+          ui()?.addError(note, "paused");
+          history.push({ type: "error", text: note, errorKind: "paused" });
+          turn.paused = true;
+          voice?.onError(`${note} Continue in the chat to go on.`);
+        },
         // Added to the running turn (typed or spoken): shown where the agent took it in.
         onSteered: (text) => {
           this.endStream(turn, false);
@@ -1256,7 +1269,11 @@ export class ObsidianChatView extends ItemView {
       }
       turn.releaseScreen();
       release();
-      if (conversation.pendingTurn?.turnId === turnId) delete conversation.pendingTurn;
+      // A paused turn keeps its mark for Continue; no request is in flight, so nothing remote is uncertain.
+      if (conversation.pendingTurn?.turnId === turnId) {
+        if (turn.paused) delete conversation.pendingTurn.remoteEffectsPossible;
+        else delete conversation.pendingTurn;
+      }
       if (!changes.isEmpty()) this.addChanges(history, turnId, changes);
       // The turn is over: its steps fold into one row above the answer
       // (when the chat shows its conversation; a stopped turn too).
@@ -1279,6 +1296,8 @@ export class ObsidianChatView extends ItemView {
               }
             }
           }
+          // Paused after all its steps: Continue goes on.
+          shown.setContinue(this.canContinue());
           shown.setInputEnabled(true);
           shown.setBusy(false);
           shown.focus();
