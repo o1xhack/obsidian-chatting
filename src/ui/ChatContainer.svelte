@@ -58,6 +58,8 @@
     steps?: ChatMessage[];
     /** Steps rows: opened into the steps and files. */
     stepsOpen?: boolean;
+    /** Steps rows: the turn ended without an answer (no check mark). */
+    unanswered?: boolean;
     /** Tool steps: opened into their parameters and result (built only then). */
     toolOpen?: boolean;
   }
@@ -117,7 +119,7 @@
     if (usageOpen && usageEl && event.target instanceof Node && !usageEl.contains(event.target)) usageOpen = false;
   }
 
-  /** A turn was cut off when Obsidian was ended in the background: offer Continue. */
+  /** A turn was cut off when Obsidian was ended in the background, or paused after all its steps: offer Continue. */
   let canContinue = $state(false);
 
   export function setContinue(show: boolean): void {
@@ -603,10 +605,10 @@
   export function foldTurn(turnId: string): void {
     const plan = foldPlan(messages, turnId);
     if (!plan) return;
-    const { at, steps, changes } = plan;
+    const { at, steps, changes, unanswered } = plan;
     const gone = new Set<ChatMessage>(changes ? [...steps, changes] : steps);
     const row: ChatMessage = {
-      id: nextId++, type: "steps", turnId, steps,
+      id: nextId++, type: "steps", turnId, steps, ...(unanswered ? { unanswered } : {}),
       ...(changes ? { files: changes.files, changesState: changes.changesState } : {}),
     };
     const kept = (m: ChatMessage) => !gone.has(m);
@@ -1504,6 +1506,9 @@
               <svg class="ochatting-tool-icon ochatting-steps-failed" aria-label={failed === 1 ? "A step failed" : `${failed} steps failed`} xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
             {:else if files.length}
               <svg class="ochatting-tool-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path><path d="M14 2v6h6"></path></svg>
+            {:else if msg.unanswered}
+              <!-- No answer followed: no check mark (the note or error below says why) -->
+              <svg class="ochatting-tool-icon" aria-label="Not finished" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M8 12h8"></path></svg>
             {:else}
               <svg class="ochatting-tool-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
             {/if}
@@ -1545,8 +1550,8 @@
           {/if}
         </details>
 
-      {:else if msg.type === "error" && (msg.errorKind === "stopped" || msg.errorKind === "compacted")}
-        <!-- Stopped before any of the answer arrived, or the earlier part summarized: a quiet note, not an error -->
+      {:else if msg.type === "error" && (msg.errorKind === "stopped" || msg.errorKind === "compacted" || msg.errorKind === "paused")}
+        <!-- Stopped before any of the answer arrived, the earlier part summarized, or all steps used: a quiet note, not an error -->
         <div class="ochatting-stopped-note">{msg.text}</div>
 
       {:else if msg.type === "changes"}
@@ -1606,7 +1611,7 @@
 
   {#if canContinue}
     <div class="ochatting-continue-row" role="status">
-      <span>The last answer was interrupted.</span>
+      <span>The last answer isn't finished.</span>
       <button class="mod-cta" type="button" onclick={continueTurn}>Continue</button>
     </div>
   {/if}
