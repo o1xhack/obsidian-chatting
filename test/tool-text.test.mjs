@@ -79,3 +79,19 @@ test('A turn keeps everything it read (each result capped); earlier turns share 
   assert.match(before[0], /Tool text truncated/);
   assert.deepEqual(results(requests[1]).slice(0, 4), before);
 });
+
+test("The chat shows the last turn's tool results in full too; earlier turns share the allowance", () => {
+  const read = (n) => ({ type: 'tool-result', toolName: 'read_document', toolResult: { result: String(n).repeat(80000), isError: false } });
+  const rows = [
+    { type: 'user', text: 'Old', turnId: 't1' }, read(1), read(2), read(3),
+    { type: 'user', text: 'New', turnId: 't2' }, read(4), read(5), read(6), read(7),
+  ];
+  const bounded = api.withoutLargeVisibleToolText(rows);
+  // 4 × 80,000 in the last turn: all complete.
+  assert.ok(bounded.slice(5).every(row => row.toolResult.result.length === 80000));
+  // The earlier turn: 200,000 newest first.
+  assert.equal(bounded[3].toolResult.result.length, 80000);
+  assert.equal(bounded[2].toolResult.result.length, 80000);
+  assert.match(bounded[1].toolResult.result, /Tool text truncated/);
+  assert.equal(api.withoutLargeVisibleToolText(bounded), bounded);
+});

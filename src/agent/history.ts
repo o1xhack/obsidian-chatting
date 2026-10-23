@@ -50,19 +50,26 @@ export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): stri
   return prefix + notice;
 }
 
-/** The same newest-first allowance for visible, saved and folded tool rows. */
-export function withoutLargeVisibleToolText<T extends { toolResult?: ToolResult; steps?: T[] }>(rows: T[]): T[] {
+/**
+ * The same newest-first allowance for visible, saved and folded tool rows.
+ * As in the API history, the last turn's rows (after its user row) take
+ * only the per-result cap: the chat shows in full what the model has.
+ */
+export function withoutLargeVisibleToolText<T extends { type?: string; turnId?: string; toolResult?: ToolResult; steps?: T[] }>(rows: T[]): T[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
-  const visit = (source: T[]): T[] => {
+  let turnStart = -1;
+  for (let i = rows.length - 1; i >= 0 && turnStart === -1; i--) if (rows[i].type === "user" && rows[i].turnId) turnStart = i;
+  const visit = (source: T[], lastTurn: (i: number) => boolean): T[] => {
     let changed = false;
     const next = [...source];
     for (let i = source.length - 1; i >= 0; i--) {
       const row = source[i];
-      const steps = row.steps && visit(row.steps);
+      const inLastTurn = lastTurn(i);
+      const steps = row.steps && visit(row.steps, () => inLastTurn);
       let toolResult = row.toolResult;
       if (toolResult && typeof toolResult.result === "string") {
-        const result = boundedToolText(toolResult.result, Math.min(MAX_TOOL_TEXT_CHARS, room));
-        room = Math.max(0, room - result.length);
+        const result = boundedToolText(toolResult.result, Math.min(MAX_TOOL_TEXT_CHARS, inLastTurn ? Infinity : room));
+        if (!inLastTurn) room = Math.max(0, room - result.length);
         if (result !== toolResult.result) toolResult = { ...toolResult, result };
       }
       if (steps !== row.steps || toolResult !== row.toolResult) {
@@ -72,7 +79,7 @@ export function withoutLargeVisibleToolText<T extends { toolResult?: ToolResult;
     }
     return changed ? next : source;
   };
-  return visit(rows);
+  return visit(rows, i => turnStart >= 0 && i > turnStart);
 }
 
 /** Bound text as well as binary tool payloads. A copied prefix releases the
