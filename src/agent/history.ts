@@ -79,13 +79,22 @@ export function withoutLargeVisibleToolText<T extends { toolResult?: ToolResult;
  * original large string's backing store. Clipped rules lose their delivery
  * provenance, so a later write must discover the real instructions again.
  * A loader-recorded instruction suffix is kept complete outside the payload
- * allowance, including when multiple nested rules exceed the per-result cap. */
+ * allowance, including when multiple nested rules exceed the per-result cap.
+ * The last turn's results of the plugin's own tools take only the per-result
+ * cap, not the shared allowance: a turn that reads more than it would otherwise lose its own
+ * first reads and read them again, step after step. Compaction bounds the
+ * turn's context instead, and earlier turns are clipped once, when the next
+ * turn starts, so a turn's requests keep their cached prefix. */
 export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
+  let turnStart = -1;
+  for (let i = messages.length - 1; i >= 0 && turnStart === -1; i--) if (startsUserTurn(messages[i])) turnStart = i;
   const replacement = new Map<ContentBlock, ContentBlock>();
   const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
+    const lastTurn = turnStart >= 0 && i > turnStart;
+    // Provider-run (MCP) results keep the shared allowance: their catalogs alone can be megabytes.
     if (message.replay) {
       const bounded = withBoundedServerResults(message.replay.items, room);
       room = bounded.room;
@@ -100,8 +109,8 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
       const offset = block.instructionOffset;
       const hasRules = !!block.instructionSources?.length && Number.isInteger(offset) && offset! >= 0 && offset! <= text.length;
       const payload = hasRules ? text.slice(0, offset) : text;
-      const limit = Math.min(MAX_TOOL_TEXT_CHARS, room);
-      if (payload.length <= limit) { room -= payload.length; continue; }
+      const limit = Math.min(MAX_TOOL_TEXT_CHARS, lastTurn ? Infinity : room);
+      if (payload.length <= limit) { if (!lastTurn) room -= payload.length; continue; }
       const clipped = boundedToolText(payload, limit);
       if (clipped === payload) continue;
       if (hasRules) {
@@ -110,7 +119,7 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
         const { instructionSources: _sources, instructionOffset: _offset, ...rest } = block;
         replacement.set(block, { ...rest, content: clipped });
       }
-      room = Math.max(0, room - clipped.length);
+      if (!lastTurn) room = Math.max(0, room - clipped.length);
     }
   }
   if (!replacement.size && !replays.size) return messages;
