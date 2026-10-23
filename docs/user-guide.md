@@ -81,7 +81,7 @@ Remote tools need a different recovery rule. If an MCP-capable request loses its
 
 ## 🧠 Long conversations and usage
 
-The context ring in the chat header shows the last request's context use against the selected model's available window, when that information is known. Open it to see the chat's token totals, estimated API cost when model prices are available, and **Compact now**. ChatGPT account chats show a link to plan usage rather than a subscription-cost estimate. Estimates use recorded model token usage and available prices; they are not a final bill or a total of external tool charges.
+The context ring in the chat header shows the last request's context use: it is full when the chat reaches its compaction point (or the model's window, where no compaction point is known). Open it to see the chat's token totals, estimated API cost when model prices are available, and **Compact now**. ChatGPT account chats show a link to plan usage rather than a subscription-cost estimate. Estimates use recorded model token usage and available prices; they are not a final bill or a total of external tool charges.
 
 **Settings → Compaction point** controls when earlier model context is summarized. The default follows the catalog where provided, otherwise a model-window-based threshold; you can adjust the share or token count. If the provider cannot compact that conversation, the plugin can summarize with the same model. **Compact now** runs this manually. Summarization itself uses model tokens and may lose detail; it does not expand the model's context window.
 

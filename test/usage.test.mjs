@@ -250,6 +250,16 @@ test('A saved usage record is checked field by field; a broken one is dropped', 
   assert.equal(state('much').usage, undefined);
 });
 
+test('The context ring is full at the compaction point, or at the window where none is known', () => {
+  const { contextShare } = api.usage;
+  // 41k of a 200k window, compacting at 160k: a quarter of the way, not a fifth.
+  assert.equal(contextShare(40000, 160000, 200000), 0.25);
+  assert.equal(contextShare(170000, 160000, 200000), 1);
+  assert.equal(contextShare(50000, undefined, 200000), 0.25);
+  assert.equal(contextShare(50000, 100000, undefined), 0.5);
+  assert.equal(contextShare(50000, undefined, undefined), undefined);
+});
+
 test('The ChatGPT plan has no per-token cost', async () => {
   const { plugin, view, chat } = await chatSetup('chatgpt-oauth');
   plugin.settings.modelCatalog = (await withCatalog('chatgpt-oauth', [{ value: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 380000, autoCompactTokens: 300000 }])).modelCatalog;
