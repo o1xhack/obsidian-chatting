@@ -176,9 +176,13 @@ export class AgentLoop {
   /** The skills part of the system prompt, read with the instructions. */
   private skills: string | null = null;
 
-  constructor(app: App, settings: ChatSettings) {
+  /** The conversation's ID, for the provider's prompt cache (a random one for a loop without). */
+  private readonly conversationId: string;
+
+  constructor(app: App, settings: ChatSettings, conversationId?: string) {
     this.app = app;
     this.settings = settings;
+    this.conversationId = conversationId ?? newTurnId();
   }
 
   /** Abort a running loop (e.g. user navigates away) */
@@ -961,7 +965,7 @@ ${mentioned.text}` : buildContextMessage(context);
     let remoteStarted = false;
     try {
       return await sendMessage(settings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped,
-        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; } });
+        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; }, conversationId: this.conversationId });
     } catch (e) {
       // Aborted, but not by Stop: the watch gave it up.
       if (e instanceof ProviderError && e.remoteEffectsPossible) throw e;
