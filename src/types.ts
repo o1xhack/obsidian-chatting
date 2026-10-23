@@ -307,7 +307,8 @@ export interface ChatHistoryEntry {
   toolResult?: { result: string; isError: boolean };
   /**
    * Error entries shown as a quiet note: "stopped", left by Stop before any
-   * answer was shown; "compacted", where the earlier part was summarized.
+   * answer was shown; "compacted", where the earlier part was summarized;
+   * "paused", where the turn used all its steps (Continue goes on).
    */
   errorKind?: ChatErrorKind;
   /** Changes entries (at the end of a turn): the files the turn changed. */
@@ -317,7 +318,7 @@ export interface ChatHistoryEntry {
 }
 
 /** Errors the chat shows as a quiet note, not as an error. */
-export type ChatErrorKind = "stopped" | "compacted";
+export type ChatErrorKind = "stopped" | "compacted" | "paused";
 
 /** A row of the chat view's history list. */
 export interface ConversationSummary {
@@ -374,6 +375,12 @@ export interface AgentCallbacks {
   onResponse: (text: string) => void;
   onAskUser: (question: string) => Promise<string>;
   onError: (error: string) => void;
+  /**
+   * The turn used the steps `maxIterations` allows: it pauses with the model
+   * still owing an answer, and `continueTurn` goes on from there. Without
+   * this callback the limit is an error.
+   */
+  onStepLimit?: (steps: number) => void;
   /** A first request rejected locally before transport; the UI can restore its unsent draft. */
   onPreflightRejected?: (error: string) => void;
   /** A message the user added to the running turn (`AgentLoop.steer`) went out with its next step. */

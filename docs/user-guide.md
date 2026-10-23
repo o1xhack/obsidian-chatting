@@ -75,7 +75,7 @@ Answers stream where the provider and connection allow it; the buffered fallback
 
 Switching to another chat does not stop an already-sent answer. Switching apps or locking the phone can interrupt the network: eligible transient failures can retry when Obsidian returns, with at most two recovery attempts per turn. This does not guarantee continued execution while a phone suspends the app.
 
-After an app restart, **Continue** can finish an eligible saved pending turn, using the original user turn and the completed tool results without rerunning those tools. Selection fingerprints are still checked, so a changed note can prevent scoped edits. Continue is an explicit action, not an automatic restart.
+A task that needs more steps than **Settings → Max tool iterations** allows (20 by default) pauses with a note; **Continue** goes on with as many steps again, and a new message instead starts a new turn. After an app restart, **Continue** can likewise finish an eligible saved pending turn, using the original user turn and the completed tool results without rerunning those tools. Selection fingerprints are still checked, so a changed note can prevent scoped edits. Continue is an explicit action, not an automatic restart.
 
 Remote tools need a different recovery rule. If an MCP-capable request loses its response, it is not automatically sent again through a different transport: external operations may already have happened. After restart, an uncertain remote request shows a warning instead of Continue. Inspect the remote service before deciding whether to repeat an operation. Vault Undo does not reverse remote MCP changes.
 
