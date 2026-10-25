@@ -7,11 +7,11 @@
 - 启用 MCP 的桌面请求在 TLS 就绪前不提交 HTTP headers/body；这个阶段失败会得到本地 `RequestNotSent` 类型，可以回退或等待返回前台后恢复。
 - 已经提交、复用连接、未知 socket、移动 fetch 或 fallback 自身失败仍按未知结果处理，禁止自动重复远程工具。
 - 两个 provider 都保留未发送状态，背景恢复经过完整 agent/view 路径验证：两次连接尝试，只有一次 POST。
-- 每个新的 MCP 回合先完整保存一次原始用户输入和不确定性标记。后续步骤及重试只更新两个小型索引副本，避免每步重新序列化、写入大聊天和附件。
-- 索引增加可选 `pendingTurn` / `pendingSavedAt`，按每个聊天的修订与文件 `savedAt` 比较；旧文件不能清除新标记，新完成文件也不会被旧标记覆盖。
-- 完整保存、小型 checkpoint 和插件重载共享有序队列；专门覆盖 checkpoint 先等旧写入、完整保存后排队的交错情况。
+- 每个新的 MCP 回合先完整保存一次原始用户输入和不确定性标记。后续步骤及重试复用已落盘的同一回合标记，既不序列化聊天，也不再写索引。
+- 复用前先等待已排队的正常保存，防止旧保存覆盖标记。替换任一聊天副本前，先使标记缓存和 payload digest 失效；失败写入的较新 `.next` 副本不能被缓存掩盖。
+- 沿用版本 4 原有文件格式和保存队列。相较初稿的小索引方案，这个方案去掉了新增索引字段、单独 checkpoint 写入路径和额外写入协调，安全性由实际已保存标记证明。
 
-实机测试在含有既有多条聊天的测试 vault 内进行：1 MiB 合成聊天的后续变更，只写入两个各 25,876 字节的索引，未写任何聊天文件。索引大小随聊天数量变化，并非固定字节数。
+实机测试在含有既有多条聊天的测试 vault 内进行：1 MiB 合成聊天的后续变更，checkpoint 产生零次磁盘写入。首次回合保存和正常后台/结束保存仍保留。
 
 ## #61：滚动可读摘要与原文留存
 
@@ -27,8 +27,8 @@
 
 ## #62：安全诊断和真实语音复测
 
-- 语音错误保留受限的 service code/message/request ID；识别 HTML 返回，禁止复制代理页面。
-- 精确遮盖当前/刷新后的 access token、refresh token、账号 ID，另遮盖 Bearer/JWT/API key 形式及邮箱；不复制任意响应对象、headers 或 SDP。
+- 语音错误保留受限的 service code/message/request ID；支持 `error.message`、`error` 字符串、顶层 `message`、`detail` 及已知纯文本错误；识别 HTML 返回，禁止复制代理页面。
+- 精确遮盖当前/刷新后的 access token、refresh token、账号 ID，另遮盖 Bearer/JWT/API key 形式及邮箱；不复制任意响应对象或 headers。服务端验证错误若回显 SDP，则改为一般连接描述错误，不复制地址或 ICE 密码。
 - 增加 `VOICE_START_FAILED`，标明麦克风、offer、创建会话、answer 或 channel 的失败阶段；失败释放音轨与 peer。
 - 在专用测试 vault 中完成 OAuth 登录，用静音生成音轨调用真实语音服务：会话创建、连接及 `session.started` 均成功，结束后音轨已释放。未读取真实麦克风，也未委派工具。
 
@@ -36,10 +36,10 @@
 
 ## 验证与证据
 
-- 912 项自动测试通过，0 失败。
+- 初稿通过 912 项自动测试；继续审查后的测试结果记录在 [QA 证据](issues-60-62-qa.json)。
 - TypeScript、Svelte（0 errors / 0 warnings）和生产构建通过。
 - 真实本地 Node TLS 覆盖 DNS、连接拒绝、证书失败和请求送达后丢响应。
-- 真实 Electron 小型 checkpoint、真实 OAuth 摘要、真实 WebRTC 语音通过。
+- 真实 Electron checkpoint 零重复写入、真实 OAuth 摘要、真实 WebRTC 语音通过。
 - [QA 证据](issues-60-62-qa.json) 记录生产 bundle 和测试 bundle 的 SHA-256。测试 bundle 只追加暴露 `VoiceSession` 的临时钩子；验证后已安装原始生产 bundle，钩子已移除。
 
 三个 issue 的开工评论：[#60](https://github.com/o1xhack/obsidian-chatting/issues/60#issuecomment-6402531715)、[#61](https://github.com/o1xhack/obsidian-chatting/issues/61#issuecomment-6402531907)、[#62](https://github.com/o1xhack/obsidian-chatting/issues/62#issuecomment-6402532117)。

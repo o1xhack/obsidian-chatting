@@ -22,3 +22,14 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run svelte-check
       - run: npm run build
+      - name: Upload test plugin
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatting-with-ai-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: |
+            main.js
+            manifest.json
+            styles.css
+          if-no-files-found: error
+          retention-days: 7
