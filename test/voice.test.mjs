@@ -21,6 +21,7 @@ test('Voice call errors distinguish model/route failures and retain a bounded re
       assert.equal(error.details.code, code);
       assert.match(error.message, /req-voice-123/);
       assert.match(error.message, /voice service is unavailable/);
+      assert.doesNotMatch(error.message, /may be unavailable for this account/);
       return true;
     });
     assert.equal(sent, 1);
@@ -47,10 +48,37 @@ test('A voice proxy HTML failure reports the response type without copying its c
   await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
     assert.equal(error.details.responseType, 'html');
     assert.match(error.message, /HTML page/);
+    assert.doesNotMatch(error.message, /may be unavailable for this account/);
     assert.doesNotMatch(error.message, /private-network-information/);
     return true;
   });
 });
+
+for (const body of ['Not Found', JSON.stringify({ detail: 'Not Found' }), '']) {
+  test(`An unspecified voice 404 explains account access without retrying or blocking a later call (${body || 'empty'})`, async () => {
+    let calls = 0, renewals = 0;
+    globalThis.__providerRequest = async () => ++calls === 1
+      ? { status: 404, text: body, headers: { 'x-request-id': 'req-voice-access' } }
+      : { status: 201, text: 'answer-sdp', headers: {} };
+    const route = X.codexVoiceRoute({
+      getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }),
+      renewRejected: async () => { renewals++; throw Error('Should not refresh for a 404'); },
+    }, 'cove', () => '1.2.3');
+    await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+      assert.equal(error.status, 404);
+      assert.match(error.message, /may be unavailable for this account/);
+      assert.match(error.message, /regular ChatGPT app/);
+      assert.match(error.message, /req-voice-access/);
+      if (body) assert.match(error.message, /Not Found/);
+      assert.doesNotMatch(error.message, /upgrade|buy|subscription required/i);
+      return true;
+    });
+    assert.equal(calls, 1);
+    assert.equal(renewals, 0);
+    assert.equal((await route.connect({ sdp: 'offer', instructions: '', items: [] })).sdp, 'answer-sdp');
+    assert.equal(calls, 2);
+  });
+}
 
 for (const [packet, message] of [
   [{ detail: 'Not Found' }, 'Not Found'],

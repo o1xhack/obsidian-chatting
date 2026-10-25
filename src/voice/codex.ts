@@ -18,7 +18,9 @@ import { isRecord } from "../json";
 /** Safe service diagnostics; never include the request, SDP or account identity. */
 export class VoiceStartError extends Error {
   constructor(readonly status: number, readonly details: { code?: string; requestId?: string; responseType: "json" | "html" | "text" }, message?: string) {
-    super(`Couldn't start voice (HTTP ${status}).${details.code ? ` ${details.code}:` : ""}${message ? ` ${message}` : ""}${details.responseType === "html" ? " The voice service returned an HTML page." : ""}${details.requestId ? ` Request ID: ${details.requestId}.` : ""}`);
+    const accountHint = status === 404 && details.responseType !== "html" && !details.code &&
+      (!message || /^not found\.?$/i.test(message.trim()));
+    super(`Couldn't start voice (HTTP ${status}).${details.code ? ` ${details.code}:` : ""}${message ? ` ${message}` : ""}${details.responseType === "html" ? " The voice service returned an HTML page." : ""}${accountHint ? " Codex voice may be unavailable for this account. Access can differ from voice in the regular ChatGPT app." : ""}${details.requestId ? ` Request ID: ${details.requestId}.` : ""}`);
     this.name = "VoiceStartError";
   }
 }

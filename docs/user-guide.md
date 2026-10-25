@@ -30,6 +30,8 @@ The agent reads before it edits, prefers small surgical changes over rewrites, a
 
 Talk with the assistant in the current chat and hear the answer. Voice needs the **ChatGPT account** sign-in (the same as the ChatGPT provider; connect it there or under **Settings → Chatting with AI → Voice**), whichever provider you chat with. It uses Codex's voice service with that account; access and limits depend on the account. The chat model uses your selected provider as usual. Like the ChatGPT provider's Codex route, OpenAI doesn't document it for other apps, so it may change or stop working.
 
+Voice working in the regular ChatGPT app does not guarantee access to Codex voice. A generic **HTTP 404 / Not Found** when starting a call can mean this service is unavailable for the account; it does not identify the cause by itself. Check [Codex voice availability](https://learn.chatgpt.com/docs/features/voice), including plan, rollout and workspace access. The plugin keeps the service error and request ID when provided and does not block an account based on its plan.
+
 - **Start:** the voice button (a circle with sound-wave bars) sits where Send is. It shows while the input is empty, nothing is attached, no answer is running and the AI isn't waiting for your answer to a question.
 - **During a call** the voice bar replaces the input row: the microphone button (tap to mute) or, with *Hold to talk*, the button you hold while speaking; a line showing your current words, or else whether the assistant is listening, working or speaking; and a red **✕** to end.
 - **In the chat:** your requests and the answers appear as chat messages, tool steps included, and the voice reads the answer out in short. Small talk the voice handles itself is only heard.
