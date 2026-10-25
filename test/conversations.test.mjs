@@ -163,7 +163,7 @@ test('The active conversation is restored on load, with its own API history; the
   const written = writes.at(-1);
   assert.equal(written.activeConversationId, 'b');
   assert.deepEqual(written.conversations.map(c => c.id), ['a', 'b']);
-  const { size, metadataSavedAt, pendingSavedAt, ...a } = written.conversations[0];
+  const { size, metadataSavedAt, ...a } = written.conversations[0];
   assert.deepEqual(a, { ...saved.conversations[0], automaticTitle: 'Topic A', titleSourceTurnId: 'a-t' });
   assert.ok(size > 0);
   assert.deepEqual(texts(written.conversations[1].chatHistory), ['Topic B', 'Topic B answer', 'Back to B', 'A1']);
@@ -726,7 +726,7 @@ test('A save writes only the chats that changed, each to its own file, then the 
   const index = JSON.parse(files.get(STATE));
   assert.equal(index.version, CHAT_STATE_VERSION);
   for (const entry of index.conversations) {
-    assert.deepEqual(Object.keys(entry).sort(), ['automaticTitle', 'createdAt', 'customTitle', 'id', 'metadataSavedAt', 'pendingSavedAt', 'size', 'title', 'titleSourceTurnId', 'updatedAt']);
+    assert.deepEqual(Object.keys(entry).sort(), ['automaticTitle', 'createdAt', 'customTitle', 'id', 'metadataSavedAt', 'size', 'title', 'titleSourceTurnId', 'updatedAt']);
     assert.equal(entry.size, Buffer.byteLength(files.get(chatPath(entry.id))));
   }
   assert.deepEqual(plugin.savedChatsSize(), { chats: 2, bytes: index.conversations.reduce((sum, c) => sum + c.size, 0) });

@@ -267,15 +267,7 @@ export function chatFiles(saved) {
   const chatFile = (id) => { const text = stored.get(`${dir}/chats/${id}.json`); return text ? JSON.parse(text) : undefined; };
   const whole = (index) => ({
     ...index,
-    conversations: index.conversations.map((entry) => {
-      const file = chatFile(entry.id);
-      const whole = { chatHistory: [], agentMessages: [], ...entry, ...file?.conversation };
-      if (entry.pendingSavedAt !== undefined && entry.pendingSavedAt >= (file?.savedAt ?? 0)) {
-        if (entry.pendingTurn) whole.pendingTurn = entry.pendingTurn;
-        else delete whole.pendingTurn;
-      }
-      return whole;
-    }),
+    conversations: index.conversations.map((entry) => ({ ...entry, ...chatFile(entry.id)?.conversation })),
   });
   const adapter = {
     stored,
