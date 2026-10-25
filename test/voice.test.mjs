@@ -7,6 +7,50 @@ import { test, beforeEach, afterEach } from 'node:test';
 import { api, settings, text, call, response, vaultApp } from './harness.mjs';
 
 const { voiceProtocol: P, voiceSession: S, voiceController: C, codexVoice: X } = api;
+
+test('Voice call errors distinguish model/route failures and retain a bounded request ID', async () => {
+  for (const code of ['model_not_found', 'route_not_found']) {
+    let sent = 0;
+    globalThis.__providerRequest = async () => {
+      sent++;
+      return { status: 404, text: JSON.stringify({ error: { code, message: 'Requested voice service is unavailable.' } }), headers: { 'X-Request-ID': 'req-voice-123' } };
+    };
+    const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+    await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+      assert.equal(error.status, 404);
+      assert.equal(error.details.code, code);
+      assert.match(error.message, /req-voice-123/);
+      assert.match(error.message, /voice service is unavailable/);
+      return true;
+    });
+    assert.equal(sent, 1);
+  }
+});
+
+test('Voice error diagnostics redact credentials, identity and emails without copying raw response objects', async () => {
+  const credential = { accessToken: 'access-secret-123', refreshToken: 'refresh-secret-123', accountId: 'account-secret-123' };
+  globalThis.__providerRequest = async () => ({ status: 403, text: JSON.stringify({
+    error: { code: 'access_denied', message: `${credential.accessToken} ${credential.refreshToken} ${credential.accountId} qa@example.com Bearer another-secret ` + 'x'.repeat(2000), private: 'must-not-copy' },
+  }), headers: { 'x-request-id': 'req-safe', authorization: 'must-not-copy' } });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => credential }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'private-offer', instructions: '', items: [] }), error => {
+    const shown = JSON.stringify(error) + error.message;
+    for (const secret of [...Object.values(credential), 'qa@example.com', 'another-secret', 'must-not-copy', 'private-offer']) assert.equal(shown.includes(secret), false);
+    assert.ok(error.message.length < 500);
+    return true;
+  });
+});
+
+test('A voice proxy HTML failure reports the response type without copying its contents', async () => {
+  globalThis.__providerRequest = async () => ({ status: 404, text: '<html>private-network-information</html>', headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.equal(error.details.responseType, 'html');
+    assert.match(error.message, /HTML page/);
+    assert.doesNotMatch(error.message, /private-network-information/);
+    return true;
+  });
+});
 const { appLifecycle } = api.lifecycle;
 
 // ─── Fake WebRTC, microphone and audio ──────────────────────────────────────
@@ -357,6 +401,18 @@ test('A hung call-creation request times out without retrying or keeping the mic
   assert.equal(calls, 1);
   assert.equal(rtc.mic.track.stopped, true);
   assert.equal(pc().closed, true);
+});
+
+test('A refused voice call logs its startup stage and releases audio/peer resources', async () => {
+  const logs = [];
+  const failure = new X.VoiceStartError(404, { code: 'model_not_found', responseType: 'json' }, 'Voice model unavailable.');
+  const session = new S.VoiceSession({ name: 'codex', connect: async () => { throw failure; } }, {
+    onMessage() {}, onEnded() {}, onAudioBlocked() {}, log(label, data) { logs.push({ label, data }); },
+  });
+  await assert.rejects(session.start('test', []), error => error === failure);
+  assert.ok(logs.some(row => row.label === 'VOICE_START_FAILED' && row.data.stage === 'create call' && row.data.error.includes('model_not_found')));
+  assert.equal(rtc.mic.track.stopped, true);
+  assert.equal(rtc.pcs[0].closed, true);
 });
 
 test('The capability microphone probe times out and closes a stream granted afterward', async () => {
