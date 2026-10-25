@@ -61,6 +61,153 @@ const savedTexts = state => state.conversations[0].chatHistory.map(entry => entr
 // The texts in conversation `id`'s chat file.
 const fileTexts = (files, id) => JSON.parse(files.get(`${DIR}/chats/${id}.json`)).conversation.chatHistory.map(entry => entry.text);
 
+test('MCP checkpoint writes only two small index copies and restores a newer uncertainty marker', async () => {
+  const { plugin, files } = await loadFrom(savedState('Large chat ' + 'x'.repeat(1024 * 1024)));
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 42, remoteEffectsPossible: true };
+  await plugin.checkpointChatHistory(); // The original user turn is saved once.
+  const id = plugin.activeConversationId;
+  const oldFile = files.get(`${DIR}/chats/${id}.json`);
+  const writes = [];
+  const write = plugin.app.vault.adapter.write;
+  plugin.app.vault.adapter.write = async (path, data) => { writes.push([path, Buffer.byteLength(data)]); await write(path, data); };
+  await plugin.checkpointChatHistory();
+  assert.deepEqual(writes.map(([path]) => path), [NEXT, STATE]);
+  assert.ok(writes.every(([, bytes]) => bytes < 2000));
+  assert.equal(files.get(`${DIR}/chats/${id}.json`), oldFile);
+  const restored = pluginOn(plugin.app.vault.adapter);
+  await restored.loadChatHistory();
+  assert.deepEqual(restored.activeConversation.pendingTurn, { turnId: 'remote', startedAt: 42, remoteEffectsPossible: true });
+  assert.match(restored.chatHistory[0].text, /Large chat/);
+});
+
+test('A brand-new MCP turn saves its input once, then uses small checkpoints', async () => {
+  const { plugin } = await loadFrom();
+  plugin.chatHistory.push({ type: 'user', text: 'Create externally', turnId: 'new' });
+  plugin.touchConversation();
+  const id = plugin.activeConversationId;
+  plugin.activeConversation.pendingTurn = { turnId: 'new', startedAt: 1, remoteEffectsPossible: true };
+  await plugin.checkpointChatHistory();
+  assert.equal(await plugin.app.vault.adapter.exists(`${DIR}/chats/${id}.json`), true);
+  const restored = pluginOn(plugin.app.vault.adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversationId, id);
+  assert.equal(restored.activeConversation.pendingTurn.remoteEffectsPossible, true);
+  assert.equal(restored.listConversations().length, 1);
+  assert.equal(restored.agent.owesAnswer('new'), false);
+  assert.equal(restored.chatHistory[0].text, 'Create externally');
+});
+
+test('An index-only uncertain entry survives restart even when no input file exists', async () => {
+  const { adapter } = chatFiles();
+  const c = api.chatState.newConversation(1);
+  c.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  const entry = { ...api.chatState.indexEntry(c), pendingSavedAt: 10 };
+  adapter.stored.set(STATE, JSON.stringify({ version: 4, savedAt: 10, activeConversationId: c.id, conversations: [entry] }));
+  const restored = pluginOn(adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversationId, c.id);
+  assert.equal(restored.activeConversation.pendingTurn.remoteEffectsPossible, true);
+  assert.equal(restored.agent.owesAnswer('remote'), false);
+});
+
+test('A checkpoint cut off after its next copy is still uncertain on restart', async () => {
+  const { plugin } = await loadFrom(savedState('Original'));
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  await plugin.checkpointChatHistory();
+  const write = plugin.app.vault.adapter.write;
+  plugin.app.vault.adapter.write = async (path, data) => {
+    if (path === STATE) throw Error('Crash between copies');
+    await write(path, data);
+  };
+  await assert.rejects(plugin.checkpointChatHistory(), /Couldn't save/);
+  plugin.app.vault.adapter.write = write;
+  const restored = pluginOn(plugin.app.vault.adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversation.pendingTurn.remoteEffectsPossible, true);
+});
+
+test('A newer cleared index checkpoint overrides an old chat-file pending marker', async () => {
+  const { plugin } = await loadFrom(savedState('Original'));
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  await plugin.saveChatHistory();
+  delete plugin.activeConversation.pendingTurn;
+  await plugin.checkpointChatHistory();
+  const restored = pluginOn(plugin.app.vault.adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversation.pendingTurn, undefined);
+});
+
+test('A newer completed chat file wins over an older uncertain index checkpoint', async () => {
+  const { plugin, files } = await loadFrom(savedState('Original'));
+  const id = plugin.activeConversationId;
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  await plugin.checkpointChatHistory();
+  const index = JSON.parse(files.get(STATE));
+  const file = JSON.parse(files.get(`${DIR}/chats/${id}.json`));
+  file.savedAt = index.savedAt + 1;
+  delete file.conversation.pendingTurn;
+  files.set(`${DIR}/chats/${id}.json`, JSON.stringify(file));
+  const restored = pluginOn(plugin.app.vault.adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversation.pendingTurn, undefined);
+});
+
+test('An old full save finishes before a newer small checkpoint, never erasing its marker', async () => {
+  const { plugin } = await loadFrom(savedState('Original'));
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  await plugin.checkpointChatHistory();
+  plugin.activeConversation.pendingTurn.remoteEffectsPossible = false;
+  const adapter = plugin.app.vault.adapter, write = adapter.write;
+  let release, entered;
+  const blocked = new Promise(resolve => { entered = resolve; });
+  adapter.write = async (path, data) => {
+    if (!release && path.includes('/chats/')) {
+      await new Promise(resolve => { release = resolve; entered(); });
+    }
+    await write(path, data);
+  };
+  plugin.chatHistory.push({ type: 'user', text: 'Changed' });
+  const full = plugin.saveChatHistory();
+  await blocked;
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  const checkpoint = plugin.checkpointChatHistory();
+  release();
+  await Promise.all([full, checkpoint]);
+  const restored = pluginOn(adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversation.pendingTurn.remoteEffectsPossible, true);
+});
+
+test('A full save queued after a waiting checkpoint cannot overlap the checkpoint index writes', async () => {
+  const { plugin } = await loadFrom(savedState('Original'));
+  plugin.activeConversation.pendingTurn = { turnId: 'remote', startedAt: 1, remoteEffectsPossible: true };
+  await plugin.checkpointChatHistory();
+  const adapter = plugin.app.vault.adapter, write = adapter.write;
+  let release, entered, inWrite = 0, maximum = 0;
+  const blocked = new Promise(resolve => { entered = resolve; });
+  adapter.write = async (path, data) => {
+    maximum = Math.max(maximum, ++inWrite);
+    try {
+      if (!release && path.includes('/chats/')) await new Promise(resolve => { release = resolve; entered(); });
+      await Promise.resolve();
+      await write(path, data);
+    } finally { inWrite--; }
+  };
+  plugin.chatHistory.push({ type: 'assistant', text: 'First step' });
+  const first = plugin.saveChatHistory();
+  await blocked;
+  const checkpoint = plugin.checkpointChatHistory();
+  plugin.chatHistory.push({ type: 'assistant', text: 'Second step' });
+  const queued = plugin.saveChatHistory();
+  release();
+  await Promise.all([first, checkpoint, queued]);
+  assert.equal(maximum, 1);
+  const restored = pluginOn(adapter);
+  await restored.loadChatHistory();
+  assert.equal(restored.activeConversation.pendingTurn.remoteEffectsPossible, true);
+  assert.ok(restored.chatHistory.some(row => row.text === 'Second step'));
+});
+
 test('Nothing is saved before the saved chat has been read', async () => {
   const writes = [];
   let finishRead;

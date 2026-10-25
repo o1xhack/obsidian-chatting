@@ -570,6 +570,56 @@ for (const provider of ['anthropic', 'openai']) test(`${provider}: no headers wi
   appLifecycle.markVisible();
 });
 
+for (const provider of ['anthropic', 'openai']) test(`${provider}: a provably unsent desktop MCP request resumes once after the background`, async () => {
+  const { plugin, view } = await chatSetup(provider);
+  plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  const originalRequire = globalThis.require, originalWindow = globalThis.window;
+  let attempts = 0, posted = 0;
+  globalThis.window = globalThis;
+  globalThis.__isDesktopApp = true;
+  globalThis.require = id => id !== 'https' ? originalRequire(id) : { request(_url, _options, callback) {
+    const attempt = ++attempts, listeners = {};
+    let secure;
+    const req = {
+      on(event, fn) { listeners[event] = fn; },
+      write() { posted++; },
+      destroy() {},
+      end() {
+        const handlers = {};
+        callback({ statusCode: 200, setEncoding() {}, on(event, fn) { handlers[event] = fn; } });
+        queueMicrotask(() => {
+          handlers.data(sseText(streamEvents(provider, [text('Recovered')])));
+          handlers.end();
+        });
+      },
+    };
+    queueMicrotask(() => {
+      listeners.socket({ connecting: true, encrypted: true, on(_event, fn) { secure = fn; } });
+      if (attempt === 1) { appLifecycle.markHidden(); listeners.error(new Error('DNS failed before connection')); }
+      else secure();
+    });
+    return req;
+  } };
+  const fallback = transport(() => assert.fail('Should wait for the foreground'));
+  try {
+    const pending = view.handleUserMessage('Create only once', null);
+    await until(() => appLifecycle.isHidden());
+    assert.equal(posted, 0);
+    appLifecycle.markVisible();
+    await pending;
+    assert.equal(attempts, 2);
+    assert.equal(posted, 1);
+    assert.equal(fallback.length, 0);
+    assert.ok(plugin.chatHistory.some(row => row.type === 'assistant' && row.text === 'Recovered'));
+    assert.ok(!plugin.chatHistory.some(row => row.type === 'error'));
+  } finally {
+    appLifecycle.markVisible();
+    globalThis.require = originalRequire;
+    globalThis.window = originalWindow;
+    globalThis.__isDesktopApp = false;
+  }
+});
+
 test('Restart after an in-flight MCP request preserves uncertainty and refuses Continue', async () => {
   const { plugin, view, writes } = await chatSetup('openai');
   plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];

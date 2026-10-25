@@ -102,6 +102,8 @@ export default class ChatPlugin extends Plugin {
   private savedChats = new Map<string, string>();
   /** Each read or saved chat's API history then: unchanged, its attachments aren't counted against the budget's limit. */
   private savedMessages = new Map<string, UnifiedMessage[]>();
+  /** A full snapshot preserves a new MCP turn once; its later steps need only the index. */
+  private savedRemoteTurns = new Map<string, string>();
   /** Deleted conversations whose files go with the next save. */
   private deletedChats = new Set<string>();
 
@@ -625,7 +627,9 @@ export default class ChatPlugin extends Plugin {
     if (!this.chatHistoryLoaded || this.unloaded) return Promise.resolve();
     if (!this.chatStateWrite) return this.startChatStateWrite();
     if (!this.nextChatStateWrite) {
-      this.nextChatStateWrite = this.chatStateWrite.then(() => {
+      this.nextChatStateWrite = this.chatStateWrite.then(async () => {
+        // A checkpoint may have acquired the queue before this continuation.
+        while (this.chatStateWrite) await this.chatStateWrite;
         this.nextChatStateWrite = null;
         return this.startChatStateWrite();
       });
@@ -637,16 +641,53 @@ export default class ChatPlugin extends Plugin {
   /** Remote operations require a durable uncertainty marker before sending. */
   async checkpointChatHistory(): Promise<void> {
     if (!this.chatHistoryLoaded || this.unloaded) throw new Error("Chat storage isn't ready; remote tools were not sent.");
-    await this.saveChatHistory();
-    if (this.chatSaveFailed) throw new Error("Couldn't save the chat checkpoint; remote tools were not sent.");
+    const freshRemoteTurn = this.conversations.some(conversation => conversation.pendingTurn?.remoteEffectsPossible &&
+      this.savedRemoteTurns.get(conversation.id) !== `${conversation.pendingTurn.turnId}:${conversation.pendingTurn.startedAt}`);
+    // Preserve the original user turn and old-version uncertainty once. Later
+    // tool steps/retries must not rewrite multi-megabyte chat payloads.
+    if (freshRemoteTurn) {
+      await this.saveChatHistory();
+      if (this.chatSaveFailed) throw new Error("Couldn't save the chat checkpoint; remote tools were not sent.");
+      return;
+    }
+    // Share the full-save queue: a late older index must never erase a newer
+    // uncertainty marker. Deletions still need their normal file tombstones.
+    if (this.deletedChats.size) await this.saveChatHistory();
+    while (this.chatStateWrite) await this.chatStateWrite;
+    if (this.unloaded) throw new Error("Chat storage isn't ready; remote tools were not sent.");
+    let failed = false;
+    const write = this.writePendingIndex().catch(() => { failed = true; }).finally(() => {
+      if (this.chatStateWrite === write) this.chatStateWrite = null;
+    });
+    this.chatStateWrite = write;
+    this.trackChatStateWrite(write);
+    await write;
+    if (failed) throw new Error("Couldn't save the chat checkpoint; remote tools were not sent.");
+  }
+
+  /** Persist only small metadata before MCP, never serializing attachment/chat payloads. */
+  private async writePendingIndex(): Promise<void> {
+    const savedAt = this.lastChatStateSavedAt = Math.max(Date.now(), this.lastChatStateSavedAt + 1);
+    const index: ChatIndex = {
+      version: CHAT_STATE_VERSION, savedAt, activeConversationId: this.activeConversationId,
+      conversations: this.conversations.filter(conversation => conversation.id === this.activeConversationId || !isEmptyConversation(conversation))
+        .map(conversation => ({ ...indexEntry(conversation),
+          pendingSavedAt: conversation.unloaded ? conversation.pendingSavedAt : savedAt })),
+    };
+    const json = JSON.stringify(index);
+    await this.ensureFolder(this.pluginDataDir);
+    await this.app.vault.adapter.write(this.nextChatStatePath, json);
+    await this.app.vault.adapter.write(this.chatStatePath, json);
   }
 
   /** Publish the latest queued save immediately, including an unload save. */
   private trackChatStateWrite(write: Promise<void>): void {
     const app = this.app as ChatPersistenceApp;
-    app[CHAT_STATE_WRITE] = write;
-    void write.then(() => {
-      if (app[CHAT_STATE_WRITE] === write) delete app[CHAT_STATE_WRITE];
+    const earlier = app[CHAT_STATE_WRITE];
+    const tracked = earlier && earlier !== write ? Promise.all([earlier, write]).then(() => undefined) : write;
+    app[CHAT_STATE_WRITE] = tracked;
+    void tracked.then(() => {
+      if (app[CHAT_STATE_WRITE] === tracked) delete app[CHAT_STATE_WRITE];
     });
   }
 
@@ -687,16 +728,18 @@ export default class ChatPlugin extends Plugin {
       // An empty conversation is kept only while it is the active one.
       const kept = this.conversations
         .filter((conversation) => conversation.id === this.activeConversationId || !isEmptyConversation(conversation));
-      const changed: { conversation: ConversationRecord; json: string; text: string }[] = [];
+      const changed: { conversation: ConversationRecord; json: string; text: string; remoteTurn?: string }[] = [];
       for (const conversation of kept) {
         if (conversation.unloaded) continue;
-        const json = JSON.stringify(savedConversation(conversation));
+        const snapshot = savedConversation(conversation);
+        const json = JSON.stringify(snapshot);
         const digest = textDigest(json);
         if (this.savedChats.get(conversation.id) === digest) continue;
         const text = chatFileText(json, savedAt);
         // Bytes on disk (UTF-8), not characters.
         conversation.size = new TextEncoder().encode(text).length;
-        changed.push({ conversation, json: digest, text });
+        changed.push({ conversation, json: digest, text, ...(snapshot.pendingTurn?.remoteEffectsPossible
+          ? { remoteTurn: `${snapshot.pendingTurn.turnId}:${snapshot.pendingTurn.startedAt}` } : {}) });
       }
       const keptIds = new Set(kept.map((conversation) => conversation.id));
       // Deleted, and empty ones left behind (saved while active).
@@ -706,14 +749,17 @@ export default class ChatPlugin extends Plugin {
         savedAt,
         activeConversationId: this.activeConversationId,
         conversations: kept.map(conversation => ({ ...indexEntry(conversation),
+          pendingSavedAt: conversation.unloaded ? conversation.pendingSavedAt : savedAt,
           metadataSavedAt: !conversation.unloaded || this.pendingChatRenames.has(conversation) ? savedAt : conversation.metadataSavedAt ?? 0 })),
       };
       const { adapter } = this.app.vault;
       if (changed.length || gone.length) await this.ensureFolder(this.chatsDir);
-      for (const { conversation, json, text } of changed) {
+      for (const { conversation, json, text, remoteTurn } of changed) {
         await adapter.write(this.chatPath(conversation.id, ".next"), text);
         await adapter.write(this.chatPath(conversation.id), text);
         this.savedChats.set(conversation.id, json);
+        if (remoteTurn) this.savedRemoteTurns.set(conversation.id, remoteTurn);
+        else this.savedRemoteTurns.delete(conversation.id);
         this.savedMessages.set(conversation.id, [...conversation.agentMessages]);
       }
       // A file the index no longer lists would come back on the next load
@@ -723,6 +769,7 @@ export default class ChatPlugin extends Plugin {
         await adapter.write(this.chatPath(id, ".next"), tombstone);
         await adapter.write(this.chatPath(id), tombstone);
         this.savedChats.delete(id);
+        this.savedRemoteTurns.delete(id);
         this.savedMessages.delete(id);
         // Forgotten only once marked: a failed write keeps it for the next save.
         this.deletedChats.delete(id);
@@ -845,6 +892,14 @@ export default class ChatPlugin extends Plugin {
     const file = await this.readChatFile(conversation.id);
     const saved = file?.conversation;
     if (!saved || saved.id !== conversation.id) {
+      // A brand-new MCP turn may have only its small checkpoint on disk.
+      // Keep its uncertainty visible; there is no saved input to replay.
+      if (!file && conversation.pendingTurn?.remoteEffectsPossible &&
+          !await this.app.vault.adapter.exists(path).catch(() => true) &&
+          !await this.app.vault.adapter.exists(this.chatPath(conversation.id, ".next")).catch(() => true)) {
+        delete conversation.unloaded;
+        return true;
+      }
       if (file === undefined && await this.app.vault.adapter.exists(path).catch(() => false)) {
         await this.app.vault.adapter.rename(path, this.chatPath(`${conversation.id}.corrupt-${Date.now()}`)).catch(() => {});
       }
@@ -856,16 +911,21 @@ export default class ChatPlugin extends Plugin {
     // A file may have landed before its index during a crash. Preserve its
     // newer title/source; an explicit later index rename still wins. Unread
     // entries carry their own metadata revision through unrelated index saves.
-    const { title, customTitle, automaticTitle, titleSourceTurnId, updatedAt, metadataSavedAt = 0 } = conversation;
+    const { title, customTitle, automaticTitle, titleSourceTurnId, updatedAt, metadataSavedAt = 0, pendingTurn, pendingSavedAt } = conversation;
     const keepIndexTitle = this.pendingChatRenames.has(conversation) || metadataSavedAt >= (file.savedAt ?? 0);
     delete conversation.automaticTitle;
     delete conversation.titleSourceTurnId;
     Object.assign(conversation, saved, { chatHistory: restoreImages(saved.chatHistory, saved.agentMessages),
       updatedAt: Math.max(updatedAt, saved.updatedAt), metadataSavedAt: keepIndexTitle ? metadataSavedAt : file.savedAt ?? 0 });
+    if (pendingSavedAt !== undefined && pendingSavedAt >= (file.savedAt ?? 0)) {
+      if (pendingTurn) conversation.pendingTurn = pendingTurn;
+      else delete conversation.pendingTurn;
+    } else if (!saved.pendingTurn) delete conversation.pendingTurn;
     if (keepIndexTitle) Object.assign(conversation, { title, customTitle },
       !customTitle && automaticTitle !== undefined ? { automaticTitle } : {}, !customTitle && titleSourceTurnId !== undefined ? { titleSourceTurnId } : {});
     delete conversation.unloaded;
     this.savedChats.set(conversation.id, textDigest(JSON.stringify(savedConversation({ ...saved }))));
+    if (saved.pendingTurn?.remoteEffectsPossible) this.savedRemoteTurns.set(conversation.id, `${saved.pendingTurn.turnId}:${saved.pendingTurn.startedAt}`);
     this.savedMessages.set(conversation.id, [...conversation.agentMessages]);
     return true;
   }
@@ -1354,7 +1414,9 @@ function isIndexEntry(entry: unknown): boolean {
   if ("titleSourceTurnId" in entry && typeof entry.titleSourceTurnId !== "string" && entry.titleSourceTurnId !== null) return false;
   if ("customTitle" in entry && typeof entry.customTitle !== "boolean") return false;
   const number = (field: unknown) => typeof field === "number" && Number.isFinite(field) && field >= 0;
-  return ["createdAt", "updatedAt", "size", "metadataSavedAt"].every((field) => !(field in entry) || number(entry[field]));
+  if ("pendingTurn" in entry && (!isRecord(entry.pendingTurn) || typeof entry.pendingTurn.turnId !== "string" ||
+      !number(entry.pendingTurn.startedAt) || ("remoteEffectsPossible" in entry.pendingTurn && typeof entry.pendingTurn.remoteEffectsPossible !== "boolean"))) return false;
+  return ["createdAt", "updatedAt", "size", "metadataSavedAt", "pendingSavedAt"].every((field) => !(field in entry) || number(entry[field]));
 }
 
 /**

@@ -54,6 +54,8 @@ export interface ConversationRecord {
   usage?: ConversationUsage;
   /** Revision of title metadata in the index; carried unchanged for unread chats. */
   metadataSavedAt?: number;
+  /** Revision of the small index checkpoint, independent of chat-file contents. */
+  pendingSavedAt?: number;
   /** Size of its saved file in bytes (in the index). */
   size?: number;
   /**
@@ -64,10 +66,10 @@ export interface ConversationRecord {
 }
 
 /** A conversation in the index (`chat-state.json`, version 4). */
-export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size" | "metadataSavedAt">;
+export type ConversationEntry = Pick<ConversationRecord, "id" | "title" | "automaticTitle" | "titleSourceTurnId" | "customTitle" | "createdAt" | "updatedAt" | "size" | "metadataSavedAt" | "pendingTurn" | "pendingSavedAt">;
 
 /** A conversation as saved in its file: without the index-only fields. */
-export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded" | "metadataSavedAt">;
+export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded" | "metadataSavedAt" | "pendingSavedAt">;
 
 /** The turn a conversation was running. */
 export interface PendingTurn {
@@ -177,6 +179,8 @@ function indexedConversation(item: StateRecord): ConversationRecord {
     agentMessages: [],
     ...(typeof size === "number" && Number.isFinite(size) && size >= 0 ? { size } : {}),
     ...(typeof item.metadataSavedAt === "number" ? { metadataSavedAt: item.metadataSavedAt } : {}),
+    ...(typeof item.pendingSavedAt === "number" ? { pendingSavedAt: item.pendingSavedAt } : {}),
+    ...pendingMarker(item.pendingTurn),
     unloaded: true,
   };
 }
@@ -194,10 +198,6 @@ function savedRecord(item: StateRecord): ConversationRecord {
   const notes = arrayOf<unknown>(item.notes).filter((note): note is string => typeof note === "string");
   const pendingMessages = arrayOf<unknown>(item.pendingMessages).filter((text): text is string => typeof text === "string");
   // Optional, so no new format version: an older plugin just drops it.
-  const pending = item.pendingTurn;
-  const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
-    ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) }
-    : undefined;
   return {
     id: item.id as string,
     title: customTitle ? item.title as string : automaticTitle,
@@ -211,10 +211,16 @@ function savedRecord(item: StateRecord): ConversationRecord {
     agentMessages: withoutLargeToolText(withoutOldToolImages(arrayOf<UnifiedMessage>(item.agentMessages))),
     ...(notes.length ? { notes } : {}),
     ...(pendingMessages.length ? { pendingMessages } : {}),
-    ...(pendingTurn ? { pendingTurn } : {}),
+    ...pendingMarker(item.pendingTurn),
     // Optional too: an older plugin drops it.
     ...savedUsage(item.usage),
   };
+}
+
+function pendingMarker(pending: unknown): { pendingTurn?: PendingTurn } {
+  return isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
+    ? { pendingTurn: { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) } }
+    : {};
 }
 
 /**
@@ -239,10 +245,11 @@ export function chatFileText(conversation: string, savedAt: number): string {
 export const DELETED_CHAT_FILE = `{"version":${CHAT_STATE_VERSION},"deleted":true}`;
 
 /** A conversation's index entry. */
-export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size, metadataSavedAt }: ConversationRecord): ConversationEntry {
+export function indexEntry({ id, title, automaticTitle, titleSourceTurnId, customTitle, createdAt, updatedAt, size, metadataSavedAt, pendingTurn, pendingSavedAt }: ConversationRecord): ConversationEntry {
   return {
     id, title, ...(automaticTitle !== undefined ? { automaticTitle } : {}), ...(titleSourceTurnId !== undefined ? { titleSourceTurnId } : {}),
     customTitle, createdAt, updatedAt, ...(size !== undefined ? { size } : {}), ...(metadataSavedAt !== undefined ? { metadataSavedAt } : {}),
+    ...(pendingTurn ? { pendingTurn: { ...pendingTurn } } : {}), ...(pendingSavedAt !== undefined ? { pendingSavedAt } : {}),
   };
 }
 
@@ -285,7 +292,7 @@ export function updateConversationTitle(conversation: ConversationRecord): void 
 
 /** Nothing said yet (a conversation not read yet was saved with content). */
 export function isEmptyConversation(conversation: ConversationRecord): boolean {
-  return !conversation.unloaded && conversation.chatHistory.length === 0 && conversation.agentMessages.length === 0;
+  return !conversation.unloaded && !conversation.pendingTurn?.remoteEffectsPossible && conversation.chatHistory.length === 0 && conversation.agentMessages.length === 0;
 }
 
 /** Most recently used first. */
@@ -298,7 +305,7 @@ export function newestFirst(conversations: ConversationRecord[]): ConversationRe
  * history from its last compaction on, image and file data only in the API
  * history.
  */
-export function savedConversation({ size: _size, unloaded: _unloaded, metadataSavedAt: _metadataSavedAt, ...conversation }: ConversationRecord): SavedConversation {
+export function savedConversation({ size: _size, unloaded: _unloaded, metadataSavedAt: _metadataSavedAt, pendingSavedAt: _pendingSavedAt, ...conversation }: ConversationRecord): SavedConversation {
   const titled: ConversationRecord = { ...conversation };
   updateConversationTitle(titled);
   return {

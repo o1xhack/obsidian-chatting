@@ -1,6 +1,6 @@
 import type { ContentBlock, FileAttachment, ImageAttachment, McpServer, Provider, StreamOptions, TokenUsage, UnifiedMessage, UnifiedResponse } from "../types";
 import { ProviderError, StreamCutError } from "./errors";
-import { StreamDropped, streamSSE, type StreamResult } from "./stream";
+import { RequestNotSent, StreamDropped, streamSSE, type StreamResult } from "./stream";
 import { serializeRequest } from "./request-budget";
 import { isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
@@ -42,6 +42,7 @@ export async function sendResponsesRequest(
   try {
     response = await streamSSE(url, { headers, body: requestBody, noFallback: remoteEnabled }, collected.onEvent, stream.signal);
   } catch (error) {
+    if (error instanceof RequestNotSent && !collected.serverTool()) throw error;
     if (collected.serverTool() || remoteEnabled) return collected.remoteFailure(error instanceof Error ? error.message : String(error));
     if (error instanceof StreamDropped) throw new StreamCutError(name, collected.serverTool());
     throw error;

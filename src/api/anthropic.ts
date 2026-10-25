@@ -1,7 +1,7 @@
 import { type ModelOption, cachedCatalog, catalogIdentity, catalogModel, resolveThinkingLevel } from "./model-catalog";
 import { serializeRequest } from "./request-budget";
 import { ProviderError, StreamCutError } from "./errors";
-import { StreamDropped, streamSSE } from "./stream";
+import { RequestNotSent, StreamDropped, streamSSE } from "./stream";
 import { asRecord, getNestedString, isRecord } from "../json";
 import { withoutOldToolImages } from "../agent/history";
 import { ANTHROPIC_MCP_BETA, activeServers, anthropicMcp, anthropicServerCalls, withServerCalls, withoutGoneServerCalls, mcpServerIdentities } from "./mcp";
@@ -176,7 +176,7 @@ export async function sendAnthropicMessage(
   return toResponse(complete);
 
   function withReceipts(error: unknown): unknown {
-    if (!collected.serverTool() && !servers.length) return error;
+    if (!collected.serverTool() && (!servers.length || error instanceof RequestNotSent)) return error;
     const source = error instanceof Error ? error.message : String(error);
     const partial = toResponse(collected.snapshot());
     if (!partial.serverCalls?.length) partial.content.push({ type: "text", text: "Remote MCP request outcome unknown. Check the external service before repeating this request." });
