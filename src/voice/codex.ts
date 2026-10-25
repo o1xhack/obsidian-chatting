@@ -126,16 +126,26 @@ function voiceFailure(status: number, body: string, headers: Record<string, stri
       .replace(/[\r\n\t]+/g, " ").slice(0, 350);
   };
   let data: unknown;
-  try { data = JSON.parse((body ?? "").slice(0, 16_384)); } catch { /* Non-JSON remains a status-only error. */ }
-  const error = isRecord(data) && isRecord(data.error) ? data.error : undefined;
-  const code = typeof error?.code === "string" && /^[a-zA-Z][\w.-]{0,79}$/.test(error.code) ? redact(error.code) : undefined;
-  const message = typeof error?.message === "string" ? redact(error.message)
-    : isRecord(data) && typeof data.error === "string" ? redact(data.error) : undefined;
+  let json = false;
+  try { data = JSON.parse((body ?? "").slice(0, 16_384)); json = true; } catch { /* Only known plain-text errors are copied below. */ }
+  const packet = isRecord(data) ? data : {};
+  const error = isRecord(packet.error) ? packet.error : {};
+  const string = (...values: unknown[]): string | undefined => values.find((value): value is string => typeof value === "string" && !!value.trim());
+  const rawCode = string(error.code, error.type, packet.code);
+  const code = rawCode && /^[a-zA-Z][\w.-]{0,79}$/.test(rawCode) ? redact(rawCode) : undefined;
+  const contentType = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? "";
+  const html = !json && (/^\s*</.test(body ?? "") || /text\/html/i.test(contentType));
+  const plain = (body ?? "").trim();
+  const knownText = !json && !html && /^(?:voice session access denied|not found|unauthorized|forbidden|model not found|too many requests)\.?$/i.test(plain) ? plain : undefined;
+  const rawMessage = string(error.message, packet.error, packet.message, packet.detail, knownText);
+  const message = rawMessage && /\bv=0[\r\n]|(?:^|[\r\n])(?:a=|m=audio|c=IN)/.test(rawMessage)
+    ? "The voice service rejected the connection description."
+    : rawMessage ? redact(rawMessage) : undefined;
   const requestId = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === "x-request-id")?.[1];
   return new VoiceStartError(status, {
     ...(code ? { code } : {}),
     ...(requestId && /^[\w-]{1,128}$/.test(requestId) ? { requestId: redact(requestId) } : {}),
-    responseType: isRecord(data) ? "json" : /^\s*</.test(body ?? "") ? "html" : "text",
+    responseType: json ? "json" : html ? "html" : "text",
   }, message);
 }
 

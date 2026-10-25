@@ -51,6 +51,46 @@ test('A voice proxy HTML failure reports the response type without copying its c
     return true;
   });
 });
+
+for (const [packet, message] of [
+  [{ detail: 'Not Found' }, 'Not Found'],
+  [{ message: 'Voice session access denied.' }, 'Voice session access denied.'],
+  [{ error: 'Voice session access denied.' }, 'Voice session access denied.'],
+  [{ error: { type: 'access_denied', message: 'Voice model unavailable.' } }, 'Voice model unavailable.'],
+]) test(`Voice diagnostics retain the service's ${JSON.stringify(packet)} error shape`, async () => {
+  globalThis.__providerRequest = async () => ({ status: 404, text: JSON.stringify(packet), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.equal(error.details.responseType, 'json');
+    assert.ok(error.message.includes(message));
+    return true;
+  });
+});
+
+test('Voice diagnostics copy known plain-text service errors but omit arbitrary text and proxy content', async () => {
+  for (const [body, headers, expected] of [
+    ['Voice session access denied.', {}, true],
+    ['private-network-information', {}, false],
+    ['Not Found', { 'content-type': 'text/html' }, false],
+  ]) {
+    globalThis.__providerRequest = async () => ({ status: 403, text: body, headers });
+    const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+    await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+      assert.equal(error.message.includes(body), expected);
+      return true;
+    });
+  }
+});
+
+test('A service validation error cannot copy the submitted SDP into voice diagnostics', async () => {
+  globalThis.__providerRequest = async () => ({ status: 400, text: JSON.stringify({ detail: 'Invalid SDP: v=0\r\nc=IN IP4 192.0.2.44\r\na=ice-pwd:private-ice-password' }), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.match(error.message, /rejected the connection description/);
+    assert.doesNotMatch(error.message + JSON.stringify(error.details), /192\.0\.2\.44|private-ice-password/);
+    return true;
+  });
+});
 const { appLifecycle } = api.lifecycle;
 
 // ─── Fake WebRTC, microphone and audio ──────────────────────────────────────
