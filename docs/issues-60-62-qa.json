@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-25",
+  "productionSha256": "9ae718f789ade0e0e7c60fe9836b8547ec2a3de165ae5266731c7aa07f72c285",
+  "probeSha256": "be23d164ef9bf0e9de50d070465f5458820229428eb3eee4b16b52082e80bc72",
+  "probeDifference": "Only a test hook exposing VoiceSession was appended to the same production bundle. The hook is removed after QA.",
+  "automated": {
+    "passed": 912,
+    "failed": 0,
+    "typescript": true,
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "productionBuild": true
+  },
+  "nativeState": {
+    "scope": "Native Electron checkpoint writes and one live OAuth portable summary",
+    "checks": [
+      "changed-step-writes-only-small-index",
+      "live-summary-keeps-earliest-fact-and-units",
+      "raw-prefix-released",
+      "rollback-snapshot-unchanged"
+    ],
+    "sha256": "be23d164ef9bf0e9de50d070465f5458820229428eb3eee4b16b52082e80bc72",
+    "checkpointWrites": [
+      {
+        "path": ".obsidian/plugins/chatting-with-ai/chat-state.next.json",
+        "bytes": 25876
+      },
+      {
+        "path": ".obsidian/plugins/chatting-with-ai/chat-state.json",
+        "bytes": 25876
+      }
+    ],
+    "portableSummary": {
+      "retainedMessages": 3,
+      "hasEarliestFact": true,
+      "hasMetricConstraint": true,
+      "rawPrefixReleased": true,
+      "rollbackSnapshotUntouched": true
+    },
+    "passed": true
+  },
+  "nativeVoice": {
+    "scope": "Real Codex service using a silent generated audio track; no microphone capture, no delegated work",
+    "sha256": "be23d164ef9bf0e9de50d070465f5458820229428eb3eee4b16b52082e80bc72",
+    "events": [
+      "session.started",
+      "session.closed"
+    ],
+    "callCreated": true,
+    "connected": true,
+    "passed": true,
+    "tracksEnded": true
+  },
+  "limitations": [
+    "The reporter account/Windows/Android environment is not reproduced; #62 is still open pending a diagnostic response.",
+    "API raw-history retention is bounded by compaction windows; visible chat text is still retained.",
+    "A failed portable summary preserves raw context and retries after a cooldown."
+  ]
+}
