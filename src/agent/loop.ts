@@ -175,6 +175,8 @@ export class AgentLoop {
   private vaultInstructions: string | null = null;
   /** The skills part of the system prompt, read with the instructions. */
   private skills: string | null = null;
+  /** Failed portable-history work is retried later, without dropping raw context. */
+  private retentionFailures = new WeakMap<UnifiedMessage, number>();
 
   constructor(app: App, settings: ChatSettings) {
     this.app = app;
@@ -331,10 +333,13 @@ export class AgentLoop {
       if (marker?.compaction && !marker.compaction.summary && !replayable && index > 0) {
         const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
         if (isStopped()) return;
-        marker.compaction = { summary };
+        this.messages = this.messages.map((message, position) => position === index ? { ...message, compaction: { summary } } : message);
         handedOff = true;
         debugLog(this.app, "COMPACTED", { reason: "provider switch" });
       }
+      if (handedOff) this.trimForRetention();
+      else await this.retainPortableHistory(settings, callbacks, isStopped);
+      if (isStopped()) return;
       const option = catalogModel(settings.provider, settings.model);
       const threshold = compactThreshold(settings.provider, option, settings);
       if (!handedOff && !isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
@@ -346,6 +351,37 @@ export class AgentLoop {
       }
     } catch (e) {
       debugLog(this.app, "COMPACTION_FAILED", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /**
+   * Keep at most two native compaction windows of raw history, backed by
+   * a readable rolling summary. Opaque provider items cannot stand in for
+   * deleted text when another provider/model/account takes over.
+   * Install the summary only after it succeeds; failure leaves history intact.
+   */
+  private async retainPortableHistory(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
+    const boundaries = this.messages.flatMap((message, index) => message.compaction ? [index] : []);
+    const index = boundaries.at(-2) ?? -1;
+    if (index <= 0) return;
+    const marker = this.messages[index];
+    if (marker.compaction?.summary) { this.trimForRetention(); return; }
+    const failedAt = this.retentionFailures.get(marker);
+    if (failedAt !== undefined && Date.now() - failedAt < 60_000) return;
+    try {
+      const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
+      if (isStopped()) return;
+      // New objects preserve preflight/edit rollback snapshots and detach the
+      // old response cursor. Native replay still starts at its latest item.
+      this.messages = this.messages.map((message, position) => position === index
+        ? { ...message, compaction: { ...message.compaction, summary } } : message);
+      this.trimForRetention();
+      this.retentionFailures.delete(marker);
+      debugLog(this.app, "COMPACTED", { reason: "portable history", chars: summary.length });
+    } catch (error) {
+      if (isStopped()) return;
+      this.retentionFailures.set(marker, Date.now());
+      debugLog(this.app, "COMPACTION_FAILED", { reason: "portable history", error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -676,6 +712,8 @@ ${mentioned.text}` : buildContextMessage(context);
     let overflowCompacted = false;
 
     for (let i = 0; i < maxIterations; i++) {
+      if (isStopped()) return;
+      await this.retainPortableHistory(turnSettings, callbacks, isStopped);
       if (isStopped()) return;
       callbacks.onThinking();
       if (isStopped()) return;

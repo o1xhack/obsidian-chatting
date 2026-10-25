@@ -154,6 +154,10 @@ npm run svelte-check   # Svelte check
 
 ## Debug
 
+### Native test vault
+
+Use `/Volumes/StudioSSD/Obsidian/ob 插件测试` for native Obsidian QA. If the CLI reports `Vault not found`, open that vault with `open 'obsidian://open?vault=ob%20%E6%8F%92%E4%BB%B6%E6%B5%8B%E8%AF%95'`, then retry the CLI. Opening the dedicated test vault is part of the testing workflow; do not leave native validation unfinished just because it was closed. Verify `app.vault.adapter.getBasePath()` before installing or executing probes.
+
 Turn on **Debug log** in the settings to write each message as sent (with its context lines), the model's answers with their text and tool calls, each tool call with its input and result, errors, and in voice each data-channel event and what was said, to `<vault-config-dir>/plugins/chatting-with-ai/debug.log` (`src/debug.ts`). It includes the user's messages, never keys or tokens. The row's Copy and Clear buttons and the "Copy debug log" command get it off a phone.
 
 Stream recovery safety: MCP-capable POSTs disable transport fallback after a lost response; absent headers do not prove absent external effects. Optional pendingTurn.remoteEffectsPossible prevents Continue after restart for an uncertain remote request. Continue requires the original visible user turn, retains its selection fingerprint, and re-reads MCP settings on each request.

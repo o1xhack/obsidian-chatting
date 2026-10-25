@@ -378,7 +378,9 @@ test('Clearing a manually compacting chat cancels it and unlocks the composer im
 for (const change of ['provider', 'model', 'api-key', 'chatgpt-account']) test(`Repeated opaque compactions preserve the earliest fact through saved-history ${change} changes`, async () => {
   const provider = change === 'chatgpt-account' ? 'chatgpt-oauth' : 'openai';
   const initial = settings(provider);
-  transport((body, index) => compactedResponsesAnswer(provider, `Answer ${index}`, index));
+  transport((body, index) => isSummaryRequest(body)
+    ? sse(streamEvents(provider, [text('Portable summary: archive key EARLIEST-7319.')], 'end_turn', index))
+    : compactedResponsesAnswer(provider, `Answer ${index}`, index));
   const agent = new api.AgentLoop(vaultApp().app, initial);
   await agent.run('Earliest fact: the archive key is EARLIEST-7319.', callbacks());
   await agent.run('Second compaction', callbacks());
@@ -422,6 +424,70 @@ test('A multi-window portable summary carries earliest facts forward through eve
   assert.ok(requests.length > 2);
   assert.match(JSON.stringify(agent.exportMessages()), /EARLIEST-FACT and LATEST-FACT/);
   for (const body of requests) assert.equal(body.tools, undefined);
+});
+
+for (const provider of ['openai', 'chatgpt-oauth']) test(`${provider}: ten native compactions bound raw history and retain portable facts`, async () => {
+  const loopSettings = settings(provider);
+  const agent = new api.AgentLoop(vaultApp().app, loopSettings);
+  const requests = transport((body, index) => {
+    if (isSummaryRequest(body)) {
+      assert.match(JSON.stringify(body), /EARLIEST-FACT/);
+      assert.equal(body.tools, undefined);
+      return sse(streamEvents(provider, [text('Remember EARLIEST-FACT and the user constraints.')], 'end_turn', index));
+    }
+    return compactedResponsesAnswer(provider, `Answer ${index}`, index);
+  });
+  for (let i = 0; i < 10; i++) {
+    await agent.run(`${i === 0 ? 'EARLIEST-FACT' : 'Next window'} ${'x'.repeat(8192)}`, callbacks());
+    const saved = JSON.parse(JSON.stringify(agent.exportMessages()));
+    assert.match(JSON.stringify(saved), /EARLIEST-FACT/);
+    assert.ok(saved.length <= 7, `raw history grew to ${saved.length} messages`);
+    agent.importMessages(saved);
+  }
+  assert.ok(requests.filter(isSummaryRequest).length >= 7);
+  assert.ok(JSON.stringify(agent.exportMessages()).length < 25000);
+});
+
+test('A failed handoff still sends the older portable summary whose raw prefix was released', async () => {
+  const agent = new api.AgentLoop(vaultApp().app, settings('anthropic'));
+  agent.importMessages([
+    { role: 'assistant', content: [text('First')], compaction: { summary: 'EARLIEST-FACT' }, replay: { provider: 'openai', items: [] } },
+    { role: 'user', content: 'Later' },
+    { role: 'assistant', content: [text('Second')], compaction: {}, replay: { provider: 'openai', items: [] } },
+  ]);
+  const requests = transport((body, index) => isSummaryRequest(body)
+    ? { status: 400, json: { error: { message: 'Summary refused' } } }
+    : sse(streamEvents('anthropic', [text('Answer')], 'end_turn', index)));
+  await agent.run('Follow up', callbacks());
+  assert.match(JSON.stringify(requests.at(-1).messages), /EARLIEST-FACT/);
+  assert.match(JSON.stringify(agent.exportMessages()), /EARLIEST-FACT/);
+});
+
+for (const outcome of ['failure', 'stopped', 'empty']) test(`Portable retention ${outcome} keeps raw history and rollback snapshots`, async () => {
+  const agent = new api.AgentLoop(vaultApp().app, settings('openai'));
+  const original = [{ role: 'user', content: 'EARLIEST-FACT', turnId: 'original' },
+    { role: 'assistant', content: [text('First')], compaction: {} },
+    { role: 'user', content: 'Next', turnId: 'next' },
+    { role: 'assistant', content: [text('Second')], compaction: {} }];
+  agent.importMessages(original);
+  let summaries = 0;
+  agent.summarize = async () => {
+    summaries++;
+    if (outcome === 'stopped') agent.abort();
+    if (outcome === 'failure') throw Error('Summary unavailable');
+    // An empty response is rejected by the actual summarize implementation.
+    if (outcome === 'empty') throw Error('The summary came back empty.');
+    return 'Summary EARLIEST-FACT';
+  };
+  const stopped = () => outcome === 'stopped';
+  await agent.retainPortableHistory(settings('openai'), callbacks(), stopped);
+  assert.match(JSON.stringify(agent.exportMessages()), /EARLIEST-FACT/);
+  assert.equal(original[1].compaction.summary, undefined);
+  assert.equal(agent.exportMessages().length, original.length);
+  if (outcome !== 'stopped') {
+    await agent.retainPortableHistory(settings('openai'), callbacks(), () => false);
+    assert.equal(summaries, 1); // Failed work has a cooldown, not a retry per step.
+  }
 });
 
 test('A failure partway through a rolling summary retains the whole original history', async () => {

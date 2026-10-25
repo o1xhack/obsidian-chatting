@@ -22,6 +22,13 @@ export function afterCompaction(messages: UnifiedMessage[], replayable: (message
     if (!compaction) continue;
     if (replayable(messages[i])) return messages.slice(i);
     if (compaction.summary) return [summaryMessage(compaction.summary), ...messages.slice(i)];
+    // If a handoff summary fails, an older portable summary still carries
+    // facts whose raw prefix has already been released. Include it in the
+    // fallback transcript instead of silently dropping those facts.
+    for (let earlier = i - 1; earlier >= 0; earlier--) {
+      const summary = messages[earlier].compaction?.summary;
+      if (summary) return [summaryMessage(summary), ...messages.slice(earlier)];
+    }
     return messages;
   }
   return messages;

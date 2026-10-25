@@ -1,0 +1,268 @@
+{
+  "baseline": "0.11.0 / aefc8d5",
+  "node": "v26.9.0",
+  "transport": [
+    {
+      "mode": "dns",
+      "mcp": false,
+      "events": [
+        "socket",
+        "error:ENOTFOUND"
+      ],
+      "nodeError": "ENOTFOUND",
+      "serverRequests": 0,
+      "bytesReceived": 0,
+      "fallbacks": 1,
+      "failed": false
+    },
+    {
+      "mode": "dns",
+      "mcp": true,
+      "events": [
+        "socket",
+        "error:ENOTFOUND"
+      ],
+      "nodeError": "ENOTFOUND",
+      "serverRequests": 0,
+      "bytesReceived": 0,
+      "fallbacks": 0,
+      "failed": true
+    },
+    {
+      "mode": "refused",
+      "mcp": false,
+      "events": [
+        "socket",
+        "error:ECONNREFUSED"
+      ],
+      "nodeError": "ECONNREFUSED",
+      "serverRequests": 0,
+      "bytesReceived": 0,
+      "fallbacks": 1,
+      "failed": false
+    },
+    {
+      "mode": "refused",
+      "mcp": true,
+      "events": [
+        "socket",
+        "error:ECONNREFUSED"
+      ],
+      "nodeError": "ECONNREFUSED",
+      "serverRequests": 0,
+      "bytesReceived": 0,
+      "fallbacks": 0,
+      "failed": true
+    },
+    {
+      "mode": "certificate",
+      "mcp": false,
+      "events": [
+        "socket",
+        "connect",
+        "error:DEPTH_ZERO_SELF_SIGNED_CERT"
+      ],
+      "nodeError": "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "serverRequests": 0,
+      "bytesReceived": 0,
+      "fallbacks": 1,
+      "failed": false
+    },
+    {
+      "mode": "certificate",
+      "mcp": true,
+      "events": [
+        "socket",
+        "connect",
+        "error:DEPTH_ZERO_SELF_SIGNED_CERT"
+      ],
+      "nodeError": "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "serverRequests": 0,
+      "bytesReceived": 0,
+      "fallbacks": 0,
+      "failed": true
+    },
+    {
+      "mode": "response-lost",
+      "mcp": false,
+      "events": [
+        "socket",
+        "connect",
+        "secureConnect",
+        "finish",
+        "error:ECONNRESET"
+      ],
+      "nodeError": "ECONNRESET",
+      "serverRequests": 1,
+      "bytesReceived": 2,
+      "fallbacks": 1,
+      "failed": false
+    },
+    {
+      "mode": "response-lost",
+      "mcp": true,
+      "events": [
+        "socket",
+        "connect",
+        "secureConnect",
+        "finish",
+        "error:ECONNRESET"
+      ],
+      "nodeError": "ECONNRESET",
+      "serverRequests": 1,
+      "bytesReceived": 2,
+      "fallbacks": 0,
+      "failed": true
+    },
+    {
+      "provider": "openai",
+      "mode": "adapter-before-connect",
+      "remoteEffectsPossible": true,
+      "message": "connect ECONNREFUSED Remote MCP tools may already have run; check their results before retrying."
+    },
+    {
+      "provider": "anthropic",
+      "mode": "adapter-before-connect",
+      "remoteEffectsPossible": true,
+      "message": "connect ECONNREFUSED Remote MCP tools may already have run; check their results before retrying."
+    }
+  ],
+  "checkpoints": [
+    {
+      "markerOnlyChange": [
+        {
+          "path": ".obsidian/plugins/chatting-with-ai/chats/chat-mvo93dii-8untdg.next.json",
+          "bytes": 1049060
+        },
+        {
+          "path": ".obsidian/plugins/chatting-with-ai/chats/chat-mvo93dii-8untdg.json",
+          "bytes": 1049060
+        },
+        {
+          "path": ".obsidian/plugins/chatting-with-ai/chat-state.next.json",
+          "bytes": 269
+        },
+        {
+          "path": ".obsidian/plugins/chatting-with-ai/chat-state.json",
+          "bytes": 269
+        }
+      ],
+      "unchangedCheckpoint": [
+        {
+          "path": ".obsidian/plugins/chatting-with-ai/chat-state.next.json",
+          "bytes": 269
+        },
+        {
+          "path": ".obsidian/plugins/chatting-with-ai/chat-state.json",
+          "bytes": 269
+        }
+      ]
+    }
+  ],
+  "compaction": [
+    {
+      "provider": "openai",
+      "windows": 1,
+      "savedMessages": 2,
+      "savedBytes": 65944,
+      "requestBytes": 67
+    },
+    {
+      "provider": "openai",
+      "windows": 2,
+      "savedMessages": 4,
+      "savedBytes": 131736,
+      "requestBytes": 67
+    },
+    {
+      "provider": "openai",
+      "windows": 4,
+      "savedMessages": 8,
+      "savedBytes": 263320,
+      "requestBytes": 67
+    },
+    {
+      "provider": "openai",
+      "windows": 8,
+      "savedMessages": 16,
+      "savedBytes": 526488,
+      "requestBytes": 67
+    },
+    {
+      "provider": "chatgpt-oauth",
+      "windows": 1,
+      "savedMessages": 2,
+      "savedBytes": 65951,
+      "requestBytes": 67
+    },
+    {
+      "provider": "chatgpt-oauth",
+      "windows": 2,
+      "savedMessages": 4,
+      "savedBytes": 131750,
+      "requestBytes": 67
+    },
+    {
+      "provider": "chatgpt-oauth",
+      "windows": 4,
+      "savedMessages": 8,
+      "savedBytes": 263348,
+      "requestBytes": 67
+    },
+    {
+      "provider": "chatgpt-oauth",
+      "windows": 8,
+      "savedMessages": 16,
+      "savedBytes": 526544,
+      "requestBytes": 67
+    },
+    {
+      "twoWindowDeletionLosesPortableEarliestFact": true
+    }
+  ],
+  "voice": [
+    {
+      "body": {
+        "error": {
+          "code": "model_not_found",
+          "message": "Requested voice model is unavailable."
+        }
+      },
+      "shownError": "Couldn't start voice (HTTP 404).",
+      "renewals": 0
+    },
+    {
+      "body": {
+        "error": {
+          "code": "route_not_found",
+          "message": "Requested endpoint was not found."
+        }
+      },
+      "shownError": "Couldn't start voice (HTTP 404).",
+      "renewals": 0
+    },
+    {
+      "body": "<html>Corporate proxy: route not found</html>",
+      "shownError": "Couldn't start voice (HTTP 404).",
+      "renewals": 0
+    }
+  ],
+  "regression": {
+    "tests": 396,
+    "passed": 396,
+    "failed": 0,
+    "scope": [
+      "stream-desktop",
+      "mcp",
+      "background",
+      "compaction",
+      "provider-history",
+      "chat-saving",
+      "voice"
+    ]
+  },
+  "liveVoice": {
+    "verified": false,
+    "reason": "Obsidian CLI returned Vault not found; no account or vault settings were changed."
+  }
+}

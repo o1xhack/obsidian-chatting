@@ -54,7 +54,7 @@ export const bundled = await build({
     export * as attachmentHistory from './src/attachment-history';
     export { AttachmentPreparation } from './src/ui/attachment-preparation';
     export { buildSystemPrompt } from './src/agent/system-prompt';
-    export { streamSSE, createSSEParser, resetStreamTransport } from './src/api/stream';
+    export { streamSSE, createSSEParser, resetStreamTransport, RequestNotSent } from './src/api/stream';
     export * as usage from './src/agent/usage';
     export * as summary from './src/agent/summary';
     export { ProviderError } from './src/api/errors';

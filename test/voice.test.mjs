@@ -7,6 +7,115 @@ import { test, beforeEach, afterEach } from 'node:test';
 import { api, settings, text, call, response, vaultApp } from './harness.mjs';
 
 const { voiceProtocol: P, voiceSession: S, voiceController: C, codexVoice: X } = api;
+
+test('Voice call errors distinguish model/route failures and retain a bounded request ID', async () => {
+  for (const code of ['model_not_found', 'route_not_found']) {
+    let sent = 0;
+    globalThis.__providerRequest = async () => {
+      sent++;
+      return { status: 404, text: JSON.stringify({ error: { code, message: 'Requested voice service is unavailable.' } }), headers: { 'X-Request-ID': 'req-voice-123' } };
+    };
+    const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+    await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+      assert.equal(error.status, 404);
+      assert.equal(error.details.code, code);
+      assert.match(error.message, /req-voice-123/);
+      assert.match(error.message, /voice service is unavailable/);
+      return true;
+    });
+    assert.equal(sent, 1);
+  }
+});
+
+test('Voice error diagnostics redact credentials, identity and emails without copying raw response objects', async () => {
+  const credential = { accessToken: 'access-secret-123', refreshToken: 'refresh-secret-123', accountId: 'account-secret-123' };
+  globalThis.__providerRequest = async () => ({ status: 403, text: JSON.stringify({
+    error: { code: 'access_denied', message: `${credential.accessToken} ${credential.refreshToken} ${credential.accountId} qa@example.com Bearer another-secret ` + 'x'.repeat(2000), private: 'must-not-copy' },
+  }), headers: { 'x-request-id': 'req-safe', authorization: 'must-not-copy' } });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => credential }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'private-offer', instructions: '', items: [] }), error => {
+    const shown = JSON.stringify(error) + error.message;
+    for (const secret of [...Object.values(credential), 'qa@example.com', 'another-secret', 'must-not-copy', 'private-offer']) assert.equal(shown.includes(secret), false);
+    assert.ok(error.message.length < 500);
+    return true;
+  });
+});
+
+test('A voice proxy HTML failure reports the response type without copying its contents', async () => {
+  globalThis.__providerRequest = async () => ({ status: 404, text: '<html>private-network-information</html>', headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.equal(error.details.responseType, 'html');
+    assert.match(error.message, /HTML page/);
+    assert.doesNotMatch(error.message, /private-network-information/);
+    return true;
+  });
+});
+
+for (const [packet, message] of [
+  [{ detail: 'Not Found' }, 'Not Found'],
+  [{ message: 'Voice session access denied.' }, 'Voice session access denied.'],
+  [{ error: 'Voice session access denied.' }, 'Voice session access denied.'],
+  [{ error: { type: 'access_denied', message: 'Voice model unavailable.' } }, 'Voice model unavailable.'],
+]) test(`Voice diagnostics retain the service's ${JSON.stringify(packet)} error shape`, async () => {
+  globalThis.__providerRequest = async () => ({ status: 404, text: JSON.stringify(packet), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.equal(error.details.responseType, 'json');
+    assert.ok(error.message.includes(message));
+    return true;
+  });
+});
+
+test('Voice diagnostics copy known plain-text service errors but omit arbitrary text and proxy content', async () => {
+  for (const [body, headers, expected] of [
+    ['Voice session access denied.', {}, true],
+    ['private-network-information', {}, false],
+    ['Not Found', { 'content-type': 'text/html' }, false],
+  ]) {
+    globalThis.__providerRequest = async () => ({ status: 403, text: body, headers });
+    const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+    await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+      assert.equal(error.message.includes(body), expected);
+      return true;
+    });
+  }
+});
+
+test('A service validation error cannot copy the submitted SDP into voice diagnostics', async () => {
+  globalThis.__providerRequest = async () => ({ status: 400, text: JSON.stringify({ detail: 'Invalid SDP: v=0\r\nc=IN IP4 192.0.2.44\r\na=ice-pwd:private-ice-password' }), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.match(error.message, /rejected the connection description/);
+    assert.doesNotMatch(error.message + JSON.stringify(error.details), /192\.0\.2\.44|private-ice-password/);
+    return true;
+  });
+});
+
+for (const detail of [
+  'Invalid SDP attribute: a=ice-pwd:private-ice-password',
+  'Invalid attribute "a=ice-pwd:private-ice-password"',
+  'Invalid attributes: a=ice-ufrag:private-username\\r\\na=ice-pwd:private-ice-password',
+  'Invalid attribute: a\\u003dice-pwd\\u003aprivate-ice-password',
+  'Invalid attribute: %61%3Dice-pwd%3Aprivate-ice-password',
+]) test(`Inline or escaped SDP fragments are omitted from voice diagnostics: ${detail.slice(0, 32)}`, async () => {
+  globalThis.__providerRequest = async () => ({ status: 400, text: JSON.stringify({ detail }), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.match(error.message, /rejected the connection description/);
+    assert.doesNotMatch(error.message + JSON.stringify(error.details), /private-ice-password|private-username/);
+    return true;
+  });
+});
+
+test('A service message cannot echo an ICE credential value without its SDP attribute label', async () => {
+  globalThis.__providerRequest = async () => ({ status: 400, text: JSON.stringify({ detail: 'Rejected value: private-ice-password' }), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'v=0\r\na=ice-pwd:private-ice-password\r\na=ice-ufrag:private-username\r\n', instructions: '', items: [] }), error => {
+    assert.doesNotMatch(error.message + JSON.stringify(error.details), /private-ice-password|private-username/);
+    return true;
+  });
+});
 const { appLifecycle } = api.lifecycle;
 
 // ─── Fake WebRTC, microphone and audio ──────────────────────────────────────
@@ -357,6 +466,18 @@ test('A hung call-creation request times out without retrying or keeping the mic
   assert.equal(calls, 1);
   assert.equal(rtc.mic.track.stopped, true);
   assert.equal(pc().closed, true);
+});
+
+test('A refused voice call logs its startup stage and releases audio/peer resources', async () => {
+  const logs = [];
+  const failure = new X.VoiceStartError(404, { code: 'model_not_found', responseType: 'json' }, 'Voice model unavailable.');
+  const session = new S.VoiceSession({ name: 'codex', connect: async () => { throw failure; } }, {
+    onMessage() {}, onEnded() {}, onAudioBlocked() {}, log(label, data) { logs.push({ label, data }); },
+  });
+  await assert.rejects(session.start('test', []), error => error === failure);
+  assert.ok(logs.some(row => row.label === 'VOICE_START_FAILED' && row.data.stage === 'create call' && row.data.error.includes('model_not_found')));
+  assert.equal(rtc.mic.track.stopped, true);
+  assert.equal(rtc.pcs[0].closed, true);
 });
 
 test('The capability microphone probe times out and closes a stream granted afterward', async () => {

@@ -30,7 +30,7 @@ import { appLifecycle } from "../platform/lifecycle";
 export interface StreamRequest {
   headers: Record<string, string>;
   body: string;
-  /** A failed POST may have reached remote tools even without response headers. */
+  /** For remote tools, fallback requires proof that no HTTP request was submitted. */
   noFallback?: boolean;
 }
 
@@ -60,6 +60,14 @@ class NoResponse extends Error {
   constructor(readonly cause: Error) {
     super(cause.message);
     this.name = "NoResponse";
+  }
+}
+
+/** Local transport evidence that no HTTP request could have left this client. */
+export class RequestNotSent extends Error {
+  constructor(readonly cause: Error) {
+    super(cause.message);
+    this.name = "RequestNotSent";
   }
 }
 
@@ -117,12 +125,15 @@ export async function streamSSE(
   throwIfAborted(signal);
   const https = nodeHttps();
   if (https) {
+    const startedAt = Date.now();
     try {
       return await viaNode(https, url, request, onEvent, signal);
     } catch (error) {
       // No answer at all (a system proxy, a certificate only the OS trusts):
       // Obsidian's requestUrl() reaches the server as before streaming.
-      if (signal?.aborted || !(error instanceof NoResponse) || request.noFallback) throw error;
+      const notSent = error instanceof RequestNotSent;
+      if (signal?.aborted || (!(error instanceof NoResponse) && !notSent) || (request.noFallback && !notSent)) throw error;
+      if (notSent && appLifecycle.hiddenSince(startedAt)) throw error;
       return viaRequestUrl(url, request, onEvent, signal);
     }
   }
@@ -162,9 +173,17 @@ interface NodeResponse {
 
 interface NodeRequest {
   on(event: "error", listener: (error: Error) => void): void;
+  on(event: "socket", listener: (socket: NodeSocket) => void): void;
+  reusedSocket?: boolean;
   write(body: string): void;
   end(): void;
   destroy(): void;
+}
+
+interface NodeSocket {
+  connecting?: boolean;
+  encrypted?: boolean;
+  on(event: "secureConnect", listener: () => void): void;
 }
 
 interface NodeHttps {
@@ -191,6 +210,10 @@ function viaNode(https: NodeHttps, url: string, request: StreamRequest, onEvent:
   return new Promise((resolve, reject) => {
     const headers = { ...request.headers, "Content-Length": String(new TextEncoder().encode(request.body).length) };
     let responded = false;
+    // For MCP, don't queue HTTP headers/body until TLS is ready. This makes
+    // an early failure provably unsent, without guessing from byte counters.
+    let submitted = false;
+    let settled = false;
     const req = https.request(url, { method: "POST", headers }, (res) => {
       responded = true;
       const status = res.statusCode ?? 0;
@@ -206,6 +229,7 @@ function viaNode(https: NodeHttps, url: string, request: StreamRequest, onEvent:
       });
       res.on("error", (error) => fail(parser ? new StreamDropped(error) : error));
       res.on("end", () => {
+        settled = true;
         signal?.removeEventListener("abort", abort);
         if (signal?.aborted) return reject(new Error("Request cancelled."));
         if (parser) {
@@ -219,17 +243,35 @@ function viaNode(https: NodeHttps, url: string, request: StreamRequest, onEvent:
       });
     });
     function fail(error: Error) {
+      settled = true;
       signal?.removeEventListener("abort", abort);
-      reject(signal?.aborted ? new Error("Request cancelled.") : error);
+      reject(signal?.aborted && !(error instanceof RequestNotSent) ? new Error("Request cancelled.") : error);
     }
     function abort() {
       req.destroy();
-      fail(new Error("Request cancelled."));
+      const error = new Error("Request cancelled.");
+      fail(request.noFallback && !submitted && !responded ? new RequestNotSent(error) : error);
     }
     signal?.addEventListener("abort", abort);
-    req.on("error", (error) => fail(responded ? error : new NoResponse(error)));
-    req.write(request.body);
-    req.end();
+    req.on("socket", socket => {
+      if (!request.noFallback) return;
+      if (!req.reusedSocket && socket.connecting === true && socket.encrypted === true) {
+        socket.on("secureConnect", submit);
+      } else {
+        // Reused TLS connections have no new secureConnect. Unknown socket
+        // shapes submit conservatively and lose the safe-to-retry guarantee.
+        submit();
+      }
+    });
+    req.on("error", (error) => fail(responded ? error : request.noFallback && !submitted
+      ? new RequestNotSent(error) : new NoResponse(error)));
+    function submit() {
+      if (settled || submitted || signal?.aborted) return;
+      submitted = true;
+      req.write(request.body);
+      req.end();
+    }
+    if (!request.noFallback) submit();
   });
 }
 

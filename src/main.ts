@@ -102,6 +102,8 @@ export default class ChatPlugin extends Plugin {
   private savedChats = new Map<string, string>();
   /** Each read or saved chat's API history then: unchanged, its attachments aren't counted against the budget's limit. */
   private savedMessages = new Map<string, UnifiedMessage[]>();
+  /** A complete chat snapshot with this exact MCP turn marker is already durable. */
+  private savedRemoteTurns = new Map<string, string>();
   /** Deleted conversations whose files go with the next save. */
   private deletedChats = new Set<string>();
 
@@ -637,8 +639,20 @@ export default class ChatPlugin extends Plugin {
   /** Remote operations require a durable uncertainty marker before sending. */
   async checkpointChatHistory(): Promise<void> {
     if (!this.chatHistoryLoaded || this.unloaded) throw new Error("Chat storage isn't ready; remote tools were not sent.");
-    await this.saveChatHistory();
-    if (this.chatSaveFailed) throw new Error("Couldn't save the chat checkpoint; remote tools were not sent.");
+    for (;;) {
+      // An older queued save can replace a marker. Drain normal persistence
+      // before checking what is durable; checkpoints never create a second writer.
+      while (this.chatStateWrite) await (this.nextChatStateWrite ?? this.chatStateWrite);
+      if (this.unloaded) throw new Error("Chat storage isn't ready; remote tools were not sent.");
+      const remote = this.conversations.filter(conversation => conversation.pendingTurn?.remoteEffectsPossible);
+      if (remote.length && remote.every(conversation => this.savedRemoteTurns.get(conversation.id) ===
+          `${conversation.pendingTurn!.turnId}:${conversation.pendingTurn!.startedAt}`)) return;
+      // Preserve the original request once. The marker protects every later
+      // step/retry in this turn without serializing or writing its payload again.
+      await this.saveChatHistory();
+      if (this.chatSaveFailed) throw new Error("Couldn't save the chat checkpoint; remote tools were not sent.");
+      if (!remote.length) return;
+    }
   }
 
   /** Publish the latest queued save immediately, including an unload save. */
@@ -687,16 +701,18 @@ export default class ChatPlugin extends Plugin {
       // An empty conversation is kept only while it is the active one.
       const kept = this.conversations
         .filter((conversation) => conversation.id === this.activeConversationId || !isEmptyConversation(conversation));
-      const changed: { conversation: ConversationRecord; json: string; text: string }[] = [];
+      const changed: { conversation: ConversationRecord; json: string; text: string; remoteTurn?: string }[] = [];
       for (const conversation of kept) {
         if (conversation.unloaded) continue;
-        const json = JSON.stringify(savedConversation(conversation));
+        const snapshot = savedConversation(conversation);
+        const json = JSON.stringify(snapshot);
         const digest = textDigest(json);
         if (this.savedChats.get(conversation.id) === digest) continue;
         const text = chatFileText(json, savedAt);
         // Bytes on disk (UTF-8), not characters.
         conversation.size = new TextEncoder().encode(text).length;
-        changed.push({ conversation, json: digest, text });
+        changed.push({ conversation, json: digest, text, ...(snapshot.pendingTurn?.remoteEffectsPossible
+          ? { remoteTurn: `${snapshot.pendingTurn.turnId}:${snapshot.pendingTurn.startedAt}` } : {}) });
       }
       const keptIds = new Set(kept.map((conversation) => conversation.id));
       // Deleted, and empty ones left behind (saved while active).
@@ -710,10 +726,17 @@ export default class ChatPlugin extends Plugin {
       };
       const { adapter } = this.app.vault;
       if (changed.length || gone.length) await this.ensureFolder(this.chatsDir);
-      for (const { conversation, json, text } of changed) {
+      for (const { conversation, json, text, remoteTurn } of changed) {
+        // Even a failed replacement's newer .next copy may win on restart.
+        // Invalidate both caches before touching either copy, including when
+        // the next request restores the exact previous JSON snapshot.
+        this.savedChats.delete(conversation.id);
+        this.savedMessages.delete(conversation.id);
+        this.savedRemoteTurns.delete(conversation.id);
         await adapter.write(this.chatPath(conversation.id, ".next"), text);
         await adapter.write(this.chatPath(conversation.id), text);
         this.savedChats.set(conversation.id, json);
+        if (remoteTurn) this.savedRemoteTurns.set(conversation.id, remoteTurn);
         this.savedMessages.set(conversation.id, [...conversation.agentMessages]);
       }
       // A file the index no longer lists would come back on the next load
@@ -723,6 +746,7 @@ export default class ChatPlugin extends Plugin {
         await adapter.write(this.chatPath(id, ".next"), tombstone);
         await adapter.write(this.chatPath(id), tombstone);
         this.savedChats.delete(id);
+        this.savedRemoteTurns.delete(id);
         this.savedMessages.delete(id);
         // Forgotten only once marked: a failed write keeps it for the next save.
         this.deletedChats.delete(id);
@@ -866,6 +890,8 @@ export default class ChatPlugin extends Plugin {
       !customTitle && automaticTitle !== undefined ? { automaticTitle } : {}, !customTitle && titleSourceTurnId !== undefined ? { titleSourceTurnId } : {});
     delete conversation.unloaded;
     this.savedChats.set(conversation.id, textDigest(JSON.stringify(savedConversation({ ...saved }))));
+    if (saved.pendingTurn?.remoteEffectsPossible) this.savedRemoteTurns.set(conversation.id, `${saved.pendingTurn.turnId}:${saved.pendingTurn.startedAt}`);
+    else this.savedRemoteTurns.delete(conversation.id);
     this.savedMessages.set(conversation.id, [...conversation.agentMessages]);
     return true;
   }

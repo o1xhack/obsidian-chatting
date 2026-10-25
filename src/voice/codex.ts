@@ -13,6 +13,15 @@
  */
 import { Platform, requestUrl } from "obsidian";
 import type { VoiceRoute } from "./session";
+import { isRecord } from "../json";
+
+/** Safe service diagnostics; never include the request, SDP or account identity. */
+export class VoiceStartError extends Error {
+  constructor(readonly status: number, readonly details: { code?: string; requestId?: string; responseType: "json" | "html" | "text" }, message?: string) {
+    super(`Couldn't start voice (HTTP ${status}).${details.code ? ` ${details.code}:` : ""}${message ? ` ${message}` : ""}${details.responseType === "html" ? " The voice service returned an HTML page." : ""}${details.requestId ? ` Request ID: ${details.requestId}.` : ""}`);
+    this.name = "VoiceStartError";
+  }
+}
 
 const CALL_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas";
 const CODEX_MODEL = "gpt-live-1-codex";
@@ -29,16 +38,16 @@ export const VOICES = ["juniper", "maple", "spruce", "ember", "vale", "breeze", 
 /** The ChatGPT sign-in, as the route needs it (`ChatGPTOAuthService`). */
 export interface CodexVoiceAuth {
   /** The credential, refreshed when it is about to expire; null when signed out. */
-  getUsableCredential(): Promise<{ accessToken: string; accountId?: string } | null>;
+  getUsableCredential(): Promise<{ accessToken: string; accountId?: string; refreshToken?: string } | null>;
   /** Shared one-shot renewal after a server rejection before local expiry. */
-  renewRejected(rejected: { accessToken: string; accountId?: string }): Promise<{ accessToken: string; accountId?: string } | null>;
+  renewRejected(rejected: { accessToken: string; accountId?: string }): Promise<{ accessToken: string; accountId?: string; refreshToken?: string } | null>;
 }
 
 /** A route that creates calls on Codex's voice service. */
 export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersion: () => string): VoiceRoute {
   // Refresh sign-in while preparing the offer. Version metadata is a
   // synchronous cached/fallback read, never a network prerequisite.
-  let ready: Promise<[{ accessToken: string; accountId?: string } | null, string]> | null = null;
+  let ready: Promise<[Awaited<ReturnType<CodexVoiceAuth["getUsableCredential"]>>, string]> | null = null;
   const prepared = () => {
     if (!ready) {
       const credential = auth.getUsableCredential();
@@ -88,19 +97,65 @@ export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersi
         throw: false,
       });
       let response = await create(credential.accessToken, credential.accountId);
+      const secrets = [credential.accessToken, credential.accountId, credential.refreshToken ?? "",
+        ...Array.from(sdp.matchAll(/^a=ice-(?:pwd|ufrag):([^\r\n]+)/gm), match => match[1])];
       if (response.status === 401) {
         let renewed;
         try { renewed = await auth.renewRejected(credential); } catch { /* Keep the rejected-call status. */ }
-        if (renewed?.accountId === credential.accountId) response = await create(renewed.accessToken, renewed.accountId);
+        if (renewed?.accountId === credential.accountId) {
+          secrets.push(renewed.accessToken, renewed.refreshToken ?? "");
+          response = await create(renewed.accessToken, renewed.accountId);
+        }
       }
       if (response.status < 200 || response.status >= 300) {
-        throw new Error(`Couldn't start voice (HTTP ${response.status}).`);
+        throw voiceFailure(response.status, response.text, response.headers, secrets);
       }
       const location = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === "location")?.[1] ?? "";
       const callId = location.split("?")[0].split("/").filter(Boolean).pop();
       return { sdp: response.text, callId };
     },
   };
+}
+
+/** Extract only bounded diagnostic fields; HTML/proxy pages are never copied. */
+function voiceFailure(status: number, body: string, headers: Record<string, string> | undefined, secrets: string[]): VoiceStartError {
+  const redact = (value: string): string => {
+    value = diagnosticText(value);
+    for (const secret of secrets) if (secret) value = value.split(secret).join("[redacted]");
+    return value.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(/\b(?:sk-[\w-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, "[redacted]")
+      .replace(/[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g, "[redacted]")
+      .replace(/[\r\n\t]+/g, " ").slice(0, 350);
+  };
+  let data: unknown;
+  let json = false;
+  try { data = JSON.parse((body ?? "").slice(0, 16_384)); json = true; } catch { /* Only known plain-text errors are copied below. */ }
+  const packet = isRecord(data) ? data : {};
+  const error = isRecord(packet.error) ? packet.error : {};
+  const string = (...values: unknown[]): string | undefined => values.find((value): value is string => typeof value === "string" && !!value.trim());
+  const rawCode = string(error.code, error.type, packet.code);
+  const code = rawCode && /^[a-zA-Z][\w.-]{0,79}$/.test(rawCode) ? redact(rawCode) : undefined;
+  const contentType = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? "";
+  const html = !json && (/^\s*</.test(body ?? "") || /text\/html/i.test(contentType));
+  const plain = (body ?? "").trim();
+  const knownText = !json && !html && /^(?:voice session access denied|not found|unauthorized|forbidden|model not found|too many requests)\.?$/i.test(plain) ? plain : undefined;
+  const rawMessage = string(error.message, packet.error, packet.message, packet.detail, knownText);
+  const message = rawMessage && /\bsdp\b|\bice-(?:pwd|ufrag)\b|\ba=|\bm=audio\b|\bc=IN\b|\bv=0\b/i.test(diagnosticText(rawMessage))
+    ? "The voice service rejected the connection description."
+    : rawMessage ? redact(rawMessage) : undefined;
+  const requestId = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === "x-request-id")?.[1];
+  return new VoiceStartError(status, {
+    ...(code ? { code } : {}),
+    ...(requestId && /^[\w-]{1,128}$/.test(requestId) ? { requestId: redact(requestId) } : {}),
+    responseType: json ? "json" : html ? "html" : "text",
+  }, message);
+}
+
+/** Inspect escaped validation fragments too, before omitting SDP or masking secrets. */
+function diagnosticText(value: string): string {
+  return value.replace(/\\u([\da-f]{4})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/%([0-7][\da-f])/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\[rnt]/g, " ");
 }
 
 /** Codex sends its OS here (the CPU, which follows, isn't known without Node modules). */

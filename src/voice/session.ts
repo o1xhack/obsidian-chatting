@@ -83,6 +83,7 @@ export class VoiceSession {
     // How long each step took (debug log): where a slow start comes from.
     const timing: Record<string, number> = {};
     let stepStart = Date.now();
+    let stage = "microphone";
     const step = (name: string) => {
       timing[name] = Date.now() - stepStart;
       stepStart = Date.now();
@@ -127,6 +128,7 @@ export class VoiceSession {
         if (!this.ended && !this.closing) this.finish("The voice connection was closed.");
       };
 
+      stage = "offer";
       const offer = await this.opening(pc.createOffer(), SESSION_TIMING.negotiationWait, "The voice connection couldn't prepare its offer. Try again.");
       this.checkEnded();
       await this.opening(pc.setLocalDescription(offer), SESSION_TIMING.negotiationWait, "The voice connection couldn't set its local description. Try again.");
@@ -136,17 +138,21 @@ export class VoiceSession {
 
       // What the voice model starts with: our instructions and the recent chat.
       this.handlers.log("VOICE_START", { route: this.route.name, instructions, items });
+      stage = "create call";
       const answer = await this.opening(this.route.connect({ sdp: pc.localDescription?.sdp ?? "", instructions, items }),
         SESSION_TIMING.connectWait, "The voice service didn't answer. Try again.");
       step("callMs");
       this.handlers.log("VOICE_CALL", { route: this.route.name, callId: answer.callId ?? null });
       this.checkEnded();
+      stage = "answer";
       await this.opening(pc.setRemoteDescription({ type: "answer", sdp: answer.sdp }), SESSION_TIMING.negotiationWait, "The voice connection couldn't accept its answer. Try again.");
+      stage = "channel";
       await this.waitForStart();
       step("startMs");
       this.handlers.log("VOICE_TIMING", { route: this.route.name, ...timing });
       return { callId: answer.callId };
     } catch (error) {
+      this.handlers.log("VOICE_START_FAILED", { route: this.route.name, stage, error: message(error) });
       this.endNotified = true;
       this.cleanUp();
       throw error;
