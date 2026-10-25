@@ -1,10 +1,10 @@
 {
   "date": "2026-10-25",
-  "productionSha256": "53d8611a804d5e3c9d5c0dc7bed90e5dfc44c7b656a811c95101ebc7d565fb13",
-  "probeSha256": "08b09240c350612ecb75518906e13f6c63f7355e8669ee962960394f5b4f8ffa",
+  "productionSha256": "03c7063796b599a88862b961861558c3cbef2cf6ed5464def738df8bd15609d8",
+  "probeSha256": "59ee1dfee2517cca2b799142ca78efcf1b572f86257e84b9b1de059f32a2723d",
   "probeDifference": "Only a test hook exposing VoiceSession was appended to the same production bundle. The hook is removed after QA.",
   "automated": {
-    "passed": 916,
+    "passed": 922,
     "failed": 0,
     "typescript": true,
     "svelteErrors": 0,
@@ -19,7 +19,7 @@
       "raw-prefix-released",
       "rollback-snapshot-unchanged"
     ],
-    "sha256": "08b09240c350612ecb75518906e13f6c63f7355e8669ee962960394f5b4f8ffa",
+    "sha256": "59ee1dfee2517cca2b799142ca78efcf1b572f86257e84b9b1de059f32a2723d",
     "checkpointWrites": [],
     "portableSummary": {
       "retainedMessages": 3,
@@ -32,7 +32,7 @@
   },
   "nativeVoice": {
     "scope": "Real Codex service using a silent generated audio track; no microphone capture, no delegated work",
-    "sha256": "08b09240c350612ecb75518906e13f6c63f7355e8669ee962960394f5b4f8ffa",
+    "sha256": "59ee1dfee2517cca2b799142ca78efcf1b572f86257e84b9b1de059f32a2723d",
     "events": [
       "session.started",
       "session.closed"
@@ -47,5 +47,16 @@
     "API raw-history retention is bounded by compaction windows; visible chat text is still retained.",
     "A failed portable summary preserves raw context and retries after a cooldown."
   ],
-  "checkpointDesign": "Reuse the durable per-turn marker with zero per-step writes; no index schema change. Invalidate marker and digest caches before replacement writes."
+  "checkpointDesign": "Reuse the durable per-turn marker with zero per-step writes; no index schema change. Invalidate marker and digest caches before replacement writes.",
+  "voiceDiagnosticRegression": {
+    "cases": 6,
+    "redBeforeFix": 6,
+    "passedAfterFix": 6,
+    "covers": [
+      "inline SDP attributes",
+      "escaped newlines",
+      "Unicode and percent escapes",
+      "unlabelled ICE credential echoes"
+    ]
+  }
 }

@@ -28,7 +28,7 @@
 ## #62：安全诊断和真实语音复测
 
 - 语音错误保留受限的 service code/message/request ID；支持 `error.message`、`error` 字符串、顶层 `message`、`detail` 及已知纯文本错误；识别 HTML 返回，禁止复制代理页面。
-- 精确遮盖当前/刷新后的 access token、refresh token、账号 ID，另遮盖 Bearer/JWT/API key 形式及邮箱；不复制任意响应对象或 headers。服务端验证错误若回显 SDP，则改为一般连接描述错误，不复制地址或 ICE 密码。
+- 精确遮盖当前/刷新后的 access token、refresh token、账号 ID，另遮盖 Bearer/JWT/API key 形式及邮箱；不复制任意响应对象或 headers。服务端验证错误若回显 SDP，则改为一般连接描述错误，不复制地址或 ICE 密码。额外覆盖错误句子里的内嵌属性、Unicode/百分号转义片段，并从本次 offer 提取 ICE 密码和用户名用于精确遮盖，防止服务端仅回显凭据值。
 - 增加 `VOICE_START_FAILED`，标明麦克风、offer、创建会话、answer 或 channel 的失败阶段；失败释放音轨与 peer。
 - 在专用测试 vault 中完成 OAuth 登录，用静音生成音轨调用真实语音服务：会话创建、连接及 `session.started` 均成功，结束后音轨已释放。未读取真实麦克风，也未委派工具。
 

@@ -97,7 +97,8 @@ export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersi
         throw: false,
       });
       let response = await create(credential.accessToken, credential.accountId);
-      const secrets = [credential.accessToken, credential.accountId, credential.refreshToken ?? ""];
+      const secrets = [credential.accessToken, credential.accountId, credential.refreshToken ?? "",
+        ...Array.from(sdp.matchAll(/^a=ice-(?:pwd|ufrag):([^\r\n]+)/gm), match => match[1])];
       if (response.status === 401) {
         let renewed;
         try { renewed = await auth.renewRejected(credential); } catch { /* Keep the rejected-call status. */ }
@@ -119,6 +120,7 @@ export function codexVoiceRoute(auth: CodexVoiceAuth, voice: string, clientVersi
 /** Extract only bounded diagnostic fields; HTML/proxy pages are never copied. */
 function voiceFailure(status: number, body: string, headers: Record<string, string> | undefined, secrets: string[]): VoiceStartError {
   const redact = (value: string): string => {
+    value = diagnosticText(value);
     for (const secret of secrets) if (secret) value = value.split(secret).join("[redacted]");
     return value.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
       .replace(/\b(?:sk-[\w-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, "[redacted]")
@@ -138,7 +140,7 @@ function voiceFailure(status: number, body: string, headers: Record<string, stri
   const plain = (body ?? "").trim();
   const knownText = !json && !html && /^(?:voice session access denied|not found|unauthorized|forbidden|model not found|too many requests)\.?$/i.test(plain) ? plain : undefined;
   const rawMessage = string(error.message, packet.error, packet.message, packet.detail, knownText);
-  const message = rawMessage && /\bv=0[\r\n]|(?:^|[\r\n])(?:a=|m=audio|c=IN)/.test(rawMessage)
+  const message = rawMessage && /\bsdp\b|\bice-(?:pwd|ufrag)\b|\ba=|\bm=audio\b|\bc=IN\b|\bv=0\b/i.test(diagnosticText(rawMessage))
     ? "The voice service rejected the connection description."
     : rawMessage ? redact(rawMessage) : undefined;
   const requestId = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === "x-request-id")?.[1];
@@ -147,6 +149,13 @@ function voiceFailure(status: number, body: string, headers: Record<string, stri
     ...(requestId && /^[\w-]{1,128}$/.test(requestId) ? { requestId: redact(requestId) } : {}),
     responseType: json ? "json" : html ? "html" : "text",
   }, message);
+}
+
+/** Inspect escaped validation fragments too, before omitting SDP or masking secrets. */
+function diagnosticText(value: string): string {
+  return value.replace(/\\u([\da-f]{4})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/%([0-7][\da-f])/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\[rnt]/g, " ");
 }
 
 /** Codex sends its OS here (the CPU, which follows, isn't known without Node modules). */

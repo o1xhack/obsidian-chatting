@@ -91,6 +91,31 @@ test('A service validation error cannot copy the submitted SDP into voice diagno
     return true;
   });
 });
+
+for (const detail of [
+  'Invalid SDP attribute: a=ice-pwd:private-ice-password',
+  'Invalid attribute "a=ice-pwd:private-ice-password"',
+  'Invalid attributes: a=ice-ufrag:private-username\\r\\na=ice-pwd:private-ice-password',
+  'Invalid attribute: a\\u003dice-pwd\\u003aprivate-ice-password',
+  'Invalid attribute: %61%3Dice-pwd%3Aprivate-ice-password',
+]) test(`Inline or escaped SDP fragments are omitted from voice diagnostics: ${detail.slice(0, 32)}`, async () => {
+  globalThis.__providerRequest = async () => ({ status: 400, text: JSON.stringify({ detail }), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'offer', instructions: '', items: [] }), error => {
+    assert.match(error.message, /rejected the connection description/);
+    assert.doesNotMatch(error.message + JSON.stringify(error.details), /private-ice-password|private-username/);
+    return true;
+  });
+});
+
+test('A service message cannot echo an ICE credential value without its SDP attribute label', async () => {
+  globalThis.__providerRequest = async () => ({ status: 400, text: JSON.stringify({ detail: 'Rejected value: private-ice-password' }), headers: {} });
+  const route = X.codexVoiceRoute({ getUsableCredential: async () => ({ accessToken: 'test-access-token', accountId: 'test-account' }) }, 'cove', () => '1.2.3');
+  await assert.rejects(route.connect({ sdp: 'v=0\r\na=ice-pwd:private-ice-password\r\na=ice-ufrag:private-username\r\n', instructions: '', items: [] }), error => {
+    assert.doesNotMatch(error.message + JSON.stringify(error.details), /private-ice-password|private-username/);
+    return true;
+  });
+});
 const { appLifecycle } = api.lifecycle;
 
 // ─── Fake WebRTC, microphone and audio ──────────────────────────────────────
