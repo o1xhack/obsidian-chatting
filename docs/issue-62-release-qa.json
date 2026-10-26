@@ -1,0 +1,26 @@
+{
+  "version": "0.11.2",
+  "scope": "Native Electron startup failure using generated silent audio and a controlled 404; no microphone capture or service call",
+  "probeSha256": "dc32e605b1553f908631e789563fdf1a514aec017b0bdf22f5df0280885801f1",
+  "genericHint": true,
+  "appDistinction": true,
+  "diagnosticsKept": true,
+  "failureStage": "create call",
+  "debugHasHint": true,
+  "singleAttempt": true,
+  "disconnected": true,
+  "specificErrorPreserved": true,
+  "tracksEnded": true,
+  "passed": true,
+  "productionSha256": "65c6f4095647835e509ad463d3efb698af7d06a01940c49dd5e3ba62d7178e3c",
+  "automated": {
+    "passed": 925,
+    "failed": 0,
+    "typescript": true,
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "productionBuild": true
+  },
+  "probeDifference": "Only a temporary hook exposing VoiceSession and VoiceStartError was appended; it was removed after native QA.",
+  "installedProductionRestored": true
+}
