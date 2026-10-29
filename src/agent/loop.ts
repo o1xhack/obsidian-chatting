@@ -635,6 +635,8 @@ ${mentioned.text}` : buildContextMessage(context);
     // What the last compaction covers goes; a new array only then, so
     // OpenAI keeps chaining and the prompt caches keep their prefix.
     this.messages = fromLastCompaction(this.messages);
+    // The turn before is no longer the last: its results join the shared allowance now, once.
+    this.messages = withoutLargeToolText(this.messages);
     this.pruneToolImages();
 
     debugLog(this.app, "USER_MESSAGE", {

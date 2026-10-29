@@ -108,6 +108,9 @@ with headings, lists and tables, Excel sheets as CSV and PowerPoint in slide
 order; what a file becomes; each provider's form in a message and in a tool
 result such as `read_file` on a PDF, left out two turns later; attached
 files saved without their data, restored, and sent again on edit).
+`tool-text.test.mjs`: tool text (each result capped, a turn keeping all it
+read while earlier turns share the allowance, clipped once per turn; the
+same for the rows the chat shows).
 `skills.test.mjs`: skills (finding them in the skills folder, the list in
 the system prompt before `AGENTS.md`, `use_skill`, `/name` in a message and
 the `/` list, and the *Skills* settings with folder, list and New skill in
