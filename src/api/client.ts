@@ -42,6 +42,7 @@ export async function sendMessage(
   let shown = false;
   const options: StreamOptions = {
     signal: stream.signal,
+    expectedAccountIdentity: stream.expectedAccountIdentity,
     onTextDelta: (text) => {
       shown = true;
       stream.onTextDelta?.(text);

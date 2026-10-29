@@ -224,6 +224,8 @@ export interface StreamOptions {
   /** The provider started a tool with possible effects (an MCP call): the request must not be sent again. */
   onServerTool?: () => void;
   signal?: AbortSignal;
+  /** Background work must not move its transcript to another ChatGPT account on a retry. */
+  expectedAccountIdentity?: string;
 }
 
 // ─── Conversation Context ───────────────────────────────────────────────────
@@ -389,7 +391,7 @@ export interface AgentCallbacks {
   /** The earlier part of the conversation was summarized (by the provider or the plugin). */
   onCompacted?: () => void;
   /** A request's token usage; `turnStart`: the turn's first request. */
-  onUsage?: (usage: TokenUsage, request: { provider: Provider; model: string; turnStart: boolean }) => void;
+  onUsage?: (usage: TokenUsage, request: { provider: Provider; model: string; turnStart: boolean; background?: boolean }) => void;
   /** The model's window or prices were read (OpenAI's documentation page): save them, update the ring. */
   onModelDetails?: () => void;
 }

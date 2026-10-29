@@ -50,19 +50,23 @@ export function requestCost(usage: TokenUsage, pricing: ModelPricing | undefined
 export function addRequest(
   previous: ConversationUsage | undefined,
   usage: TokenUsage,
-  request: { model: string; provider: string; pricing?: ModelPricing; turnStart: boolean },
+  request: { model: string; provider: string; pricing?: ModelPricing; turnStart: boolean; background?: boolean },
 ): ConversationUsage {
   const cost = requestCost(usage, request.pricing);
   const turnBefore = request.turnStart ? undefined : previous?.lastTurnCostUsd;
+  const lastTurnCost = request.background ? previous?.lastTurnCostUsd
+    : cost !== undefined ? (turnBefore ?? 0) + cost : undefined;
   return {
-    contextTokens: usage.inputTokens + usage.outputTokens,
+    // A late background summary adds to totals, not the current answer's
+    // context ring, selected model, or (possibly newer) turn cost.
+    contextTokens: request.background ? previous?.contextTokens ?? 0 : usage.inputTokens + usage.outputTokens,
     inputTokens: (previous?.inputTokens ?? 0) + usage.inputTokens + (usage.compactionInputTokens ?? 0),
     outputTokens: (previous?.outputTokens ?? 0) + usage.outputTokens + (usage.compactionOutputTokens ?? 0),
-    model: request.model,
-    provider: request.provider,
+    model: request.background ? previous?.model ?? request.model : request.model,
+    provider: request.background ? previous?.provider ?? request.provider : request.provider,
     costUsd: (previous?.costUsd ?? 0) + (cost ?? 0),
     unpricedRequests: (previous?.unpricedRequests ?? 0) + (cost === undefined ? 1 : 0),
-    ...(cost !== undefined ? { lastTurnCostUsd: (turnBefore ?? 0) + cost } : {}),
+    ...(lastTurnCost !== undefined ? { lastTurnCostUsd: lastTurnCost } : {}),
   };
 }
 

@@ -130,6 +130,9 @@ export async function sendChatGPTOAuthMessage(
   }
 
   const identity = await catalogIdentity("chatgpt-oauth", credential.accountId || credential.accessToken);
+  if (stream.expectedAccountIdentity !== undefined && stream.expectedAccountIdentity !== identity) {
+    throw new ChatGPTOAuthError("The ChatGPT account changed before the request was sent.");
+  }
   if (settings.modelCatalog) {
     cachedCatalog(settings.modelCatalog, "chatgpt-oauth", identity);
   }

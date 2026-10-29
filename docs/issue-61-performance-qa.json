@@ -1,0 +1,47 @@
+{
+  "candidateVersion": "0.11.3",
+  "tests": {
+    "passed": 947,
+    "failed": 0,
+    "typescript": true,
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "productionBuild": true
+  },
+  "native": {
+    "label": "candidate-final",
+    "scope": "Native Obsidian/Electron with controlled 1000ms summary; no external provider requests or vault edits",
+    "version": "0.11.3",
+    "answerMs": 12.5,
+    "backgroundAtAnswer": true,
+    "answer": "Controlled native answer",
+    "earliestFactPreserved": true,
+    "summaryPersistCallback": 1,
+    "summaryDone": true,
+    "rawMessagesAfter": 5
+  },
+  "nativeBaseline": {
+    "label": "baseline-warm",
+    "scope": "Native Obsidian/Electron with controlled 1000ms summary; no external provider requests or vault edits",
+    "version": "0.11.2",
+    "answerMs": 1374.7999999523163,
+    "backgroundAtAnswer": false,
+    "answer": "Controlled native answer",
+    "earliestFactPreserved": true,
+    "summaryPersistCallback": 0,
+    "summaryDone": true,
+    "rawMessagesAfter": 5
+  },
+  "cpu": {
+    "scope": "Synthetic CPU microbenchmarks, median of 7 runs; not provider latency",
+    "historyMessages": 100000,
+    "historyBeforeMs": 0.9195840000000004,
+    "historyAfterMs": 0.00033400000000938235,
+    "transcriptChars": 9000006,
+    "transcriptBeforeMs": 24.422167,
+    "transcriptAfterMs": 0.0004999999999881766,
+    "outputsEqual": true
+  },
+  "productionSha256": "d971fdcad4a7a9d5296566b6bfa4e73b16ba38c0d6c69073f951a8d56fc4eb4e",
+  "installedBundleMatches": true
+}
