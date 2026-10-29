@@ -224,3 +224,5 @@ Obsidian once the smoke test is green.
 Production regression tests also cover dynamic catalogs, 24-hour persistence, request deduplication, failure backoff, manual refresh, account changes during fetch, Anthropic pagination, the OpenAI model list (chat models only, newest first, no dated duplicates; `model-list.test.mjs`), stable Codex version discovery, GPT-6 reasoning metadata, and model/account isolation of native reasoning replay. Run `npm test`.
 
 Live validation results and their limits are recorded in [oauth-live-validation.md](oauth-live-validation.md).
+
+Portable-history retention also covers a delayed background summary alongside a normal answer, single-flight execution, safe installation, account-bound dispatch, independent cancellation, stale snapshots, usage totals, durable restore, switching/deleting/unloading a chat, and unrelated response cursors (`compaction.test.mjs`).

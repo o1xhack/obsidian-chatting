@@ -5,13 +5,261 @@
 // the chat.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, sse, streamEvents, text, transport, withCatalog, settings, callbacks, vaultApp } from './harness.mjs';
+import { api, sse, streamEvents, text, transport, withCatalog, settings, callbacks, vaultApp, chatFiles } from './harness.mjs';
 
 beforeEach(() => {
   api.clearOpenAIState();
   api.resetStreamTransport();
   api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'fake-token', accountId: 'fake-account' }) });
   globalThis.__notices = [];
+});
+
+function retainedHistory() {
+  return [
+    { role: 'user', content: 'EARLIEST-FACT', turnId: 'first' },
+    { role: 'assistant', content: [text('First')], compaction: {}, replay: { provider: 'openai', items: [] } },
+    { role: 'user', content: 'Next', turnId: 'second' },
+    { role: 'assistant', content: [text('Second')], compaction: {}, replay: { provider: 'openai', items: [] } },
+  ];
+}
+
+const settled = () => new Promise(resolve => setImmediate(resolve));
+
+async function heldRetention(provider = 'openai') {
+  const initial = settings(provider);
+  const agent = new api.AgentLoop(vaultApp().app, initial);
+  agent.importMessages(retainedHistory().map(message => message.replay
+    ? { ...message, replay: { ...message.replay, provider } } : message));
+  let finish, signal;
+  let summaries = 0;
+  agent.summarize = (_settings, _messages, _stopped, _onUsage, background) => {
+    summaries++;
+    signal = background.request.signal;
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const pending = agent.retainPortableHistory(initial, callbacks());
+  await settled();
+  return { agent, initial, pending, finish: () => finish('Portable EARLIEST-FACT'), get signal() { return signal; }, get summaries() { return summaries; } };
+}
+
+test('Portable retention does not delay an answer, and persists its summary after the turn ends', async () => {
+  let finish;
+  let saved = 0;
+  const agent = new api.AgentLoop(vaultApp().app, settings('openai'), () => { saved++; });
+  agent.importMessages(retainedHistory());
+  agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  transport(() => sse(streamEvents('openai', [text('Answer before summary')])));
+  let answered = false;
+  const pending = agent.run('Continue', callbacks()).then(() => { answered = true; });
+  let timeout;
+  await Promise.race([pending, new Promise(resolve => { timeout = setTimeout(resolve, 1000); })]);
+  clearTimeout(timeout);
+  try {
+    assert.equal(answered, true, 'A delayed summary must not block the main answer');
+    assert.match(JSON.stringify(agent.exportMessages()), /EARLIEST-FACT/);
+  } finally {
+    finish('Portable EARLIEST-FACT');
+    await pending;
+    await settled();
+  }
+  assert.equal(agent.exportMessages()[0].compaction.summary, 'Portable EARLIEST-FACT');
+  assert.equal(saved, 1);
+});
+
+test('Portable summaries are single-flight across steps and turns', async () => {
+  const work = await heldRetention();
+  assert.equal(work.agent.isRunning(), true);
+  transport(() => sse(streamEvents('openai', [text('A normal answer')])));
+  await work.agent.run('One', callbacks());
+  await work.agent.run('Two', callbacks());
+  assert.equal(work.summaries, 1);
+  work.finish();
+  await work.pending;
+  assert.equal(work.agent.isRunning(), false);
+  assert.match(JSON.stringify(work.agent.exportMessages()), /One.*Two/);
+});
+
+for (const action of ['abort', 'clear', 'import', 'edit', 'attachments']) test(`Portable summary completion cannot restore history after ${action}`, async () => {
+  const work = await heldRetention();
+  if (action === 'abort') work.agent.abort();
+  if (action === 'clear') work.agent.clear();
+  if (action === 'import') work.agent.importMessages([{ role: 'user', content: 'Replacement', turnId: 'new' }]);
+  if (action === 'edit') work.agent.cutBeforeTurn('second');
+  if (action === 'attachments') work.agent.invalidateHistoryCursor();
+  const expected = JSON.stringify(work.agent.exportMessages());
+  assert.equal(work.signal.aborted, true);
+  work.finish();
+  await work.pending;
+  assert.equal(JSON.stringify(work.agent.exportMessages()), expected);
+  assert.equal(work.agent.isRunning(), false);
+});
+
+for (const field of ['provider', 'model', 'apiKey', 'account']) test(`Portable summaries discard stale ${field} results`, async () => {
+  const work = await heldRetention(field === 'account' ? 'chatgpt-oauth' : 'openai');
+  const expected = JSON.stringify(work.agent.exportMessages());
+  if (field === 'account') api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'new', accountId: 'new-account' }) });
+  else work.initial[field] = field === 'provider' ? 'anthropic' : 'new-value';
+  work.finish();
+  await work.pending;
+  assert.equal(JSON.stringify(work.agent.exportMessages()), expected);
+  assert.equal(work.agent.isRunning(), false);
+});
+
+test('A completed summary waits for an in-flight answer and preserves its response and appended turn', async () => {
+  const work = await heldRetention();
+  let finishAnswer, requested;
+  const started = new Promise(resolve => { requested = resolve; });
+  transport(() => {
+    requested();
+    return new Promise(resolve => { finishAnswer = () => resolve(sse(streamEvents('openai', [text('New answer kept')]))); });
+  });
+  const pendingAnswer = work.agent.run('New user turn kept', callbacks());
+  await started;
+  work.finish();
+  await work.pending;
+  assert.equal(work.agent.exportMessages()[0].content, 'EARLIEST-FACT');
+  finishAnswer();
+  await pendingAnswer;
+  const result = work.agent.exportMessages();
+  assert.equal(result[0].compaction.summary, 'Portable EARLIEST-FACT');
+  assert.match(JSON.stringify(result), /New user turn kept.*New answer kept/);
+});
+
+test('A rewritten summary prefix is never pruned by its old background result', async () => {
+  const work = await heldRetention();
+  work.agent.messages[0] = { ...work.agent.messages[0], content: 'Edited EARLIEST-FACT' };
+  work.finish();
+  await work.pending;
+  assert.equal(work.agent.exportMessages()[0].content, 'Edited EARLIEST-FACT');
+});
+
+test('Installing a portable summary does not reset another conversation response cursor', async () => {
+  const work = await heldRetention();
+  const other = new api.AgentLoop(vaultApp().app, settings('openai'));
+  const requests = transport((_body, index) => sse(streamEvents('openai', [text('Other answer')], 'end_turn', index)));
+  await other.run('Other first turn', callbacks());
+  work.finish();
+  await work.pending;
+  await other.run('Other second turn', callbacks());
+  assert.ok(requests[1].previous_response_id, 'Unrelated chats keep their server cursor');
+});
+
+test('Background usage is counted without replacing a newer answer context or turn cost', () => {
+  const previous = { contextTokens: 12345, inputTokens: 100, outputTokens: 10, model: 'new-model', provider: 'anthropic', costUsd: 2, unpricedRequests: 0, lastTurnCostUsd: 0.5 };
+  const after = api.usage.addRequest(previous, { inputTokens: 1000, outputTokens: 100 }, {
+    model: 'old-model', provider: 'openai', turnStart: false, background: true, pricing: { input: 1, output: 2 },
+  });
+  assert.equal(after.contextTokens, 12345);
+  assert.equal(after.model, 'new-model');
+  assert.equal(after.provider, 'anthropic');
+  assert.equal(after.lastTurnCostUsd, 0.5);
+  assert.equal(after.inputTokens, 1100);
+  assert.equal(after.outputTokens, 110);
+  assert.equal(after.costUsd, 2.0012);
+});
+
+test('An account change before background dispatch cannot send the transcript with the new credential', async () => {
+  let credentials = 0;
+  api.setChatGPTOAuthService({ getUsableCredential: async () => (++credentials === 1
+    ? { accessToken: 'old', accountId: 'old-account' } : { accessToken: 'new', accountId: 'new-account' }) });
+  const initial = settings('chatgpt-oauth');
+  const agent = new api.AgentLoop(vaultApp().app, initial);
+  agent.importMessages(retainedHistory());
+  const original = JSON.stringify(agent.exportMessages());
+  const requests = transport(() => { throw Error('No request should reach the new account'); });
+  await agent.retainPortableHistory(initial, callbacks());
+  assert.equal(requests.length, 0);
+  assert.equal(JSON.stringify(agent.exportMessages()), original);
+});
+
+test('Real background summarization owns a separate abort controller from the foreground request', async () => {
+  const initial = settings('openai');
+  const agent = new api.AgentLoop(vaultApp().app, initial);
+  agent.importMessages(retainedHistory());
+  const foreground = new AbortController();
+  agent.request = foreground;
+  let arrived, finish;
+  const started = new Promise(resolve => { arrived = resolve; });
+  transport(() => {
+    arrived();
+    return new Promise(resolve => { finish = () => resolve(sse(streamEvents('openai', [text('Portable EARLIEST-FACT')]))); });
+  });
+  const pending = agent.retainPortableHistory(initial, callbacks());
+  await started;
+  const background = agent.retentionWork.request;
+  assert.equal(agent.request, foreground);
+  agent.abort();
+  assert.equal(foreground.signal.aborted, true);
+  assert.equal(background.signal.aborted, true);
+  finish();
+  await pending;
+  assert.equal(agent.exportMessages()[0].content, 'EARLIEST-FACT');
+});
+
+test('A background summary arriving after the final save is persisted and restored by the plugin', async () => {
+  const { plugin } = await chatSetup('openai');
+  const storage = chatFiles();
+  plugin.app.vault.adapter = storage.adapter;
+  plugin.chatHistory.push({ type: 'user', text: 'Earlier', turnId: 'first' });
+  // Use the production factory, including its background-save callback.
+  plugin.agents.clear();
+  const agent = plugin.agent;
+  agent.importMessages(retainedHistory());
+  let finish;
+  agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  const pending = agent.retainPortableHistory(plugin.settings, callbacks());
+  await settled();
+  await plugin.saveChatHistory();
+  assert.equal(plugin.activeConversation.agentMessages[0].content, 'EARLIEST-FACT');
+  finish('Portable EARLIEST-FACT');
+  await pending;
+  await plugin.saveChatHistory();
+  assert.equal(plugin.activeConversation.agentMessages[0].compaction.summary, 'Portable EARLIEST-FACT');
+  const restored = new api.ChatPlugin();
+  restored.app = plugin.app;
+  restored.settings = plugin.settings;
+  await restored.loadChatHistory();
+  assert.equal(restored.agent.exportMessages()[0].compaction.summary, 'Portable EARLIEST-FACT');
+});
+
+for (const action of ['switch', 'delete', 'unload']) test(`A pending plugin summary is safe across conversation ${action}`, async () => {
+  const { plugin } = await chatSetup('openai');
+  plugin.agents.clear();
+  const first = plugin.activeConversation;
+  first.chatHistory.push({ type: 'user', text: 'Earlier', turnId: 'first' });
+  const agent = plugin.agent;
+  agent.importMessages(retainedHistory());
+  let finish;
+  agent.summarize = () => new Promise(resolve => { finish = resolve; });
+  const pending = agent.retainPortableHistory(plugin.settings, callbacks());
+  await settled();
+  if (action === 'switch') {
+    plugin.startNewConversation();
+    assert.equal(plugin.agents.get(first.id), agent);
+  }
+  if (action === 'delete') await plugin.deleteConversation(first.id);
+  if (action === 'unload') plugin.onunload();
+  finish('Portable EARLIEST-FACT');
+  await pending;
+  await plugin.saveChatHistory();
+  if (action === 'switch') {
+    assert.equal(first.agentMessages[0].compaction.summary, 'Portable EARLIEST-FACT');
+    assert.equal(plugin.activeConversation.agentMessages.length, 0);
+  } else {
+    assert.equal(agent.exportMessages()[0].content, 'EARLIEST-FACT');
+    if (action === 'delete') assert.ok(!plugin.conversations.includes(first));
+  }
+});
+
+test('Manual compaction cancels background retention and cannot be overwritten by its late result', async () => {
+  const work = await heldRetention();
+  work.agent.summarize = async () => 'Manually compacted EARLIEST-FACT';
+  assert.equal(await work.agent.compact(), true);
+  assert.equal(work.signal.aborted, true);
+  work.finish();
+  await work.pending;
+  assert.equal(work.agent.exportMessages().length, 1);
+  assert.match(work.agent.exportMessages()[0].content, /Manually compacted EARLIEST-FACT/);
 });
 
 /** A summary request, by its instruction. */
@@ -385,6 +633,7 @@ for (const change of ['provider', 'model', 'api-key', 'chatgpt-account']) test(`
   await agent.run('Earliest fact: the archive key is EARLIEST-7319.', callbacks());
   await agent.run('Second compaction', callbacks());
   await agent.run('Third compaction', callbacks());
+  await agent.retentionWork?.promise;
   agent.trimForRetention();
   const saved = JSON.parse(JSON.stringify(api.chatState.savedConversation({ id: 'repeat', title: 'Repeated', customTitle: false, createdAt: 1, updatedAt: 1, chatHistory: [], agentMessages: agent.exportMessages() })));
   assert.match(JSON.stringify(saved.agentMessages), /EARLIEST-7319/);
@@ -439,6 +688,7 @@ for (const provider of ['openai', 'chatgpt-oauth']) test(`${provider}: ten nativ
   });
   for (let i = 0; i < 10; i++) {
     await agent.run(`${i === 0 ? 'EARLIEST-FACT' : 'Next window'} ${'x'.repeat(8192)}`, callbacks());
+    await agent.retentionWork?.promise;
     const saved = JSON.parse(JSON.stringify(agent.exportMessages()));
     assert.match(JSON.stringify(saved), /EARLIEST-FACT/);
     assert.ok(saved.length <= 7, `raw history grew to ${saved.length} messages`);

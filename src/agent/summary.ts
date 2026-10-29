@@ -62,6 +62,9 @@ export function transcript(messages: UnifiedMessage[], maxTokens: number): strin
     return `${message.role === "user" ? "User" : "Assistant"}: ${summary}${text}${receipts ? `\n${receipts}` : ""}`;
   });
   const all = lines.join("\n\n");
+  // Chunking needs the whole transcript; scanning it here would count every
+  // character a second time before summaryChunks counts its own budget.
+  if (maxTokens === Infinity) return all;
   let tokens = 0;
   let start = all.length;
   while (start > 0 && tokens + tokenCost(all.charCodeAt(start - 1)) <= maxTokens) {

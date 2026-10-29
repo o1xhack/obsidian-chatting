@@ -27,7 +27,7 @@ import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage, voiceTranscriptText } from "./system-prompt";
-import { cutBeforeTurn, editableTurn, fromLastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
+import { cutBeforeTurn, editableTurn, fromLastCompaction, lastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
 
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
@@ -40,6 +40,14 @@ import { SUMMARY_SYSTEM_PROMPT, isContextOverflow, summaryChunks, summaryChunkRe
 /** The turn ID of a summary message (it starts its own turn, with no visible entry). */
 function summaryTurnId(): string {
   return `summary-${newTurnId()}`;
+}
+
+interface PortableHistoryWork {
+  prefix: UnifiedMessage[];
+  settings: ChatSettings;
+  request: AbortController;
+  promise: Promise<void>;
+  summary?: string;
 }
 
 /**
@@ -177,8 +185,13 @@ export class AgentLoop {
   private skills: string | null = null;
   /** Failed portable-history work is retried later, without dropping raw context. */
   private retentionFailures = new WeakMap<UnifiedMessage, number>();
+  private retentionWork: PortableHistoryWork | null = null;
+  /** A foreground operation owns history across its awaits. Background work
+   * may finish meanwhile, but installs only at an explicit safe boundary. */
+  private historyBusy = 0;
+  private historyChanged = false;
 
-  constructor(app: App, settings: ChatSettings) {
+  constructor(app: App, settings: ChatSettings, private readonly onHistoryChanged?: () => void) {
     this.app = app;
     this.settings = settings;
   }
@@ -188,6 +201,7 @@ export class AgentLoop {
     this.runVersion++;
     this.steered = [];
     this.request?.abort();
+    this.cancelPortableHistory();
   }
 
   /**
@@ -247,6 +261,7 @@ export class AgentLoop {
 
   /** Continue from a saved API history (a new array). */
   importMessages(messages: UnifiedMessage[]): void {
+    this.cancelPortableHistory();
     this.messages = withoutLargeToolText([...messages]);
     this.pruneToolImages();
     clearOpenAIState();
@@ -256,6 +271,9 @@ export class AgentLoop {
   /** Retention may remove blobs while a request/tool is in flight. Keep the
    * inner result arrays, but detach the provider's old outer-array cursor. */
   invalidateHistoryCursor(): void {
+    // Attachment retention can mutate blocks in place; an object-identity
+    // check alone cannot validate a summary of the former payloads.
+    this.cancelPortableHistory();
     this.messages = [...this.messages];
     clearOpenAIState();
     clearChatGPTOAuthState();
@@ -285,7 +303,7 @@ export class AgentLoop {
   }
 
   isRunning(): boolean {
-    return this.holds > 0;
+    return this.holds > 0 || this.retentionWork !== null;
   }
 
   // ─── Compaction ───────────────────────────────────────────────────────
@@ -299,6 +317,7 @@ export class AgentLoop {
    */
   async compact(onUsage?: AgentCallbacks["onUsage"]): Promise<boolean> {
     if (this.messages.length === 0 || this.loopVersion) return false;
+    this.cancelPortableHistory();
     const version = ++this.runVersion;
     const isStopped = () => version !== this.runVersion;
     const summary = await this.summarize({ ...this.settings }, this.messages, isStopped, onUsage);
@@ -320,7 +339,7 @@ export class AgentLoop {
   private async prepareContext(settings: ChatSettings, contextTokens: number, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
     try {
       let handedOff = false;
-      const index = this.messages.map((message) => !!message.compaction).lastIndexOf(true);
+      const index = lastCompaction(this.messages);
       const marker = this.messages[index];
       const replay = marker?.replay;
       let replayable = replay?.provider === settings.provider && (!replay.model || replay.model === settings.model);
@@ -331,6 +350,7 @@ export class AgentLoop {
         if (isStopped()) return;
       }
       if (marker?.compaction && !marker.compaction.summary && !replayable && index > 0) {
+        this.cancelPortableHistory();
         const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
         if (isStopped()) return;
         this.messages = this.messages.map((message, position) => position === index ? { ...message, compaction: { summary } } : message);
@@ -338,11 +358,12 @@ export class AgentLoop {
         debugLog(this.app, "COMPACTED", { reason: "provider switch" });
       }
       if (handedOff) this.trimForRetention();
-      else await this.retainPortableHistory(settings, callbacks, isStopped);
+      else void this.retainPortableHistory(settings, callbacks);
       if (isStopped()) return;
       const option = catalogModel(settings.provider, settings.model);
       const threshold = compactThreshold(settings.provider, option, settings);
       if (!handedOff && !isStopped() && threshold && contextTokens >= threshold && !this.compactsNatively(settings, option) && this.messages.length) {
+        this.cancelPortableHistory();
         const summary = await this.summarize(settings, this.messages, isStopped, callbacks.onUsage);
         if (isStopped()) return;
         this.messages = [summaryMessage(summary, summaryTurnId())];
@@ -358,31 +379,97 @@ export class AgentLoop {
    * Keep at most two native compaction windows of raw history, backed by
    * a readable rolling summary. Opaque provider items cannot stand in for
    * deleted text when another provider/model/account takes over.
-   * Install the summary only after it succeeds; failure leaves history intact.
+   * One independent background request, never awaited by the answer. Raw
+   * history stays until its complete snapshot has a successful summary.
    */
-  private async retainPortableHistory(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<void> {
-    const boundaries = this.messages.flatMap((message, index) => message.compaction ? [index] : []);
-    const index = boundaries.at(-2) ?? -1;
-    if (index <= 0) return;
+  private retainPortableHistory(settings: ChatSettings, callbacks: AgentCallbacks): Promise<void> {
+    if (this.retentionWork) return this.retentionWork.promise;
+    // Only the newest two boundaries matter; don't scan/allocate the whole
+    // history at every tool step.
+    let index = lastCompaction(this.messages);
+    for (index--; index >= 0 && !this.messages[index].compaction; index--) { /* previous boundary */ }
+    if (index <= 0) return Promise.resolve();
     const marker = this.messages[index];
-    if (marker.compaction?.summary) { this.trimForRetention(); return; }
+    if (marker.compaction?.summary) return Promise.resolve();
     const failedAt = this.retentionFailures.get(marker);
-    if (failedAt !== undefined && Date.now() - failedAt < 60_000) return;
-    try {
-      const summary = await this.summarize(settings, this.messages.slice(0, index), isStopped, callbacks.onUsage);
-      if (isStopped()) return;
-      // New objects preserve preflight/edit rollback snapshots and detach the
-      // old response cursor. Native replay still starts at its latest item.
-      this.messages = this.messages.map((message, position) => position === index
-        ? { ...message, compaction: { ...message.compaction, summary } } : message);
-      this.trimForRetention();
-      this.retentionFailures.delete(marker);
-      debugLog(this.app, "COMPACTED", { reason: "portable history", chars: summary.length });
-    } catch (error) {
-      if (isStopped()) return;
-      this.retentionFailures.set(marker, Date.now());
-      debugLog(this.app, "COMPACTION_FAILED", { reason: "portable history", error: error instanceof Error ? error.message : String(error) });
+    if (failedAt !== undefined && Date.now() - failedAt < 60_000) return Promise.resolve();
+    const work: PortableHistoryWork = {
+      prefix: this.messages.slice(0, index + 1), settings: { ...settings },
+      request: new AbortController(), promise: Promise.resolve(),
+    };
+    this.retentionWork = work;
+    const isStopped = () => this.retentionWork !== work || work.request.signal.aborted || !this.sameRetentionSettings(work.settings);
+    work.promise = (async () => {
+      let usedTokens = false;
+      try {
+        const identity = await this.summaryIdentity(work.settings);
+        if (isStopped()) return;
+        const summary = await this.summarize(work.settings, work.prefix.slice(0, -1), isStopped,
+          (usage, request) => {
+            if (isStopped()) return;
+            usedTokens = true;
+            callbacks.onUsage?.(usage, { ...request, background: true });
+          }, { request: work.request, identity });
+        if (isStopped() || identity !== await this.summaryIdentity(this.settings)) return;
+        if (isStopped()) return;
+        work.summary = summary;
+        if (!this.historyBusy) this.applyPortableHistory();
+      } catch (error) {
+        if (isStopped()) return;
+        this.retentionFailures.set(marker, Date.now());
+        debugLog(this.app, "COMPACTION_FAILED", { reason: "portable history", error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        if (this.retentionWork === work && work.summary === undefined) this.retentionWork = null;
+        // A background summary can finish after the turn's final save. Save
+        // its usage on failure too; successful installation saves below.
+        if (usedTokens && work.summary === undefined) this.notifyHistoryChanged();
+      }
+    })();
+    return work.promise;
+  }
+
+  private sameRetentionSettings(settings: ChatSettings): boolean {
+    return settings.provider === this.settings.provider && settings.model === this.settings.model && settings.apiKey === this.settings.apiKey;
+  }
+
+  private summaryIdentity(settings: ChatSettings): Promise<string | undefined> {
+    return settings.provider === "chatgpt-oauth" ? chatgptReplayIdentity() : catalogIdentity(settings.provider, settings.apiKey);
+  }
+
+  private cancelPortableHistory(): void {
+    this.retentionWork?.request.abort();
+    this.retentionWork = null;
+  }
+
+  private notifyHistoryChanged(): void {
+    this.historyChanged = true;
+    this.flushHistoryChanged();
+  }
+
+  private flushHistoryChanged(): void {
+    if (this.historyBusy || !this.historyChanged) return;
+    this.historyChanged = false;
+    this.onHistoryChanged?.();
+  }
+
+  /** Called between requests/tools or when completely idle, never by a
+   * background completion while the foreground holds a mutable snapshot. */
+  private applyPortableHistory(): void {
+    const work = this.retentionWork;
+    if (!work?.summary) return;
+    this.retentionWork = null;
+    if (!this.sameRetentionSettings(work.settings) || work.prefix.some((message, i) => this.messages[i] !== message)) {
+      this.notifyHistoryChanged();
+      return;
     }
+    const index = work.prefix.length - 1;
+    const marker = work.prefix[index];
+    this.messages = [{ ...marker, compaction: { ...marker.compaction, summary: work.summary } }, ...this.messages.slice(index + 1)];
+    // The new array detaches this chat's cursor without resetting the
+    // independent caches of other conversations that are still answering.
+    this.retentionFailures.delete(marker);
+    debugLog(this.app, "COMPACTED", { reason: "portable history", chars: work.summary.length });
+    this.notifyHistoryChanged();
   }
 
   /** The provider compacts this model's context on its side. */
@@ -398,7 +485,9 @@ export class AgentLoop {
    * or the summary failed.
    */
   private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<boolean> {
-    const start = this.messages.map((message) => !!message.turnId).lastIndexOf(true);
+    this.cancelPortableHistory();
+    let start = this.messages.length - 1;
+    while (start >= 0 && !this.messages[start].turnId) start--;
     if (start <= 0) return false;
     try {
       const summary = await this.summarize(settings, this.messages.slice(0, start), isStopped, callbacks.onUsage);
@@ -419,18 +508,19 @@ export class AgentLoop {
    * request of the chat (`onUsage`).
    */
   private async summarize(settings: ChatSettings, messages: UnifiedMessage[], isStopped: () => boolean,
-    onUsage?: AgentCallbacks["onUsage"]): Promise<string> {
-    const identity = settings.provider === "chatgpt-oauth" ? await chatgptReplayIdentity() : await catalogIdentity(settings.provider, settings.apiKey);
+    onUsage?: AgentCallbacks["onUsage"], background?: { request: AbortController; identity: string | undefined }): Promise<string> {
+    const identity = background ? background.identity : await this.summaryIdentity(settings);
     const window = settings.modelCatalog?.entries.find(entry => entry.provider === settings.provider && entry.identity === identity)
       ?.models.find(model => model.value === settings.model)?.contextWindow;
-    const request = new AbortController();
-    this.request = request;
+    const request = background?.request ?? new AbortController();
+    if (!background) this.request = request;
     try {
       let summary = "";
       for (const chunk of summaryChunks(messages, window)) {
         if (isStopped()) throw new Error("Summarization stopped.");
         const response = await sendMessage({ ...settings, enableWebSearch: false, mcpServers: [] },
-          [{ role: "user", content: summaryChunkRequest(chunk, summary) }], [], SUMMARY_SYSTEM_PROMPT, isStopped, { signal: request.signal });
+          [{ role: "user", content: summaryChunkRequest(chunk, summary) }], [], SUMMARY_SYSTEM_PROMPT, isStopped,
+          { signal: request.signal, ...(background && settings.provider === "chatgpt-oauth" ? { expectedAccountIdentity: identity } : {}) });
         if (response.usage) onUsage?.(response.usage, { provider: settings.provider, model: settings.model, turnStart: false });
         const text = response.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("").trim();
         if (!text) throw new Error("The summary came back empty.");
@@ -558,98 +648,107 @@ export class AgentLoop {
     contextTokens = 0,
     voice: VoiceTurn[] | null = null
   ): Promise<void> {
-    const version = ++this.runVersion;
-    const isStopped = () => version !== this.runVersion;
-    this.voiceTurn = !!voice;
-    // This turn's selection: the tools change only that text of its note (a
-    // copy, since its text follows the edits).
-    const scope = selection ? { ...selection } : undefined;
-    // Keep one provider/model/credential configuration for this entire turn.
-    // MCP revocation stays live even inside the dispatcher's retry wait.
-    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
-    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
+    this.historyBusy++;
+    try {
+      const version = ++this.runVersion;
+      const isStopped = () => version !== this.runVersion;
+      this.voiceTurn = !!voice;
+      // This turn's selection: the tools change only that text of its note (a
+      // copy, since its text follows the edits).
+      const scope = selection ? { ...selection } : undefined;
+      // Keep one provider/model/credential configuration for this entire turn.
+      // MCP revocation stays live even inside the dispatcher's retry wait.
+      const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+      const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
 
-    // Build context once per user turn and prepend to the user message;
-    // the files the message links to come next, the message itself last.
-    const context = { ...buildContext(this.app, !!voice, voice ?? []), ...(notes.length ? { notes } : {}) };
-    let contextPrefix = mentioned ? `${buildContextMessage(context)}
+      // Build context once per user turn and prepend to the user message;
+      // the files the message links to come next, the message itself last.
+      const context = { ...buildContext(this.app, !!voice, voice ?? []), ...(notes.length ? { notes } : {}) };
+      let contextPrefix = mentioned ? `${buildContextMessage(context)}
 
 ${mentioned.text}` : buildContextMessage(context);
-    images = [...images, ...mentioned?.images ?? []];
-    files = [...files, ...mentioned?.files ?? []];
-    const budgetError = attachmentBudgetError(images, files);
-    if (budgetError) {
-      (callbacks.onPreflightRejected ?? callbacks.onError)(budgetError);
-      return;
-    }
-    // The history before this turn: a refusal before the provider (rules
-    // that can't be read, a request too large) restores it, also when the
-    // summary below replaced it.
-    const beforeTurn = this.messages.slice();
-    // A summary first where the provider can't compact.
-    await this.prepareContext(turnSettings, contextTokens, callbacks, isStopped);
-    if (isStopped()) return;
-    let instructionSources: string[] = [];
-    try {
-      const prospective: UnifiedMessage[] = [...this.messages, { role: "user", content: "", turnId }];
-      // Rules given before the last compaction are gone with it: given again.
-      const retained = afterCompaction(prospective, () => true);
-      const paths = [...mentioned?.instructionPaths ?? [], ...selection ? [selection.filePath] : []];
-      const rules = await folderInstructionContext(this.app, paths, instructionsGiven(retained));
+      images = [...images, ...mentioned?.images ?? []];
+      files = [...files, ...mentioned?.files ?? []];
+      const budgetError = attachmentBudgetError(images, files);
+      if (budgetError) {
+        (callbacks.onPreflightRejected ?? callbacks.onError)(budgetError);
+        return;
+      }
+      // The history before this turn: a refusal before the provider (rules
+      // that can't be read, a request too large) restores it, also when the
+      // summary below replaced it.
+      const beforeTurn = this.messages.slice();
+      // A summary first where the provider can't compact.
+      await this.prepareContext(turnSettings, contextTokens, callbacks, isStopped);
       if (isStopped()) return;
-      instructionSources = rules.sources;
-      if (rules.text) contextPrefix = `${rules.text}\n\n${contextPrefix}`;
-    } catch (e) {
-      if (isStopped()) return;
-      this.messages = beforeTurn;
-      (callbacks.onPreflightRejected ?? callbacks.onError)(e instanceof Error ? e.message : String(e));
-      return;
-    }
+      let instructionSources: string[] = [];
+      try {
+        const prospective: UnifiedMessage[] = [...this.messages, { role: "user", content: "", turnId }];
+        // Rules given before the last compaction are gone with it: given again.
+        const retained = afterCompaction(prospective, () => true);
+        const paths = [...mentioned?.instructionPaths ?? [], ...selection ? [selection.filePath] : []];
+        const rules = await folderInstructionContext(this.app, paths, instructionsGiven(retained));
+        if (isStopped()) return;
+        instructionSources = rules.sources;
+        if (rules.text) contextPrefix = `${rules.text}\n\n${contextPrefix}`;
+      } catch (e) {
+        if (isStopped()) return;
+        this.messages = beforeTurn;
+        (callbacks.onPreflightRejected ?? callbacks.onError)(e instanceof Error ? e.message : String(e));
+        return;
+      }
 
-    // If there's a selection, inject it as scoped context
-    let fullMessage: string;
-    if (selection) {
-      fullMessage = [
-        contextPrefix,
-        "",
-        `[Selection scope: The user has selected text in ${selection.filePath}. Work only within this selection. When using edit_document, use find_replace with text from within this selection; 'find' is matched inside the selection, so no surrounding context is needed. Do not modify text outside the selection.]`,
-        "",
-        `Selected text:`,
-        selection.text.split(/\r?\n/).map((line) => `> ${line}`).join("\n"),
-        "",
+      // If there's a selection, inject it as scoped context
+      let fullMessage: string;
+      if (selection) {
+        fullMessage = [
+          contextPrefix,
+          "",
+          `[Selection scope: The user has selected text in ${selection.filePath}. Work only within this selection. When using edit_document, use find_replace with text from within this selection; 'find' is matched inside the selection, so no surrounding context is needed. Do not modify text outside the selection.]`,
+          "",
+          `Selected text:`,
+          selection.text.split(/\r?\n/).map((line) => `> ${line}`).join("\n"),
+          "",
+          userMessage,
+        ].join("\n");
+      } else {
+        fullMessage = `${contextPrefix}\n\n${userMessage}`;
+      }
+
+      const content: string | ContentBlock[] = images.length > 0 || files.length > 0
+        ? [
+            ...images.map((image): ContentBlock => ({ type: "image", image })),
+            ...files.map((file): ContentBlock => ({ type: "file", file })),
+            { type: "text", text: fullMessage },
+          ]
+        : fullMessage;
+      this.messages.push({ role: "user", content, turnId, ...(instructionSources.length ? { instructionSources } : {}) });
+
+      // What the last compaction covers goes; a new array only then, so
+      // OpenAI keeps chaining and the prompt caches keep their prefix.
+      this.messages = fromLastCompaction(this.messages);
+      this.pruneToolImages();
+
+      debugLog(this.app, "USER_MESSAGE", {
         userMessage,
-      ].join("\n");
-    } else {
-      fullMessage = `${contextPrefix}\n\n${userMessage}`;
+        // As the model gets it: the context lines (open note, voice context, notes, linked files) first.
+        sent: fullMessage,
+        model: turnSettings.model,
+        provider: turnSettings.provider,
+        hasSelection: !!selection,
+        imageCount: images.length,
+        imageNames: images.map((image) => image.fileName),
+        fileNames: files.map((file) => file.fileName),
+      });
+
+      await this.loop(version, callbacks, turnSettings, scope, beforeTurn);
+    } finally {
+      this.historyBusy--;
+      if (!this.historyBusy) {
+        this.applyPortableHistory();
+        this.flushHistoryChanged();
+      }
     }
-
-    const content: string | ContentBlock[] = images.length > 0 || files.length > 0
-      ? [
-          ...images.map((image): ContentBlock => ({ type: "image", image })),
-          ...files.map((file): ContentBlock => ({ type: "file", file })),
-          { type: "text", text: fullMessage },
-        ]
-      : fullMessage;
-    this.messages.push({ role: "user", content, turnId, ...(instructionSources.length ? { instructionSources } : {}) });
-
-    // What the last compaction covers goes; a new array only then, so
-    // OpenAI keeps chaining and the prompt caches keep their prefix.
-    this.messages = fromLastCompaction(this.messages);
-    this.pruneToolImages();
-
-    debugLog(this.app, "USER_MESSAGE", {
-      userMessage,
-      // As the model gets it: the context lines (open note, voice context, notes, linked files) first.
-      sent: fullMessage,
-      model: turnSettings.model,
-      provider: turnSettings.provider,
-      hasSelection: !!selection,
-      imageCount: images.length,
-      imageNames: images.map((image) => image.fileName),
-      fileNames: files.map((file) => file.fileName),
-    });
-
-    await this.loop(version, callbacks, turnSettings, scope, beforeTurn);
   }
 
   /**
@@ -660,16 +759,24 @@ ${mentioned.text}` : buildContextMessage(context);
    * selection; its fingerprint still refuses writes after the note changed.
    */
   async continueTurn(callbacks: AgentCallbacks, selection?: SelectionScope): Promise<void> {
-    const version = ++this.runVersion;
-    this.voiceTurn = false;
-    if (!this.owesAnswer()) return;
-    debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
-    const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
-    const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
-    await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
-    if (version !== this.runVersion) return;
-    await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
-
+    this.historyBusy++;
+    try {
+      const version = ++this.runVersion;
+      this.voiceTurn = false;
+      if (!this.owesAnswer()) return;
+      debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
+      const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
+      const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
+      await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
+      if (version !== this.runVersion) return;
+      await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
+    } finally {
+      this.historyBusy--;
+      if (!this.historyBusy) {
+        this.applyPortableHistory();
+        this.flushHistoryChanged();
+      }
+    }
   }
 
   /** The agentic loop on the current history, for run `version`; `steer()` adds to it meanwhile. */
@@ -713,7 +820,8 @@ ${mentioned.text}` : buildContextMessage(context);
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
-      await this.retainPortableHistory(turnSettings, callbacks, isStopped);
+      this.applyPortableHistory();
+      void this.retainPortableHistory(turnSettings, callbacks);
       if (isStopped()) return;
       callbacks.onThinking();
       if (isStopped()) return;
@@ -853,6 +961,7 @@ ${mentioned.text}` : buildContextMessage(context);
         ...(response.compaction ? { compaction: response.compaction } : {}),
       });
       if (response.compaction) callbacks.onCompacted?.();
+      if (response.compaction) void this.retainPortableHistory(turnSettings, callbacks);
       // Results of MCP calls stay in the replay: bounded like tool text.
       if (response.serverCalls?.length) this.messages = withoutLargeToolText(this.messages);
 

@@ -14,7 +14,8 @@ function startsUserTurn(message: UnifiedMessage): boolean {
 
 /** Index of the last message whose request compacted the context, or -1. */
 export function lastCompaction(messages: UnifiedMessage[]): number {
-  return messages.map((message) => !!message.compaction).lastIndexOf(true);
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].compaction) return i;
+  return -1;
 }
 
 /**
@@ -25,8 +26,10 @@ export function lastCompaction(messages: UnifiedMessage[]): number {
  * the latest native compaction; attachment and tool-text budgets still apply.
  */
 export function fromLastCompaction(messages: UnifiedMessage[]): UnifiedMessage[] {
-  const start = messages.map(message => !!message.compaction?.summary).lastIndexOf(true);
-  return start > 0 ? messages.slice(start) : messages;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].compaction?.summary) return i > 0 ? messages.slice(i) : messages;
+  }
+  return messages;
 }
 
 /** Tool results of the last 2 user turns keep their images and files when sent. */
