@@ -148,7 +148,7 @@ changes). `usage.test.mjs`: each provider's token counts (cache reads and
 writes, a compaction pass), the cost estimate, windows and prices from
 Anthropic's model list and pricing page, the Codex model list and OpenAI's
 documentation page (read once a day), the context ring with its compaction
-point and tokens used, saved with the chat and checked when loaded, gone
+point (full there, or at the window where none is known) and tokens used, saved with the chat and checked when loaded, gone
 after Clear; the ChatGPT plan without cost. `compaction.test.mjs`:
 compaction (Anthropic's threshold edit and beta header where the model has
 it, OpenAI's and the Codex route's `context_management`, what later requests

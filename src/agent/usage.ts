@@ -73,6 +73,16 @@ export function formatCost(usd: number): string {
 }
 
 /** "45.2k", "1.1M". */
+/**
+ * How full the context ring is (0 to 1): full means compaction, so the
+ * share of the compaction point, or of the model's window where no point is
+ * known. Undefined without either.
+ */
+export function contextShare(contextTokens: number, compactAt: number | undefined, contextWindow: number | undefined): number | undefined {
+  const limit = compactAt ?? contextWindow;
+  return limit ? Math.min(1, contextTokens / limit) : undefined;
+}
+
 export function formatTokens(tokens: number): string {
   if (tokens >= MILLION) return `${(tokens / MILLION).toFixed(1).replace(/\.0$/, "")}M`;
   if (tokens >= 1000) return `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
