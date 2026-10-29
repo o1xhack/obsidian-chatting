@@ -121,7 +121,7 @@ export default class ChatPlugin extends Plugin {
   agentFor(conversation: ConversationRecord): AgentLoop {
     let agent = this.agents.get(conversation.id);
     if (!agent) {
-      agent = new AgentLoop(this.app, this.settings);
+      agent = new AgentLoop(this.app, this.settings, conversation.id);
       // Also forgets OpenAI's response to chain to: it belongs to another conversation.
       agent.importMessages(conversation.agentMessages);
       this.agents.set(conversation.id, agent);

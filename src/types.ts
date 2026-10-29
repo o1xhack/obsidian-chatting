@@ -224,6 +224,12 @@ export interface StreamOptions {
   /** The provider started a tool with possible effects (an MCP call): the request must not be sent again. */
   onServerTool?: () => void;
   signal?: AbortSignal;
+  /**
+   * The conversation the request belongs to. The ChatGPT route sends it as
+   * Codex does (`prompt_cache_key`, `session_id` header): without it the
+   * backend caches only the tool definitions, not the conversation.
+   */
+  conversationId?: string;
 }
 
 // ─── Conversation Context ───────────────────────────────────────────────────
