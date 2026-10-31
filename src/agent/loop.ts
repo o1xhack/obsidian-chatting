@@ -547,7 +547,8 @@ export class AgentLoop {
    * whose message never reached the history isn't continued as another).
    */
   owesAnswer(turnId?: string): boolean {
-    if (this.messages.at(-1)?.role !== "user") return false;
+    const last = this.messages.at(-1);
+    if (last?.role !== "user" && !(last?.role === "assistant" && last.awaitingContinuation === true)) return false;
     if (turnId === undefined) return true;
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const id = this.messages[i].turnId;
@@ -965,6 +966,7 @@ ${mentioned.text}` : buildContextMessage(context);
       // Append assistant message to history
       this.messages.push({
         role: "assistant", content: response.content, replay: response.replay,
+        ...(response.stopReason === "pause_turn" ? { awaitingContinuation: true } : {}),
         ...(response.compaction ? { compaction: response.compaction } : {}),
       });
       if (response.compaction) callbacks.onCompacted?.();
@@ -1064,7 +1066,7 @@ ${mentioned.text}` : buildContextMessage(context);
     }
 
     // All steps used: a pause the user can continue from (the history ends in tool results).
-    if (callbacks.onStepLimit) callbacks.onStepLimit(maxIterations);
+    if (callbacks.onStepLimit) callbacks.onStepLimit(maxIterations, scope);
     else callbacks.onError(
       `Reached maximum iterations (${maxIterations}). The task may be too complex for a single conversation turn.`
     );

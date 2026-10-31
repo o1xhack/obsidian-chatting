@@ -38,6 +38,7 @@ function fakeChat() {
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
+    addChanges(turnId, files, state) { chat.shown.push({ id: nextId++, type: 'changes', turnId, files, changesState: state }); },
     showThinking(label = '') { chat.thinkingLabels.push(label); }, hideThinking() {},
     showAskUser(question) { if (question !== undefined) chat.addAssistantMessage(question); return new Promise(resolve => { chat.askUser = resolve; }); },
     cancelAskUser() { const resolve = chat.askUser; chat.askUser = null; resolve?.(''); },
@@ -471,7 +472,8 @@ test('A finished turn leaves no mark; Continue only while the model owes an answ
   }
 });
 
-for (const provider of ['anthropic', 'openai']) test(`${provider}: a turn that used all its steps pauses with Continue, which goes on without running a step again`, async () => {
+for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) test(`${provider}: a turn that used all its steps pauses with Continue, which goes on without running a step again`, async () => {
+  api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'fake', accountId: 'fake' }) });
   const { plugin, view, chat, writes } = await chatSetup(provider);
   plugin.settings.maxIterations = 2;
   // With an MCP server on, the pause still offers Continue: no request is in flight.
@@ -497,6 +499,43 @@ for (const provider of ['anthropic', 'openai']) test(`${provider}: a turn that u
   assert.equal(plugin.chatHistory.at(-1).text, 'Done.');
   assert.equal(chat.continueShown, false);
   assert.equal(writes.at(-1).conversations[0].pendingTurn, undefined);
+});
+
+test('Anthropic server pause at the step limit remains continuable after saving and reloading', async () => {
+  const { plugin, view, chat, writes } = await chatSetup('anthropic');
+  plugin.settings.maxIterations = 1;
+  const raw = [{ type: 'server_tool_use', id: 'search-paused', name: 'web_search', input: { query: 'test' } }];
+  const requests = transport((_body, index) => index === 0
+    ? response('anthropic', raw, 'pause_turn')
+    : response('anthropic', [text('Search finished')]));
+  await view.handleUserMessage('Search', null);
+  assert.equal(chat.continueShown, true);
+  await plugin.saveChatHistory();
+  const restored = await chatSetup('anthropic', JSON.parse(JSON.stringify(writes.at(-1))));
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, true);
+  await restored.view.continueTurn();
+  assert.deepEqual(requests[1].messages.at(-1), { role: 'assistant', content: raw });
+  assert.equal(restored.plugin.chatHistory.at(-1).text, 'Search finished');
+  assert.equal(restored.plugin.activeConversation.pendingTurn, undefined);
+});
+
+for (const restart of [false, true]) for (const externalEdit of [false, true]) test(`Scoped pause keeps its updated selection (restart=${restart}, externalEdit=${externalEdit})`, async () => {
+  let state = await chatSetup('anthropic');
+  state.plugin.settings.maxIterations = 1;
+  transport((_body, index) => index > 1 ? response('anthropic', [text('Done')]) : response('anthropic', [call(`edit-${index}`, 'edit_document', {
+    path: 'Untitled.md', operation: 'find_replace', find: index === 0 ? 'rig' : 'NEW', content: index === 0 ? 'NEW' : 'OK',
+  })], 'tool_use'));
+  await state.view.handleUserMessage('Edit the selected text twice', { filePath: 'Untitled.md', text: 'rig', from: 1, sourceText: 'Original' });
+  assert.equal(await state.app.vault.cachedRead(state.app.vault.getFileByPath('Untitled.md')), 'ONEWinal');
+  await state.plugin.saveChatHistory();
+  const saved = JSON.parse(JSON.stringify(state.writes.at(-1)));
+  if (restart) state = await chatSetup('anthropic', saved);
+  await state.app.vault.process(state.app.vault.getFileByPath('Untitled.md'), () => externalEdit ? 'ONEWinal outside edit' : 'ONEWinal');
+  await state.view.continueTurn();
+  assert.equal(await state.app.vault.cachedRead(state.app.vault.getFileByPath('Untitled.md')), externalEdit ? 'ONEWinal outside edit' : 'OOKinal');
+  assert.equal(state.plugin.chatHistory.find(row => row.type === 'user' && row.turnId).selection.text, 'rig');
+  assert.equal(state.plugin.chatHistory.filter(row => row.type === 'tool-result').at(-1).toolResult.isError, externalEdit);
 });
 
 test('Continue only for the turn the API history ends in: a mark of a message that never reached it offers none', () => {

@@ -247,6 +247,54 @@ function editingModel() {
 const sentText = body => JSON.stringify(body.messages.at(-1).content);
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
+test('Edits across repeated step-limit pauses share one complete undo log', async () => {
+  const { plugin, view, files } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  const requests = transport((_body, index) => index < 2
+    ? response('anthropic', [call(`edit-${index}`, 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: `Edit ${index}` })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await view.handleUserMessage('Edit twice', null);
+  const turnId = plugin.activeConversation.pendingTurn.turnId;
+  await view.continueTurn();
+  await view.continueTurn();
+  const rows = plugin.chatHistory.filter(row => row.type === 'changes');
+  assert.equal(rows.length, 1);
+  assert.equal(requests.length, 3);
+  assert.equal(files.get('Plan.md'), 'Edit 1');
+  assert.deepEqual(await plugin.changeLogs.get(rows[0]).conflicts(plugin.app), []);
+  await view.undoChanges(turnId);
+  assert.equal(files.get('Plan.md'), 'My plan');
+});
+
+test('Undoing a paused answer dismisses Continue so stale edit receipts cannot be resumed', async () => {
+  const { plugin, view, files } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  editingModel();
+  await view.handleUserMessage('Rewrite my plan', null);
+  const turnId = plugin.activeConversation.pendingTurn.turnId;
+  await view.undoChanges(turnId);
+  assert.equal(files.get('Plan.md'), 'My plan');
+  assert.equal(plugin.activeConversation.pendingTurn, undefined);
+});
+
+test('Continuing after a reload keeps the full changed-file list without offering partial undo', async () => {
+  const { plugin, view, writes } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  editingModel();
+  await view.handleUserMessage('Rewrite my plan', null);
+  await plugin.saveChatHistory();
+  const restored = await chatSetup(JSON.parse(JSON.stringify(writes.at(-1))));
+  restored.files.set('Plan.md', 'AI plan');
+  transport((_body, index) => index === 0
+    ? response('anthropic', [call('again', 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: 'Final plan' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await restored.view.continueTurn();
+  const rows = restored.plugin.chatHistory.filter(row => row.type === 'changes');
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].files, ['Plan.md']);
+  assert.equal(restored.plugin.changeLogs.get(rows[0]).canUndo(), false);
+});
+
 // The changes row of the latest turn that has one.
 const changesRow = (plugin) => plugin.chatHistory.findLast((e) => e.type === 'changes');
 

@@ -230,3 +230,10 @@ Production regression tests also cover dynamic catalogs, 24-hour persistence, re
 Live validation results and their limits are recorded in [oauth-live-validation.md](oauth-live-validation.md).
 
 Portable-history retention also covers a delayed background summary alongside a normal answer, single-flight execution, safe installation, account-bound dispatch, independent cancellation, stale snapshots, usage totals, durable restore, switching/deleting/unloading a chat, and unrelated response cursors (`compaction.test.mjs`).
+
+`native-pr-56-59.mjs` runs the integrated pause/Continue, current-turn text,
+undo and context-ring UI in the dedicated desktop test vault. It uses real
+Obsidian/Svelte/view/loop/vault APIs with synthetic provider transport and a
+temporary helper plugin, removed afterward. It does not replace the installed
+chat plugin or save its conversations/settings. Existing non-QA vault files
+are hash-checked. This is not live-provider or physical-phone validation.

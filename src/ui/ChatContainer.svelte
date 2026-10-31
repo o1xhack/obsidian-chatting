@@ -576,6 +576,7 @@
    * before the answer that reports the change (at the end without one).
    */
   export function addChanges(turnId: string, files: string[], state: ChangesState): void {
+    messages = messages.filter(m => m.type !== "changes" || m.turnId !== turnId);
     const row: ChatMessage = { id: nextId++, type: "changes", turnId, files, changesState: state };
     const start = messages.findIndex((m) => m.type === "user" && m.turnId === turnId);
     const later = messages.findIndex((m, i) => i > start && m.type === "user" && !!m.turnId && m.turnId !== turnId);

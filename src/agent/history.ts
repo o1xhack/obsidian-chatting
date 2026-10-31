@@ -58,7 +58,7 @@ export function boundedToolText(text: string, limit = MAX_TOOL_TEXT_CHARS): stri
  * As in the API history, the last turn's rows (after its user row) take
  * only the per-result cap: the chat shows in full what the model has.
  */
-export function withoutLargeVisibleToolText<T extends { type?: string; turnId?: string; toolResult?: ToolResult; steps?: T[] }>(rows: T[]): T[] {
+export function withoutLargeVisibleToolText<T extends { type?: string; turnId?: string; toolName?: string; toolResult?: ToolResult; steps?: T[] }>(rows: T[]): T[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
   let turnStart = -1;
   for (let i = rows.length - 1; i >= 0 && turnStart === -1; i--) if (rows[i].type === "user" && rows[i].turnId) turnStart = i;
@@ -67,7 +67,7 @@ export function withoutLargeVisibleToolText<T extends { type?: string; turnId?: 
     const next = [...source];
     for (let i = source.length - 1; i >= 0; i--) {
       const row = source[i];
-      const inLastTurn = lastTurn(i);
+      const inLastTurn = lastTurn(i) && !row.toolName?.startsWith("mcp:");
       const steps = row.steps && visit(row.steps, () => inLastTurn);
       let toolResult = row.toolResult;
       if (toolResult && typeof toolResult.result === "string") {

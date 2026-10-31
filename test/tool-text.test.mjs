@@ -95,3 +95,11 @@ test("The chat shows the last turn's tool results in full too; earlier turns sha
   assert.match(bounded[1].toolResult.result, /Tool text truncated/);
   assert.equal(api.withoutLargeVisibleToolText(bounded), bounded);
 });
+
+test('MCP rows keep their shared text allowance even alongside current-turn local reads', () => {
+  const result = name => ({ type: 'tool-result', toolName: name, toolResult: { result: 'R'.repeat(80000), isError: false } });
+  const rows = [{ type: 'user', turnId: 't' }, result('mcp:remote:read'), result('mcp:remote:read'), result('mcp:remote:read'), result('read_document')];
+  const bounded = api.withoutLargeVisibleToolText(rows);
+  assert.match(bounded[1].toolResult.result, /Tool text truncated/);
+  assert.equal(bounded[4].toolResult.result.length, 80000);
+});

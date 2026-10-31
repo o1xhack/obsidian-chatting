@@ -11,6 +11,7 @@ import {
 import type { ChatSettings, SelectionScope, ChatHistoryEntry, ConversationSummary, UnifiedMessage } from "./types";
 import { DEFAULT_SETTINGS, DEFAULT_PROVIDER_MODELS } from "./types";
 import { copiesBefore } from "./tools/executor";
+import { isSavedSelection } from "./selection-history";
 import { ChatSettingTab, getModelHeaderLabel } from "./settings";
 import { ObsidianChatView, VIEW_TYPE_CHAT } from "./ui/chat-view";
 import { closeFollowTab, closeLeftoverFollowTab } from "./ui/show-in-view";
@@ -126,7 +127,6 @@ export default class ChatPlugin extends Plugin {
         if (conversation.id === this.activeConversationId) this.getChatView()?.updateUsage();
         void this.saveChatHistory();
       }, conversation.id);
-
       // Also forgets OpenAI's response to chain to: it belongs to another conversation.
       agent.importMessages(conversation.agentMessages);
       this.agents.set(conversation.id, agent);
@@ -1414,6 +1414,7 @@ function isSavedHistories(value: Record<string, unknown>, imagesWithData: boolea
   return !Array.isArray(value.agentMessages) || value.agentMessages.every(message =>
     isRecord(message) && (message.role === "user" || message.role === "assistant") &&
     (!("turnId" in message) || typeof message.turnId === "string") &&
+    (!("awaitingContinuation" in message) || (message.role === "assistant" && typeof message.awaitingContinuation === "boolean")) &&
     (typeof message.content === "string" || (Array.isArray(message.content) &&
       message.content.every(block => isRecord(block) && typeof block.type === "string" &&
         (block.type !== "image" || isSavedImage(block.image, true)) &&
@@ -1462,14 +1463,6 @@ function isSavedImage(image: unknown, withData: boolean): boolean {
     typeof image.fileName === "string" && typeof image.mediaType === "string" &&
     (typeof image.data === "string" || (!withData && !("data" in image))) && typeof image.sizeBytes === "number" &&
     Number.isFinite(image.sizeBytes) && image.sizeBytes >= 0;
-}
-
-function isSavedSelection(value: unknown): boolean {
-  if (!isRecord(value) || Array.isArray(value) || typeof value.filePath !== "string" || typeof value.text !== "string") return false;
-  if ("sourceText" in value && typeof value.sourceText !== "string") return false;
-  if ("sourceHash" in value && (typeof value.sourceHash !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceHash))) return false;
-  return ["from", "occurrence"].every(key => !(key in value) ||
-    (typeof value[key] === "number" && Number.isInteger(value[key]) && value[key] >= 0));
 }
 
 function normalizeSettings(value: unknown): Partial<ChatSettings> {

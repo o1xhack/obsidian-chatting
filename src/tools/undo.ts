@@ -34,6 +34,11 @@ export class ChangeLog {
   private keptFiles: string[] | null = null;
   private snapshotBytes = 0;
 
+  /** A continued answer whose earlier snapshots expired stays wholly kept. */
+  constructor(keptFiles?: string[]) {
+    if (keptFiles?.length) this.keptFiles = [...keptFiles];
+  }
+
   /** A budget-evicted answer keeps its changed-file row, never a partial undo. */
   canUndo(): boolean { return this.keptFiles === null; }
 

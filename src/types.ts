@@ -153,6 +153,8 @@ export interface UnifiedMessage {
   content: string | ContentBlock[];
   /** Exact provider output for replay, separate from user-visible content. */
   replay?: ProviderReplay;
+  /** A successful provider pause awaits continuation from this exact reply. */
+  awaitingContinuation?: boolean;
   /**
    * On the message that starts a user turn: the turn's ID, also on its
    * entry in the chat view's history, so both can be cut there.
@@ -388,7 +390,7 @@ export interface AgentCallbacks {
    * still owing an answer, and `continueTurn` goes on from there. Without
    * this callback the limit is an error.
    */
-  onStepLimit?: (steps: number) => void;
+  onStepLimit?: (steps: number, selection?: SelectionScope) => void;
   /** A first request rejected locally before transport; the UI can restore its unsent draft. */
   onPreflightRejected?: (error: string) => void;
   /** A message the user added to the running turn (`AgentLoop.steer`) went out with its next step. */

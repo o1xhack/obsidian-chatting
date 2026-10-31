@@ -1,0 +1,49 @@
+{
+  "status": "succeeded",
+  "checks": [
+    "correct dedicated vault",
+    "Continue renders at step limit",
+    "unfinished work has no success check",
+    "continued edits execute once",
+    "second pause renders Continue",
+    "six tool steps and one answer without replay",
+    "Continue disappears after final answer",
+    "final answer renders",
+    "continued answer folds into one steps row",
+    "one changes record across continuations",
+    "320k current-turn read text retained",
+    "one undo restores both continued edits",
+    "context ring uses compaction denominator",
+    "context details show threshold and progress"
+  ],
+  "scope": "Native Obsidian Svelte/view/loop/executor; synthetic provider transport; no live-service or physical-phone claim",
+  "protectedFiles": 1810,
+  "protectedFilesUnchanged": true,
+  "base": "fd30449",
+  "branch": "codex/pr-56-59-integration",
+  "sourceSha256": "f4dd72b8fdd7200ef4946347330e002a80faf4f0e790bf67add18745ee831644",
+  "automatedTests": {
+    "passed": 964,
+    "failed": 0
+  },
+  "typescript": "passed",
+  "svelte": {
+    "errors": 0,
+    "warnings": 0
+  },
+  "productionBuild": "passed",
+  "originalPrHeads": {
+    "56": "e8cbd4a849ead737c0889d735ea348e5e97694c2",
+    "57": "05ed1c27e072a12a9b6c599a144ad5a6bcd0e639",
+    "58": "0e037b639607eca6751ad86e971ea6dbb2024b08",
+    "59": "639f9d184a9fb735d0152958aca514d04c738ab7"
+  },
+  "gates": {
+    "originalPrCI": "passed for all four original heads",
+    "candidateRemoteCI": "not run",
+    "independentReview": "not requested",
+    "communityPreview": "not requested",
+    "merged": false,
+    "released": false
+  }
+}
