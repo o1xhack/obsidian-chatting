@@ -127,7 +127,8 @@ twice). `stream-desktop.test.mjs`: desktop streams through Node's `https`
 leaving saves; a request that failed or stalled in the background sent
 again at most twice, "Resuming…"; no `requestUrl()` fallback for a
 `fetch` failing in the background; the mobile stall watch, none on
-desktop; Continue after Obsidian was ended mid-turn and what dismisses it).
+desktop; Continue after Obsidian was ended mid-turn and what dismisses it;
+a turn that used all its steps pausing with Continue).
 `typed-steering.test.mjs`: typing while an answer runs (queued, taken in
 with the next step or run as the next turn; Stop and Clear drop it;
 cutting the history never starts at tool results with an added message).
@@ -144,7 +145,7 @@ last 20 turns and loading the earlier ones).
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without
-changes). `usage.test.mjs`: each provider's token counts (cache reads and
+changes; a turn without an answer keeps its texts). `usage.test.mjs`: each provider's token counts (cache reads and
 writes, a compaction pass), the cost estimate, windows and prices from
 Anthropic's model list and pricing page, the Codex model list and OpenAI's
 documentation page (read once a day), the context ring with its compaction

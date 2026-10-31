@@ -471,6 +471,34 @@ test('A finished turn leaves no mark; Continue only while the model owes an answ
   }
 });
 
+for (const provider of ['anthropic', 'openai']) test(`${provider}: a turn that used all its steps pauses with Continue, which goes on without running a step again`, async () => {
+  const { plugin, view, chat, writes } = await chatSetup(provider);
+  plugin.settings.maxIterations = 2;
+  // With an MCP server on, the pause still offers Continue: no request is in flight.
+  if (provider === 'openai') plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  const requests = transport((body, index) => index < 2
+    ? response(provider, [call(`read${index}`, 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use', index)
+    : response(provider, [text('Done.')], 'end_turn', index));
+  await view.handleUserMessage('Read the template twice', null);
+  await tick();
+  assert.equal(requests.length, 2);
+  assert.ok(chat.shown.some(row => row.type === 'error' && row.text === 'Paused after 2 steps.'));
+  assert.deepEqual(plugin.chatHistory.filter(row => row.type === 'error'), [{ type: 'error', text: 'Paused after 2 steps.', errorKind: 'paused' }]);
+  assert.equal(chat.continueShown, true);
+  const mark = writes.at(-1).conversations[0].pendingTurn;
+  assert.ok(mark);
+  assert.equal(mark.remoteEffectsPossible, undefined);
+
+  await view.continueTurn();
+  await tick();
+  assert.equal(requests.length, 3);
+  // The steps already run are sent, not run again.
+  assert.equal(chat.shown.filter(row => row.type === 'tool-result' || row.type === 'tool-call').length, 2);
+  assert.equal(plugin.chatHistory.at(-1).text, 'Done.');
+  assert.equal(chat.continueShown, false);
+  assert.equal(writes.at(-1).conversations[0].pendingTurn, undefined);
+});
+
 test('Continue only for the turn the API history ends in: a mark of a message that never reached it offers none', () => {
   const loop = new api.AgentLoop(vaultApp().app, settings('anthropic'));
   loop.importMessages([{ role: 'user', content: 'A', turnId: 'a' }]);

@@ -1056,8 +1056,9 @@ ${mentioned.text}` : buildContextMessage(context);
       }
     }
 
-    // If we get here, we hit the iteration limit
-    callbacks.onError(
+    // All steps used: a pause the user can continue from (the history ends in tool results).
+    if (callbacks.onStepLimit) callbacks.onStepLimit(maxIterations);
+    else callbacks.onError(
       `Reached maximum iterations (${maxIterations}). The task may be too complex for a single conversation turn.`
     );
   }
