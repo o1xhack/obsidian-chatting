@@ -520,6 +520,30 @@ test('Anthropic server pause at the step limit remains continuable after saving 
   assert.equal(restored.plugin.activeConversation.pendingTurn, undefined);
 });
 
+for (const restart of [false, true]) test(`A paused compacted turn keeps its identity and current reads (restart=${restart})`, async () => {
+  let state = await chatSetup('anthropic');
+  state.plugin.settings.maxIterations = 1;
+  state.app.vault.cachedRead = async file => file.path.endsWith('Case Template.md') ? 'R'.repeat(80000) : '';
+  const requests = transport((_body, index) => index < 4
+    ? response('anthropic', [...index === 0 ? [{ type: 'compaction', content: 'Summary of earlier context' }] : [], call(`read-${index}`, 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await state.view.handleUserMessage('Read four notes', null);
+  await state.plugin.saveChatHistory();
+  const turnId = state.plugin.activeConversation.pendingTurn.turnId;
+  assert.equal(state.plugin.agent.owesAnswer(turnId), true);
+  if (restart) {
+    state = await chatSetup('anthropic', JSON.parse(JSON.stringify(state.writes.at(-1))));
+    state.plugin.settings.maxIterations = 1;
+    state.app.vault.cachedRead = async file => file.path.endsWith('Case Template.md') ? 'R'.repeat(80000) : '';
+  }
+  for (let i = 0; i < 4; i++) await state.view.continueTurn();
+  assert.equal(requests.length, 5);
+  const results = requests[4].messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result');
+  assert.equal(results.length, 4);
+  assert.ok(results.every(block => typeof block.content === 'string' && block.content.length >= 80000 && !block.content.includes('Tool text truncated')));
+  assert.equal(state.plugin.chatHistory.at(-1).text, 'Done');
+});
+
 for (const restart of [false, true]) for (const externalEdit of [false, true]) test(`Scoped pause keeps its updated selection (restart=${restart}, externalEdit=${externalEdit})`, async () => {
   let state = await chatSetup('anthropic');
   state.plugin.settings.maxIterations = 1;

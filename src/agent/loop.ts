@@ -27,7 +27,7 @@ import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage, voiceTranscriptText } from "./system-prompt";
-import { cutBeforeTurn, editableTurn, fromLastCompaction, lastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
+import { cutBeforeTurn, editableTurn, fromLastCompaction, lastCompaction, latestTurnId, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
 
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
@@ -550,11 +550,7 @@ export class AgentLoop {
     const last = this.messages.at(-1);
     if (last?.role !== "user" && !(last?.role === "assistant" && last.awaitingContinuation === true)) return false;
     if (turnId === undefined) return true;
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const id = this.messages[i].turnId;
-      if (this.messages[i].role === "user" && id) return id === turnId;
-    }
-    return false;
+    return latestTurnId(this.messages) === turnId;
   }
 
   /** Export the full conversation as a readable markdown transcript */
@@ -748,7 +744,7 @@ ${mentioned.text}` : buildContextMessage(context);
         fileNames: files.map((file) => file.fileName),
       });
 
-      await this.loop(version, callbacks, turnSettings, scope, beforeTurn);
+      await this.loop(version, callbacks, turnSettings, scope, beforeTurn, turnId);
     } finally {
       this.historyBusy--;
       if (!this.historyBusy) {
@@ -772,12 +768,13 @@ ${mentioned.text}` : buildContextMessage(context);
       const version = ++this.runVersion;
       this.voiceTurn = false;
       if (!this.owesAnswer()) return;
+      const turnId = latestTurnId(this.messages);
       debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
       const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
       const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
       await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
       if (version !== this.runVersion) return;
-      await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
+      await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined, undefined, turnId);
     } finally {
       this.historyBusy--;
       if (!this.historyBusy) {
@@ -793,11 +790,12 @@ ${mentioned.text}` : buildContextMessage(context);
     callbacks: AgentCallbacks,
     turnSettings: ChatSettings,
     scope: SelectionScope | undefined,
-    beforeTurn?: UnifiedMessage[]
+    beforeTurn?: UnifiedMessage[],
+    turnId?: string
   ): Promise<void> {
     this.loopVersion = version;
     try {
-      await this.steps(version, callbacks, turnSettings, scope, beforeTurn);
+      await this.steps(version, callbacks, turnSettings, scope, beforeTurn, turnId);
     } finally {
       if (this.loopVersion === version) this.loopVersion = 0;
     }
@@ -809,7 +807,8 @@ ${mentioned.text}` : buildContextMessage(context);
     callbacks: AgentCallbacks,
     turnSettings: ChatSettings,
     scope: SelectionScope | undefined,
-    beforeTurn?: UnifiedMessage[]
+    beforeTurn?: UnifiedMessage[],
+    turnId?: string
   ): Promise<void> {
     const isStopped = () => version !== this.runVersion;
     const onTextDelta = (text: string) => {
@@ -967,7 +966,7 @@ ${mentioned.text}` : buildContextMessage(context);
       this.messages.push({
         role: "assistant", content: response.content, replay: response.replay,
         ...(response.stopReason === "pause_turn" ? { awaitingContinuation: true } : {}),
-        ...(response.compaction ? { compaction: response.compaction } : {}),
+        ...(response.compaction ? { compaction: response.compaction, ...(turnId ? { continuationTurnId: turnId } : {}) } : {}),
       });
       if (response.compaction) callbacks.onCompacted?.();
       if (response.compaction) void this.retainPortableHistory(turnSettings, callbacks);
@@ -1022,7 +1021,7 @@ ${mentioned.text}` : buildContextMessage(context);
           instructionSources.push(...discovered.sources);
         }
         if (callbacks.changes && !callbacks.changes.canUndo() && !undoBudgetReported) {
-          result.result += "\nUndo snapshots exceeded their memory budget. This answer's changes are kept; undo is unavailable for the entire answer.";
+          result.result += `\n${callbacks.changes.unavailableReason()} This answer's changes are kept; undo is unavailable for the entire answer.`;
           undoBudgetReported = true;
         }
         if (isStopped()) return;

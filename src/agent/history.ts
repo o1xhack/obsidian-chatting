@@ -12,6 +12,16 @@ function startsUserTurn(message: UnifiedMessage): boolean {
     message.content.some(block => block.type === "text" || block.type === "image" || block.type === "file");
 }
 
+/** A real turn's identity survives a compacted-away user message. */
+export function latestTurnId(messages: UnifiedMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "user" && message.turnId) return message.turnId;
+    if (message.role === "assistant" && message.continuationTurnId) return message.continuationTurnId;
+  }
+  return undefined;
+}
+
 /** Index of the last message whose request compacted the context, or -1. */
 export function lastCompaction(messages: UnifiedMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i].compaction) return i;
@@ -98,7 +108,9 @@ export function withoutLargeVisibleToolText<T extends { type?: string; turnId?: 
 export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
   let turnStart = -1;
-  for (let i = messages.length - 1; i >= 0 && turnStart === -1; i--) if (startsUserTurn(messages[i])) turnStart = i;
+  for (let i = messages.length - 1; i >= 0 && turnStart === -1; i--) {
+    if (startsUserTurn(messages[i]) || messages[i].continuationTurnId) turnStart = i;
+  }
   const replacement = new Map<ContentBlock, ContentBlock>();
   const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
   for (let i = messages.length - 1; i >= 0; i--) {

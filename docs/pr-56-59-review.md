@@ -41,7 +41,7 @@ with the repairs (the original cases lacked these scenarios).
 
 ## Validation
 
-- 964 automated tests passed, zero failed.
+- 972 automated tests passed, zero failed.
 - TypeScript passed; Svelte check: zero errors and warnings; production build passed.
 - Native Obsidian: 14 real Svelte/view/loop/vault checks with synthetic provider
   transport. Multiple pauses/continues executed six tools once, retained
@@ -54,10 +54,26 @@ with the repairs (the original cases lacked these scenarios).
   [pr-56-59-qa.json](pr-56-59-qa.json). Reproduce native QA with
   `node test/native-pr-56-59.mjs` from this branch on the authorized Mac.
 
+## Code Review follow-up
+
+The first independent `codex review --base fd30449` completed for `f6a2b20`
+with three actionable findings: P1 loss of manual changes between paused
+segments, P2 Continue racing an asynchronous Undo, and P2 paused-turn identity
+lost when compaction trims the original user message. All were reproduced
+before correction and repaired with focused regressions.
+
+Undo now detects discontinuous snapshots, including edit, delete,
+rename-then-delete and recreation, and keeps the entire answer without
+partial Undo. Continue is hidden and guarded throughout Undo. Native
+compaction markers retain a validated originating `continuationTurnId`;
+the same boundary protects current-turn reads after retention and restart.
+The final current-head re-review outcome is recorded separately in the task
+handoff so recording that outcome does not change the commit being reviewed.
+
 ## Remaining gates
 
-Independent current-candidate review, candidate remote CI and official
-Community Preview have not been requested or accepted. This is a tested
+A clean independent review must match the final candidate commit. Candidate
+remote CI and official Community Preview have not been requested or accepted. This is a tested
 integration candidate, not an assertion that those merge gates passed.
 Live-provider cache-hit rates, physical-phone interaction and background
 suspension were not measured in this run. No merge or release was performed.

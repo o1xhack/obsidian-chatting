@@ -33,22 +33,48 @@ export class ChangeLog {
   private steps: Step[] = [];
   private keptFiles: string[] | null = null;
   private snapshotBytes = 0;
+  private keptReason: "memory" | "restored" | "changed" = "memory";
 
   /** A continued answer whose earlier snapshots expired stays wholly kept. */
   constructor(keptFiles?: string[]) {
-    if (keptFiles?.length) this.keptFiles = [...keptFiles];
+    if (keptFiles?.length) {
+      this.keptFiles = [...keptFiles];
+      this.keptReason = "restored";
+    }
   }
 
   /** A budget-evicted answer keeps its changed-file row, never a partial undo. */
   canUndo(): boolean { return this.keptFiles === null; }
 
-  private evict(): void {
+  unavailableReason(): string {
+    return this.keptReason === "changed" ? "Intervening file changes made this answer's undo snapshots unsafe."
+      : this.keptReason === "restored" ? "Earlier undo snapshots are unavailable after restarting Obsidian."
+      : "Undo snapshots expired because their memory budget was exceeded.";
+  }
+
+  private evict(reason: "memory" | "changed" = "memory"): void {
     this.keptFiles = this.files();
+    this.keptReason = reason;
     this.steps = [];
     this.snapshotBytes = 0;
   }
 
   private record(step: Step): void {
+    if (this.keptFiles === null && this.steps.length) {
+      const expected = this.expectedAfterSteps();
+      // A later edit/deletion must not hide manual changes between this
+      // answer's snapshots. Keep the entire answer rather than undoing
+      // through that discontinuity and silently discarding the user's work.
+      const prior = "path" in step ? expected.get(step.path) : undefined;
+      const changed = step.kind === "edited" ? prior === "absent" || (typeof prior === "object" && prior.text !== step.before)
+        : step.kind === "created" ? expected.has(step.path) && prior !== "absent"
+        : step.kind === "renamed" ? expected.get(step.from) === "absent"
+        : step.kind === "deleted" && step.files.some(file => {
+          const prior = expected.get(file.path);
+          return prior === "absent" || (typeof prior === "object" && prior.text !== new TextDecoder().decode(file.data));
+        });
+      if (changed) this.evict("changed");
+    }
     if (this.keptFiles !== null) {
       const names = this.keptFiles;
       if (step.kind === "renamed") {
@@ -150,11 +176,8 @@ export class ChangeLog {
     return names;
   }
 
-  /**
-   * Files that changed after the turn (by the user or a later answer):
-   * undoing would lose those changes.
-   */
-  async conflicts(app: App): Promise<string[]> {
+  /** The expected vault state after the recorded changes, including renames. */
+  private expectedAfterSteps(): Map<string, Expected> {
     const expected = new Map<string, Expected>();
     for (const step of this.steps) {
       if (step.kind === "edited" || step.kind === "created") {
@@ -166,6 +189,12 @@ export class ChangeLog {
         for (const file of step.files) expected.set(file.path, "absent");
       }
     }
+    return expected;
+  }
+
+  /** Files changed since this answer; undo requires confirmation for these. */
+  async conflicts(app: App): Promise<string[]> {
+    const expected = this.expectedAfterSteps();
     const changed: string[] = [];
     for (const [path, want] of expected) {
       const item = app.vault.getAbstractFileByPath(normalizePath(path));
@@ -180,7 +209,7 @@ export class ChangeLog {
 
   /** Takes the changes back, last first. Returns what couldn't be undone. */
   async undo(app: App): Promise<string[]> {
-    if (!this.canUndo()) return ["Undo snapshots expired because their memory budget was exceeded; no files were changed."];
+    if (!this.canUndo()) return [`${this.unavailableReason()} No files were changed.`];
     const failed: string[] = [];
     while (this.steps.length) {
       const step = this.steps[this.steps.length - 1];

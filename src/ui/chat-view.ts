@@ -551,7 +551,7 @@ export class ObsidianChatView extends ItemView {
    */
   private canContinue(): boolean {
     const pending = this.plugin.activeConversation.pendingTurn;
-    return !this.running && !!pending && !pending.remoteEffectsPossible &&
+    return !this.running && !this.undoing && !!pending && !pending.remoteEffectsPossible &&
       this.plugin.chatHistory.some(row => row.type === "user" && row.turnId === pending.turnId) &&
       this.plugin.agent.owesAnswer(pending.turnId);
   }
@@ -1365,7 +1365,7 @@ export class ObsidianChatView extends ItemView {
     const entry: ChatHistoryEntry = prior >= 0 ? history.splice(prior, 1)[0] : { type: "changes", turnId };
     entry.files = changes.files();
     this.plugin.changeLogs.set(entry, changes);
-    if (!changes.canUndo()) new Notice("Undo snapshots exceeded their memory budget. This answer's files are kept; undo is unavailable.");
+    if (!changes.canUndo()) new Notice(`${changes.unavailableReason()} This answer's files are kept; undo is unavailable.`);
     const start = history.findIndex((item) => item.type === "user" && item.turnId === turnId);
     const later = history.findIndex((item, i) => i > start && item.type === "user" && !!item.turnId && item.turnId !== turnId);
     const end = later === -1 ? history.length : later;
@@ -1397,12 +1397,13 @@ export class ObsidianChatView extends ItemView {
     if (!entry || !log || entry.undone) return;
     if (!log.canUndo()) {
       this.renderHistory();
-      new Notice("Undo snapshots expired because their memory budget was exceeded. The files are kept.");
+      new Notice(`${log.unavailableReason()} The files are kept.`);
       return;
     }
     const app = this.plugin.app;
     const chat = this.chatContainer;
     this.undoing = true;
+    chat?.setContinue(false);
     chat?.setComposerLocked?.(true);
     chat?.setBusy(true);
     try {
@@ -1435,6 +1436,7 @@ export class ObsidianChatView extends ItemView {
       if (this.chatContainer === chat) {
         chat?.setComposerLocked?.(false);
         chat?.setBusy(false);
+        chat?.setContinue(this.canContinue());
       }
     }
   }

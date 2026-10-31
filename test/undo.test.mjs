@@ -65,6 +65,27 @@ function fakeVault(initial) {
 
 const run = (app, changes, name, input) => api.executeTool(app, name, input, async () => 'yes', undefined, changes);
 
+for (const operation of ['edit', 'delete', 'rename-delete', 'recreate']) test(`Undo keeps intervening changes before ${operation}`, async () => {
+  const { app, files } = fakeVault({ 'Plan.md': 'Original' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: 'First AI edit' });
+  files.set('Plan.md', 'First AI edit\nManual addition');
+  if (operation === 'edit') {
+    await run(app, changes, 'edit_document', { path: 'Plan.md', operation: 'find_replace', find: 'First', content: 'Second' });
+  } else if (operation === 'recreate') {
+    files.delete('Plan.md');
+    await run(app, changes, 'create_file', { path: 'Plan.md', content: 'Recreated' });
+  } else {
+    const path = operation === 'rename-delete' ? 'Moved.md' : 'Plan.md';
+    if (path !== 'Plan.md') await run(app, changes, 'rename_file', { path: 'Plan.md', new_path: path });
+    await run(app, changes, 'delete_file', { path });
+  }
+  assert.equal(changes.canUndo(), false);
+  const beforeUndo = [...files];
+  assert.match((await changes.undo(app))[0], /Intervening/);
+  assert.deepEqual([...files], beforeUndo);
+});
+
 test('A failed trash operation does not leave a phantom deletion to undo', async () => {
   const { app, files } = fakeVault({ 'Plan.md': 'Keep me' });
   const changes = new api.ChangeLog();
@@ -246,6 +267,41 @@ function editingModel() {
 /** The text of a request's last message (the user turn). */
 const sentText = body => JSON.stringify(body.messages.at(-1).content);
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+test('Intervening manual edits during a pause make the combined answer wholly kept', async () => {
+  const { plugin, view, files } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  transport((_body, index) => index < 2
+    ? response('anthropic', [call(`edit-${index}`, 'edit_document', { path: 'Plan.md', operation: 'find_replace', find: index === 0 ? 'My' : 'First', content: index === 0 ? 'First' : 'Second' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await view.handleUserMessage('Edit twice', null);
+  files.set('Plan.md', files.get('Plan.md') + '\nManual addition');
+  await view.continueTurn();
+  await view.continueTurn();
+  const row = changesRow(plugin);
+  assert.equal(plugin.changeLogs.get(row).canUndo(), false);
+  await view.undoChanges(row.turnId);
+  assert.equal(files.get('Plan.md'), 'Second plan\nManual addition');
+});
+
+test('Continue cannot race an undo with a pending vault write', async () => {
+  const { plugin, view, files, app } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  const requests = editingModel();
+  await view.handleUserMessage('Rewrite my plan', null);
+  let finishWrite;
+  const modify = app.vault.modify;
+  app.vault.modify = (file, content) => new Promise(resolve => { finishWrite = async () => { await modify(file, content); resolve(); }; });
+  const undo = view.undoChanges(changesRow(plugin).turnId);
+  while (!finishWrite) await tick();
+  await view.continueTurn();
+  const count = requests.length;
+  await finishWrite();
+  await undo;
+  assert.equal(count, 1);
+  assert.equal(files.get('Plan.md'), 'My plan');
+  assert.equal(plugin.activeConversation.pendingTurn, undefined);
+});
 
 test('Edits across repeated step-limit pauses share one complete undo log', async () => {
   const { plugin, view, files } = await chatSetup();
