@@ -65,6 +65,38 @@ function fakeVault(initial) {
 
 const run = (app, changes, name, input) => api.executeTool(app, name, input, async () => 'yes', undefined, changes);
 
+for (const external of [false, true]) for (const operation of ['edit', 'delete']) test(`Folder rename preserves undo continuity (${operation}, external=${external})`, async () => {
+  const { app, files } = fakeVault({ 'Drafts/A.md': 'Original' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Drafts/A.md', operation: 'replace_all', content: 'First' });
+  await run(app, changes, 'rename_file', { path: 'Drafts', new_path: 'Archive' });
+  if (external) files.set('Archive/A.md', 'First\nManual addition');
+  if (operation === 'edit') await run(app, changes, 'edit_document', { path: 'Archive/A.md', operation: 'find_replace', find: 'First', content: 'Second' });
+  else await run(app, changes, 'delete_file', { path: 'Archive/A.md' });
+  assert.equal(changes.canUndo(), !external);
+  if (external) {
+    const kept = [...files];
+    assert.match((await changes.undo(app))[0], /Intervening/);
+    assert.deepEqual([...files], kept);
+  } else {
+    assert.deepEqual(await changes.conflicts(app), []);
+    assert.deepEqual(await changes.undo(app), []);
+    assert.equal(files.get('Drafts/A.md'), 'Original');
+  }
+});
+
+test('Reusing a descendant path after a folder rename is still wholly undoable', async () => {
+  const { app, files } = fakeVault({ 'Drafts/A.md': 'Original' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Drafts/A.md', operation: 'replace_all', content: 'First' });
+  await run(app, changes, 'rename_file', { path: 'Drafts', new_path: 'Archive' });
+  await run(app, changes, 'create_file', { path: 'Drafts/A.md', content: 'New draft' });
+  assert.equal(changes.canUndo(), true);
+  assert.deepEqual(await changes.conflicts(app), []);
+  assert.deepEqual(await changes.undo(app), []);
+  assert.equal(files.get('Drafts/A.md'), 'Original');
+});
+
 for (const operation of ['edit', 'delete', 'rename-delete', 'recreate']) test(`Undo keeps intervening changes before ${operation}`, async () => {
   const { app, files } = fakeVault({ 'Plan.md': 'Original' });
   const changes = new api.ChangeLog();

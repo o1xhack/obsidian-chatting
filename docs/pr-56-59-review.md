@@ -41,7 +41,7 @@ with the repairs (the original cases lacked these scenarios).
 
 ## Validation
 
-- 972 automated tests passed, zero failed.
+- 980 automated tests passed, zero failed.
 - TypeScript passed; Svelte check: zero errors and warnings; production build passed.
 - Native Obsidian: 14 real Svelte/view/loop/vault checks with synthetic provider
   transport. Multiple pauses/continues executed six tools once, retained
@@ -67,6 +67,15 @@ rename-then-delete and recreation, and keeps the entire answer without
 partial Undo. Continue is hidden and guarded throughout Undo. Native
 compaction markers retain a validated originating `continuationTurnId`;
 the same boundary protects current-turn reads after retention and restart.
+A second review of `8257092` found P2 folder-descendant state not following
+folder renames and P2 loss of emergency request-size recovery for very large
+current-turn text. Regression tests reproduced both. Expected states now
+follow descendant moves and own folder creation/deletion. Emergency handling
+of a locally unsent request exceeding 30 MB explicitly bounds current-turn
+text too; ordinary requests retain the larger current-turn allowance.
+All three providers recover from a 110-result CJK batch without repeating
+those read tools, and legitimate folder path reuse stays undoable.
+
 The final current-head re-review outcome is recorded separately in the task
 handoff so recording that outcome does not change the commit being reviewed.
 

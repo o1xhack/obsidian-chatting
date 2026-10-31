@@ -874,10 +874,11 @@ ${mentioned.text}` : buildContextMessage(context);
             if (isStopped()) return;
             continue;
           }
-          // A later request grown over the size limit by tool attachments:
-          // drop them (and oversized tool text) once and send again.
+          // A later request over the encoded byte limit cannot reach the
+          // provider's compaction. Drop tool attachments and apply the shared
+          // text allowance to the current turn too, then retry the request.
           if (i > 0 && e instanceof RequestBudgetError) {
-            const reduced = withoutLargeToolText(withoutToolAttachments(this.messages));
+            const reduced = withoutLargeToolText(withoutToolAttachments(this.messages), false);
             if (reduced !== this.messages) {
               this.messages = reduced;
               clearOpenAIState();

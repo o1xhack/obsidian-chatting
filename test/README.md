@@ -237,3 +237,8 @@ Obsidian/Svelte/view/loop/vault APIs with synthetic provider transport and a
 temporary helper plugin, removed afterward. It does not replace the installed
 chat plugin or save its conversations/settings. Existing non-QA vault files
 are hash-checked. This is not live-provider or physical-phone validation.
+
+PR 56–59 CR regressions additionally cover manual changes between paused
+segments, folder descendant moves and path reuse, asynchronous Undo/Continue
+exclusion, compacted pause identity/read retention across restart, and
+emergency recovery of CJK tool results above the 30 MB request ceiling.

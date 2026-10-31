@@ -104,8 +104,9 @@ export function withoutLargeVisibleToolText<T extends { type?: string; turnId?: 
  * cap, not the shared allowance: a turn that reads more than it would otherwise lose its own
  * first reads and read them again, step after step. Compaction bounds the
  * turn's context instead, and earlier turns are clipped once, when the next
- * turn starts, so a turn's requests keep their cached prefix. */
-export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage[] {
+ * turn starts, so a turn's requests keep their cached prefix. Only emergency
+ * encoded-request-size recovery sets keepCurrentTurn=false. */
+export function withoutLargeToolText(messages: UnifiedMessage[], keepCurrentTurn = true): UnifiedMessage[] {
   let room = TOTAL_TOOL_TEXT_CHARS;
   let turnStart = -1;
   for (let i = messages.length - 1; i >= 0 && turnStart === -1; i--) {
@@ -115,7 +116,7 @@ export function withoutLargeToolText(messages: UnifiedMessage[]): UnifiedMessage
   const replays = new Map<UnifiedMessage, NonNullable<UnifiedMessage["replay"]>>();
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    const lastTurn = turnStart >= 0 && i > turnStart;
+    const lastTurn = keepCurrentTurn && turnStart >= 0 && i > turnStart;
     // Provider-run (MCP) results keep the shared allowance: their catalogs alone can be megabytes.
     if (message.replay) {
       const bounded = withBoundedServerResults(message.replay.items, room);

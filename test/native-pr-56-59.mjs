@@ -20,7 +20,7 @@ for (const path of [root, process.cwd(), output]) {
   if (!(await realpath(path)).startsWith('/Volumes/StudioSSD/')) throw new Error('Path outside StudioSSD');
   await access(path, constants.W_OK);
 }
-const evalCode = code => execFileSync('obsidian', ['eval', 'vault=ob 插件测试', `code=${code}`], { encoding: 'utf8', timeout: 15000 });
+const evalCode = code => execFileSync('obsidian', ['eval', 'vault=ob 插件测试', `code=${code}`], { encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL' });
 if (!evalCode('app.vault.adapter.getBasePath()').includes(root)) throw new Error('Wrong vault');
 async function hashes(dir = root, prefix = '') {
   const result = {};

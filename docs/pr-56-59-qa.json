@@ -21,9 +21,9 @@
   "protectedFilesUnchanged": true,
   "base": "fd30449",
   "branch": "codex/pr-56-59-integration",
-  "sourceSha256": "1d589e8cab6536a84faf2c6e84323b29dee3f19c4b6e6ea7fa6e1a80d8866e14",
+  "sourceSha256": "1fc6d6e0b4811f5907ec92d2dcf814735a6ac2d74323080a68df4963a4bd3698",
   "automatedTests": {
-    "passed": 972,
+    "passed": 980,
     "failed": 0
   },
   "typescript": "passed",
@@ -44,7 +44,9 @@
     "independentReview": {
       "firstReviewedHead": "f6a2b206498152fd4ac770c1b32be8d4762d3cef",
       "firstOutcome": "1 P1 and 2 P2 findings; reproduced and fixed",
-      "finalOutcome": "Recorded by exact head in the task handoff; recording it does not modify the reviewed tree"
+      "finalOutcome": "Recorded by exact head in the task handoff; recording it does not modify the reviewed tree",
+      "secondReviewedHead": "825709208379d8d40ab886fa3e603b47081efe0c",
+      "secondOutcome": "2 P2 findings; reproduced and fixed"
     },
     "communityPreview": "not requested",
     "merged": false,

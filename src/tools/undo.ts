@@ -183,10 +183,18 @@ export class ChangeLog {
       if (step.kind === "edited" || step.kind === "created") {
         expected.set(step.path, { text: step.after });
       } else if (step.kind === "renamed") {
+        const descendants = [...expected].filter(([path]) => path.startsWith(`${step.from}/`));
+        for (const [path, state] of descendants) {
+          expected.set(step.to + path.slice(step.from.length), state);
+          expected.set(path, "absent");
+        }
         expected.set(step.to, expected.get(step.from) ?? "exists");
         expected.set(step.from, "absent");
       } else if (step.kind === "deleted") {
         for (const file of step.files) expected.set(file.path, "absent");
+        for (const folder of step.folders) expected.set(folder, "absent");
+      } else if (step.kind === "folders") {
+        for (const folder of step.folders) expected.set(folder, "exists");
       }
     }
     return expected;
