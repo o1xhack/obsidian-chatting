@@ -39,7 +39,12 @@ for (const pause of [false, true]) for (const earlier of [false, true]) test(`A 
   assert.equal(summaries, earlier ? 2 : 1);
   assert.equal(cb.executed.length, 4);
   assert.equal(cb.texts.at(-1), 'Done');
-  assert.equal(loop.exportMessages()[0].turnId, 'current-overflow');
+  assert.match(loop.exportMessages()[0].turnId, /^summary-/);
+  assert.equal(loop.exportMessages()[0].continuationTurnId, 'current-overflow');
+  assert.equal(loop.canEditTurn('current-overflow'), false);
+  const retained = JSON.stringify(loop.exportMessages());
+  loop.cutBeforeTurn('current-overflow');
+  assert.equal(JSON.stringify(loop.exportMessages()), retained);
 });
 
 test('A failed current-turn overflow summary preserves completed writes and history', async () => {

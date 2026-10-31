@@ -1415,7 +1415,8 @@ function isSavedHistories(value: Record<string, unknown>, imagesWithData: boolea
     isRecord(message) && (message.role === "user" || message.role === "assistant") &&
     (!("turnId" in message) || typeof message.turnId === "string") &&
     (!("awaitingContinuation" in message) || (message.role === "assistant" && typeof message.awaitingContinuation === "boolean")) &&
-    (!("continuationTurnId" in message) || (message.role === "assistant" && typeof message.continuationTurnId === "string")) &&
+    (!("continuationTurnId" in message) || (typeof message.continuationTurnId === "string" &&
+      (message.role === "assistant" || (typeof message.turnId === "string" && message.turnId.startsWith("summary-"))))) &&
     (typeof message.content === "string" || (Array.isArray(message.content) &&
       message.content.every(block => isRecord(block) && typeof block.type === "string" &&
         (block.type !== "image" || isSavedImage(block.image, true)) &&

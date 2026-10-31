@@ -34,7 +34,7 @@ async function hashes(dir = root, prefix = '') {
 }
 const before = await hashes();
 await build({
-  stdin: { contents: "export {default as ChatPlugin} from './src/main'; export {ObsidianChatView} from './src/ui/chat-view'; export {DEFAULT_SETTINGS} from './src/types';", resolveDir: process.cwd(), loader: 'ts' },
+  stdin: { contents: "export {default as ChatPlugin} from './src/main'; export {ObsidianChatView} from './src/ui/chat-view'; export {DEFAULT_SETTINGS} from './src/types'; export {executeTool} from './src/tools/executor'; export {ChangeLog} from './src/tools/undo';", resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', outfile: bundle,
   external: ['obsidian', 'electron', 'http'],
   plugins: [esbuildSvelte({ compilerOptions: { css: 'injected' }, preprocess: sveltePreprocess() }), {
@@ -87,7 +87,7 @@ function probe(bundlePath, vaultRoot) {
       globalThis.__chattingPR5659QA.stage = 'load bundle';
       const proxy = new Proxy(obsidian, { get: (target, key) => key === 'requestUrl' ? transport : Reflect.get(target, key) });
       new Function('require', 'module', 'exports', fs.readFileSync(bundlePath, 'utf8'))(id => id === 'obsidian' ? proxy : require(id), loaded, loaded.exports);
-      const { ChatPlugin, ObsidianChatView, DEFAULT_SETTINGS } = loaded.exports;
+      const { ChatPlugin, ObsidianChatView, DEFAULT_SETTINGS, executeTool, ChangeLog } = loaded.exports;
       const plugin = new ChatPlugin(app, { id: 'chatting-pr5659-qa', name: 'PR 56–59 QA', version: '0.0.0', minAppVersion: '1.8.0' });
       globalThis.__chattingPR5659QA.stage = 'mount UI';
       plugin.settings = { ...DEFAULT_SETTINGS, provider: 'anthropic', apiKey: 'synthetic-native-qa', model: 'claude-sonnet-4-6', maxIterations: 3, enableWebSearch: false, followEdits: false };
@@ -126,6 +126,27 @@ function probe(bundlePath, vaultRoot) {
       check(ring?.title.includes('25 %'), 'context ring uses compaction denominator');
       ring.click(); await tick();
       check(host.textContent.includes('Compacts at') && host.textContent.includes('160k (25 % reached)'), 'context details show threshold and progress');
+      const oldLinks = app.vault.getConfig('alwaysUpdateLinks');
+      const indexPath = `${qa}/Index.md`;
+      const originalIndex = `Original [[${qa}/Old]]`;
+      await app.vault.create(`${qa}/Old.md`, 'Target');
+      const indexFile = await app.vault.create(indexPath, originalIndex);
+      for (let i = 0; i < 100 && !app.metadataCache.getFileCache(indexFile)?.links?.length; i++) await tick();
+      try {
+        app.vault.setConfig('alwaysUpdateLinks', true);
+        const changes = new ChangeLog();
+        const tool = (name, input) => executeTool(app, name, input, async () => 'yes', undefined, changes);
+        check(!(await tool('edit_document', { path: indexPath, operation: 'find_replace', find: 'Original', content: 'First' })).isError, 'native link-source edit succeeds');
+        check(!(await tool('rename_file', { path: `${qa}/Old.md`, new_path: `${qa}/New.md` })).isError, 'native link-aware rename succeeds');
+        const rewritten = await app.vault.cachedRead(indexFile);
+        check(rewritten.includes('New') && !rewritten.includes('Old'), 'Obsidian rewrites links during rename');
+        await tool('edit_document', { path: indexPath, operation: 'find_replace', find: 'First', content: 'Second' });
+        check(changes.canUndo(), 'native rename-owned link changes retain Undo');
+        check((await changes.undo(app)).length === 0 && await app.vault.cachedRead(indexFile) === originalIndex && !!app.vault.getFileByPath(`${qa}/Old.md`), 'native link-aware undo restores original notes');
+      } finally {
+        app.vault.setConfig('alwaysUpdateLinks', oldLinks);
+      }
+      check(app.vault.getConfig('alwaysUpdateLinks') === oldLinks, 'automatic-link preference restored');
       globalThis.__chattingPR5659QA = { status: 'succeeded', checks, scope: 'Native Obsidian Svelte/view/loop/executor; synthetic provider transport; no live-service or physical-phone claim' };
     } catch (error) {
       globalThis.__chattingPR5659QA = { status: 'failed', checks, error: error.stack };

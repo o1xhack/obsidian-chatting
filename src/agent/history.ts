@@ -16,8 +16,8 @@ function startsUserTurn(message: UnifiedMessage): boolean {
 export function latestTurnId(messages: UnifiedMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
+    if (message.continuationTurnId) return message.continuationTurnId;
     if (message.role === "user" && message.turnId) return message.turnId;
-    if (message.role === "assistant" && message.continuationTurnId) return message.continuationTurnId;
   }
   return undefined;
 }

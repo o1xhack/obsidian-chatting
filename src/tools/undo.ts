@@ -7,7 +7,7 @@ import { App, TAbstractFile, TFile, TFolder, normalizePath } from "obsidian";
 type Step =
   | { kind: "edited"; path: string; before: string; after: string }
   | { kind: "created"; path: string; after: string }
-  | { kind: "renamed"; from: string; to: string }
+  | { kind: "renamed"; from: string; to: string; links?: { path: string; after: string }[] }
   | { kind: "deleted"; folders: string[]; files: { path: string; data: ArrayBuffer }[] }
   | { kind: "folders"; folders: string[] };
 
@@ -18,7 +18,8 @@ let retainedLogs: WeakRef<ChangeLog>[] = [];
 const stepBytes = (step: Step): number => step.kind === "edited" ? 2 * (step.before.length + step.after.length + step.path.length)
   : step.kind === "created" ? 2 * (step.after.length + step.path.length)
   : step.kind === "deleted" ? step.files.reduce((sum, file) => sum + file.data.byteLength + 2 * file.path.length, 0) + 2 * step.folders.join("").length
-  : step.kind === "renamed" ? 2 * (step.from.length + step.to.length) : 2 * step.folders.join("").length;
+  : step.kind === "renamed" ? 2 * (step.from.length + step.to.length + (step.links ?? []).reduce((sum, link) => sum + link.path.length + link.after.length, 0))
+  : 2 * step.folders.join("").length;
 
 /** What a file is expected to be after the turn: its text, there (not text), or gone. */
 type Expected = { text: string } | "exists" | "absent";
@@ -33,7 +34,7 @@ export class ChangeLog {
   private steps: Step[] = [];
   private keptFiles: string[] | null = null;
   private snapshotBytes = 0;
-  private keptReason: "memory" | "restored" | "changed" = "memory";
+  private keptReason: "memory" | "restored" | "changed" | "unverified" = "memory";
 
   /** A continued answer whose earlier snapshots expired stays wholly kept. */
   constructor(keptFiles?: string[]) {
@@ -49,10 +50,11 @@ export class ChangeLog {
   unavailableReason(): string {
     return this.keptReason === "changed" ? "Intervening file changes made this answer's undo snapshots unsafe."
       : this.keptReason === "restored" ? "Earlier undo snapshots are unavailable after restarting Obsidian."
+      : this.keptReason === "unverified" ? "The rename's link updates could not be verified for undo."
       : "Undo snapshots expired because their memory budget was exceeded.";
   }
 
-  private evict(reason: "memory" | "changed" = "memory"): void {
+  private evict(reason: "memory" | "changed" | "unverified" = "memory"): void {
     this.keptFiles = this.files();
     this.keptReason = reason;
     this.steps = [];
@@ -129,6 +131,36 @@ export class ChangeLog {
     this.record({ kind: "renamed", from, to });
   }
 
+  /** Capture rename-owned link rewrites only for notes already in this log. */
+  async renaming(app: App, from: string, to: string): Promise<() => Promise<void>> {
+    const tracked: { path: string; before: string }[] = [];
+    if (this.canUndo()) for (const [path, state] of this.expectedAfterSteps()) {
+      if (typeof state !== "object") continue;
+      const file = app.vault.getFileByPath(path);
+      const before = file ? await app.vault.cachedRead(file) : undefined;
+      if (before !== state.text) {
+        this.evict("changed");
+        break;
+      }
+      tracked.push({ path, before });
+    }
+    return async () => {
+      const links: { path: string; after: string }[] = [];
+      if (this.canUndo()) try {
+        for (const prior of tracked) {
+          const path = prior.path === from || prior.path.startsWith(`${from}/`) ? to + prior.path.slice(from.length) : prior.path;
+          const file = app.vault.getFileByPath(path);
+          if (!file) throw new Error("Tracked note missing after rename");
+          const after = await app.vault.cachedRead(file);
+          if (after !== prior.before) links.push({ path, after });
+        }
+      } catch {
+        this.evict("unverified");
+      }
+      this.record({ kind: "renamed", from, to, ...(links.length ? { links } : {}) });
+    };
+  }
+
   /** Before deleting `target`: keeps its files (a folder's too) to create them again. */
   async deleting(app: App, target: TAbstractFile): Promise<() => void> {
     const folders: string[] = [];
@@ -190,6 +222,7 @@ export class ChangeLog {
         }
         expected.set(step.to, expected.get(step.from) ?? "exists");
         expected.set(step.from, "absent");
+        for (const link of step.links ?? []) expected.set(link.path, { text: link.after });
       } else if (step.kind === "deleted") {
         for (const file of step.files) expected.set(file.path, "absent");
         for (const folder of step.folders) expected.set(folder, "absent");

@@ -544,6 +544,31 @@ for (const restart of [false, true]) test(`A paused compacted turn keeps its ide
   assert.equal(state.plugin.chatHistory.at(-1).text, 'Done');
 });
 
+test('A current-turn overflow summary reloads as continuable but never editable', async () => {
+  const state = await chatSetup('anthropic');
+  state.plugin.settings.maxIterations = 1;
+  state.app.vault.cachedRead = async file => file.path.endsWith('Case Template.md') ? 'R'.repeat(80000) : '';
+  let reads = 0;
+  transport(body => {
+    if (JSON.stringify(body.system).includes('You write summaries')) return response('anthropic', [text('Three reads completed; read once more, then answer.')]);
+    const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result');
+    if (JSON.stringify(results).length > 220000) return { status: 400, json: { error: { message: 'prompt is too long: too many input tokens' } } };
+    return reads < 4 ? response('anthropic', [call(`read-${reads++}`, 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use') : response('anthropic', [text('Done')]);
+  });
+  await state.view.handleUserMessage('Read four times', null);
+  const turnId = state.plugin.activeConversation.pendingTurn.turnId;
+  for (let i = 0; i < 3; i++) await state.view.continueTurn();
+  await state.plugin.saveChatHistory();
+  const restored = await chatSetup('anthropic', JSON.parse(JSON.stringify(state.writes.at(-1))));
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, true);
+  assert.equal(restored.plugin.agent.canEditTurn(turnId), false);
+  assert.match(restored.plugin.agent.exportMessages()[0].turnId, /^summary-/);
+  await restored.view.continueTurn();
+  assert.equal(reads, 4);
+  assert.equal(restored.plugin.chatHistory.at(-1).text, 'Done');
+});
+
 for (const restart of [false, true]) for (const externalEdit of [false, true]) test(`Scoped pause keeps its updated selection (restart=${restart}, externalEdit=${externalEdit})`, async () => {
   let state = await chatSetup('anthropic');
   state.plugin.settings.maxIterations = 1;

@@ -65,6 +65,58 @@ function fakeVault(initial) {
 
 const run = (app, changes, name, input) => api.executeTool(app, name, input, async () => 'yes', undefined, changes);
 
+for (const manual of [false, true]) test(`Rename-owned link updates preserve safe undo (manual=${manual})`, async () => {
+  const { app, files } = fakeVault({ 'Index.md': 'Original [[Old]]', 'Old.md': 'Target' });
+  const rename = app.fileManager.renameFile;
+  app.fileManager.renameFile = async (file, to) => {
+    const before = file.path.slice(0, -3), after = to.slice(0, -3);
+    await rename(file, to);
+    for (const [path, content] of files) files.set(path, content.replaceAll(`[[${before}]]`, `[[${after}]]`));
+  };
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Index.md', operation: 'find_replace', find: 'Original', content: 'First' });
+  if (manual) files.set('Index.md', files.get('Index.md') + '\nManual addition');
+  await run(app, changes, 'rename_file', { path: 'Old.md', new_path: 'New.md' });
+  await run(app, changes, 'edit_document', { path: 'Index.md', operation: 'find_replace', find: 'First', content: 'Second' });
+  assert.equal(changes.canUndo(), !manual);
+  if (manual) {
+    const kept = [...files];
+    assert.match((await changes.undo(app))[0], /Intervening/);
+    assert.deepEqual([...files], kept);
+  } else {
+    assert.deepEqual(await changes.conflicts(app), []);
+    assert.deepEqual(await changes.undo(app), []);
+    assert.equal(files.get('Index.md'), 'Original [[Old]]');
+    assert.equal(files.get('Old.md'), 'Target');
+  }
+});
+
+for (const phase of ['before-read', 'rename', 'after-read']) test(`Rename snapshot failure remains safe (${phase})`, async () => {
+  const { app, files } = fakeVault({ 'Index.md': 'Original [[Old]]', 'Old.md': 'Target' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Index.md', operation: 'find_replace', find: 'Original', content: 'First' });
+  const rename = app.fileManager.renameFile, read = app.vault.cachedRead;
+  let moved = false;
+  app.fileManager.renameFile = async (file, to) => {
+    if (phase === 'rename') throw new Error('Rename failed');
+    await rename(file, to); moved = true;
+  };
+  app.vault.cachedRead = async file => {
+    if (file.path === 'Index.md' && (phase === 'before-read' || (phase === 'after-read' && moved))) throw new Error('Read failed');
+    return read(file);
+  };
+  const result = await run(app, changes, 'rename_file', { path: 'Old.md', new_path: 'New.md' });
+  assert.equal(result.isError, phase !== 'after-read');
+  assert.equal(files.has('New.md'), phase === 'after-read');
+  if (phase === 'after-read') {
+    assert.equal(changes.canUndo(), false);
+    assert.match((await changes.undo(app))[0], /could not be verified/);
+  } else {
+    assert.equal(changes.canUndo(), true);
+    assert.deepEqual(changes.files(), ['Index.md']);
+  }
+});
+
 for (const external of [false, true]) for (const operation of ['edit', 'delete']) test(`Folder rename preserves undo continuity (${operation}, external=${external})`, async () => {
   const { app, files } = fakeVault({ 'Drafts/A.md': 'Original' });
   const changes = new api.ChangeLog();

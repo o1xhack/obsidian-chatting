@@ -247,3 +247,9 @@ Overflow recovery coverage includes Continue's initial request, current-turn
 summaries for models without native compaction, insufficient earlier-turn
 summaries, failed summaries preserving completed writes/history, and restored
 empty-folder deletions refusing partial Undo.
+
+Current-turn overflow summaries retain a separate continuation identity and
+remain ineligible for edit/regenerate across restart. Rename tests cover
+Obsidian-owned link rewrites, prior manual edits, and read/rename failures;
+the native harness verifies real link-aware rename/Undo and restores the
+original automatic-link setting.

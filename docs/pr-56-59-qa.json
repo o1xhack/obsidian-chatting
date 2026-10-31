@@ -14,16 +14,22 @@
     "320k current-turn read text retained",
     "one undo restores both continued edits",
     "context ring uses compaction denominator",
-    "context details show threshold and progress"
+    "context details show threshold and progress",
+    "native link-source edit succeeds",
+    "native link-aware rename succeeds",
+    "Obsidian rewrites links during rename",
+    "native rename-owned link changes retain Undo",
+    "native link-aware undo restores original notes",
+    "automatic-link preference restored"
   ],
   "scope": "Native Obsidian Svelte/view/loop/executor; synthetic provider transport; no live-service or physical-phone claim",
   "protectedFiles": 1810,
   "protectedFilesUnchanged": true,
   "base": "fd30449",
   "branch": "codex/pr-56-59-integration",
-  "sourceSha256": "3475d6b69132f88592857478673692dfc9ab0fa53baba45d8eae5d4676a13832",
+  "sourceSha256": "24b81b7ad92dbd79183013055862963ed2e0181d4fc57ed18154cb4ada8bae04",
   "automatedTests": {
-    "passed": 989,
+    "passed": 995,
     "failed": 0
   },
   "typescript": "passed",
@@ -48,7 +54,9 @@
       "secondReviewedHead": "825709208379d8d40ab886fa3e603b47081efe0c",
       "secondOutcome": "2 P2 findings; reproduced and fixed",
       "thirdReviewedHead": "eea830cb6a9c3c463414003b5b1dfe97ebe1fe68",
-      "thirdOutcome": "3 P2 recovery findings; reproduced and fixed"
+      "thirdOutcome": "3 P2 recovery findings; reproduced and fixed",
+      "fourthReviewedHead": "7af7cfe7cac569a2179b3e137dbf8dc3d61381b0",
+      "fourthOutcome": "2 P2 summary-edit and automatic-link findings; reproduced and fixed"
     },
     "communityPreview": "not requested",
     "merged": false,

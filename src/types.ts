@@ -155,7 +155,7 @@ export interface UnifiedMessage {
   replay?: ProviderReplay;
   /** A successful provider pause awaits continuation from this exact reply. */
   awaitingContinuation?: boolean;
-  /** The originating turn retained by a compaction after its user message is dropped. */
+  /** The originating turn retained by a native marker or portable summary; separate from edit eligibility. */
   continuationTurnId?: string;
   /**
    * On the message that starts a user turn: the turn's ID, also on its

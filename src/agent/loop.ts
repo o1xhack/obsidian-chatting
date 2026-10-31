@@ -501,7 +501,8 @@ export class AgentLoop {
     try {
       const summary = await this.summarize(settings, this.messages.slice(0, start), isStopped, callbacks.onUsage);
       if (isStopped()) return false;
-      this.messages = [summaryMessage(summary, includeCurrent ? currentTurnId : summaryTurnId()), ...this.messages.slice(start)];
+      this.messages = [{ ...summaryMessage(summary, summaryTurnId()),
+        ...(includeCurrent ? { continuationTurnId: currentTurnId } : {}) }, ...this.messages.slice(start)];
       debugLog(this.app, "COMPACTED", { reason: includeCurrent ? "current-turn overflow" : "overflow" });
       callbacks.onCompacted?.();
       return true;

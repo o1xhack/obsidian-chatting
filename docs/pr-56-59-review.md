@@ -41,12 +41,14 @@ with the repairs (the original cases lacked these scenarios).
 
 ## Validation
 
-- 989 automated tests passed, zero failed.
+- 995 automated tests passed, zero failed.
 - TypeScript passed; Svelte check: zero errors and warnings; production build passed.
-- Native Obsidian: 14 real Svelte/view/loop/vault checks with synthetic provider
+- Native Obsidian: 20 real Svelte/view/loop/vault checks with synthetic provider
   transport. Multiple pauses/continues executed six tools once, retained
   320,000 characters of reads, produced one changes/steps row and undid both
   edits together. Context-ring and detail text use the compaction threshold.
+  Additional native checks verify Obsidian's real automatic link rewrites,
+  continued Undo, original-note restoration and restoration of its link preference.
 - 1,810 existing non-QA test-vault files had identical SHA-256 hashes afterward.
 - The temporary native helper was unloaded and removed. The installed chat
   plugin, its settings and saved conversations were not replaced.
@@ -84,6 +86,14 @@ recovery also runs for the first request of Continue, while first-send
 preflight still restores the unsent draft. An explicitly empty restored
 changed-file list now marks the whole answer kept, covering empty-folder
 deletion followed by further edits after restart.
+
+A fourth review of `7af7cfe` found P2 edit/regenerate deleting an overflow
+summary and P2 rename-owned automatic link changes expiring safe undo.
+Portable summaries now have synthetic IDs for edit eligibility and a separate
+validated continuation identity. Native and automated regression checks verify
+rename link rewrites, manual edits before rename, failed reads/renames, safe
+post-rename failure, and Undo restoring the original notes. Link snapshots are
+limited to previously tracked notes and count toward the existing undo budget.
 
 The final current-head re-review outcome is recorded separately in the task
 handoff so recording that outcome does not change the commit being reviewed.
