@@ -226,6 +226,12 @@ export interface StreamOptions {
   signal?: AbortSignal;
   /** Background work must not move its transcript to another ChatGPT account on a retry. */
   expectedAccountIdentity?: string;
+  /**
+   * The conversation the request belongs to. The ChatGPT route sends it as
+   * Codex does (`prompt_cache_key`, `session_id` header): without it the
+   * backend caches only the tool definitions, not the conversation.
+   */
+  conversationId?: string;
 }
 
 // ─── Conversation Context ───────────────────────────────────────────────────

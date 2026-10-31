@@ -147,6 +147,8 @@ export async function sendChatGPTOAuthMessage(
     // Required by the Codex backend; omitting it returns
     // 400 {"detail":"Store must be set to false"}.
     store: false,
+    // The conversation names the prompt cache, as Codex sends it.
+    ...(stream.conversationId ? { prompt_cache_key: stream.conversationId } : {}),
     // Match the request shape used by other working Codex-via-OAuth clients
     // (verified against the OpenAI Codex CLI and external references). These
     // fields aren't strictly documented as required, but Codex's response
@@ -250,6 +252,9 @@ async function sendOnce(
   if (accountId) {
     headers["ChatGPT-Account-Id"] = accountId;
   }
+  // With the conversation as session (as Codex sends it) the backend caches
+  // the conversation, not only the tool definitions.
+  if (stream.conversationId) headers.session_id = stream.conversationId;
 
   let data: Record<string, unknown>;
   try {

@@ -225,7 +225,7 @@ see the real server response in milliseconds. We only ship to
 Obsidian once the smoke test is green.
 
 
-Production regression tests also cover dynamic catalogs, 24-hour persistence, request deduplication, failure backoff, manual refresh, account changes during fetch, Anthropic pagination, the OpenAI model list (chat models only, newest first, no dated duplicates; `model-list.test.mjs`), stable Codex version discovery, GPT-6 reasoning metadata, and model/account isolation of native reasoning replay. Run `npm test`.
+Production regression tests also cover dynamic catalogs, 24-hour persistence, request deduplication, failure backoff, manual refresh, account changes during fetch, Anthropic pagination, the OpenAI model list (chat models only, newest first, no dated duplicates; `model-list.test.mjs`), stable Codex version discovery, GPT-6 reasoning metadata, model/account isolation of native reasoning replay, and the ChatGPT route naming each request's conversation for the prompt cache. Run `npm test`.
 
 Live validation results and their limits are recorded in [oauth-live-validation.md](oauth-live-validation.md).
 

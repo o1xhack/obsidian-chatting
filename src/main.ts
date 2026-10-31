@@ -125,7 +125,8 @@ export default class ChatPlugin extends Plugin {
         if (this.unloaded || !this.conversations.includes(conversation)) return;
         if (conversation.id === this.activeConversationId) this.getChatView()?.updateUsage();
         void this.saveChatHistory();
-      });
+      }, conversation.id);
+
       // Also forgets OpenAI's response to chain to: it belongs to another conversation.
       agent.importMessages(conversation.agentMessages);
       this.agents.set(conversation.id, agent);

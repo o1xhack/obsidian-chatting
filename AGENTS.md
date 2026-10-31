@@ -15,7 +15,7 @@ User Input -> Agent Loop -> API Client (stream.ts)  -> Anthropic/OpenAI/Codex
 - **Transport**: HTTP through `requestUrl()`, except chat streaming via the transport module `src/api/stream.ts`: the only place for `fetch` and for Node's `https` (desktop only, loaded at runtime; mobile uses `fetch`; both fall back to `requestUrl()`). The device check (`diagnostics/capability-check.ts`) uses `browserFetch` for its streaming probes only, which test `fetch` itself. The desktop ChatGPT sign-in's callback server is the other Node module (`http`, `auth/chatgptBrowserLogin.ts`). Mobile WebViews enforce CORS, so `fetch` that a provider doesn't allow falls back.
 - **Anthropic** uses Messages API with adaptive thinking and prompt caching
 - **OpenAI** uses Responses API with `previous_response_id` for multi-turn
-- **ChatGPT account** uses the ChatGPT/Codex backend with Device Authorization Flow credentials in `SecretStorage`
+- **ChatGPT account** uses the ChatGPT/Codex backend with Device Authorization Flow credentials in `SecretStorage`; each request names its conversation as Codex does (`prompt_cache_key` and the `session_id` header, `StreamOptions.conversationId`), without which the backend caches only the tool definitions
 - **Agent loop** is provider-agnostic: send -> tools -> send -> done
 - **UI** is a single Svelte 5 component (`ChatContainer.svelte`) mounted in an `ItemView`
 
