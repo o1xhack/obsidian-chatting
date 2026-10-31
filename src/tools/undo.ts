@@ -37,7 +37,7 @@ export class ChangeLog {
 
   /** A continued answer whose earlier snapshots expired stays wholly kept. */
   constructor(keptFiles?: string[]) {
-    if (keptFiles?.length) {
+    if (keptFiles !== undefined) {
       this.keptFiles = [...keptFiles];
       this.keptReason = "restored";
     }

@@ -484,20 +484,25 @@ export class AgentLoop {
   }
 
   /**
-   * The request didn't fit: summarize what came before the running turn,
-   * once per turn, and send again. False when there is nothing before it
-   * or the summary failed.
+   * The request didn't fit: first summarize earlier turns. If the running
+   * turn itself is too large, summarize its completed work too, preserving
+   * its identity. An initial unsent user message is never summarized here.
    */
-  private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<boolean> {
+  private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean,
+    includeCurrent = false, turnId?: string): Promise<boolean> {
     this.cancelPortableHistory();
-    let start = this.messages.length - 1;
-    while (start >= 0 && !this.messages[start].turnId) start--;
+    const currentTurnId = turnId ?? latestTurnId(this.messages);
+    const last = this.messages.at(-1);
+    if (includeCurrent && (!currentTurnId || last?.role !== "user" || typeof last.content === "string" ||
+      !last.content.some(block => block.type === "tool_result"))) return false;
+    let start = includeCurrent ? this.messages.length : this.messages.length - 1;
+    if (!includeCurrent) while (start >= 0 && !this.messages[start].turnId) start--;
     if (start <= 0) return false;
     try {
       const summary = await this.summarize(settings, this.messages.slice(0, start), isStopped, callbacks.onUsage);
       if (isStopped()) return false;
-      this.messages = [summaryMessage(summary, summaryTurnId()), ...this.messages.slice(start)];
-      debugLog(this.app, "COMPACTED", { reason: "overflow" });
+      this.messages = [summaryMessage(summary, includeCurrent ? currentTurnId : summaryTurnId()), ...this.messages.slice(start)];
+      debugLog(this.app, "COMPACTED", { reason: includeCurrent ? "current-turn overflow" : "overflow" });
       callbacks.onCompacted?.();
       return true;
     } catch (e) {
@@ -822,8 +827,8 @@ ${mentioned.text}` : buildContextMessage(context);
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
     let resends = 0;
-    // A request too long for the model is summarized and sent again, once per turn.
-    let overflowCompacted = false;
+    // At most one earlier-history summary and one completed-current-turn summary.
+    let overflowCompactions = 0;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
@@ -840,10 +845,18 @@ ${mentioned.text}` : buildContextMessage(context);
           response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
         } catch (e) {
           if (isStopped()) return;
-          if (!overflowCompacted && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
-            overflowCompacted = true;
+          if (overflowCompactions < 2 && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
             callbacks.onThinking();
-            if (await this.compactForOverflow(turnSettings, callbacks, isStopped)) continue;
+            let compacted = false;
+            if (overflowCompactions === 0) {
+              overflowCompactions++;
+              compacted = await this.compactForOverflow(turnSettings, callbacks, isStopped);
+            }
+            if (!compacted && overflowCompactions < 2 && !isStopped()) {
+              overflowCompactions = 2;
+              compacted = await this.compactForOverflow(turnSettings, callbacks, isStopped, true, turnId);
+            }
+            if (compacted) continue;
             if (isStopped()) return;
           }
           const msg = e instanceof Error ? e.message : String(e);
@@ -877,7 +890,7 @@ ${mentioned.text}` : buildContextMessage(context);
           // A later request over the encoded byte limit cannot reach the
           // provider's compaction. Drop tool attachments and apply the shared
           // text allowance to the current turn too, then retry the request.
-          if (i > 0 && e instanceof RequestBudgetError) {
+          if ((i > 0 || beforeTurn === undefined) && e instanceof RequestBudgetError) {
             const reduced = withoutLargeToolText(withoutToolAttachments(this.messages), false);
             if (reduced !== this.messages) {
               this.messages = reduced;

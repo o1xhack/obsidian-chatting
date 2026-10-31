@@ -5,7 +5,61 @@
 // the chat.
 import assert from 'node:assert/strict';
 import { test, beforeEach } from 'node:test';
-import { api, sse, streamEvents, text, transport, withCatalog, settings, callbacks, vaultApp, chatFiles } from './harness.mjs';
+import { api, call, response, sse, streamEvents, text, transport, withCatalog, settings, callbacks, vaultApp, chatFiles } from './harness.mjs';
+
+for (const pause of [false, true]) for (const earlier of [false, true]) test(`A non-compacting model summarizes completed current-turn work on overflow (pause=${pause}, earlier=${earlier})`, async () => {
+  const { app, files } = vaultApp();
+  for (let i = 0; i < 4; i++) files.set(`N${i}.md`, String(i).repeat(80000));
+  let reads = 0, summaries = 0, rejected = 0;
+  transport(body => {
+    if (isSummaryRequest(body)) {
+      summaries++;
+      if (!JSON.stringify(body).includes('Read all four notes')) return response('anthropic', [text('Earlier question answered.')]);
+      assert.match(JSON.stringify(body), /Read all four notes/);
+      assert.match(JSON.stringify(body), /N2.md/);
+      return response('anthropic', [text('N0.md, N1.md and N2.md have been read. Read N3.md next, then answer. Do not repeat completed reads.')]);
+    }
+    if (JSON.stringify(body.messages.at(-1)).includes('Earlier question')) return response('anthropic', [text('Earlier answer')]);
+    const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result');
+    if (JSON.stringify(results).length > 220000) {
+      rejected++;
+      return { status: 400, json: { error: { type: 'invalid_request_error', message: 'prompt is too long: too many input tokens' } } };
+    }
+    return reads < 4
+      ? response('anthropic', [call(`read-${reads}`, 'read_document', { path: `N${reads++}.md` })], 'tool_use')
+      : response('anthropic', [text('Done')]);
+  });
+  const loop = new api.AgentLoop(app, { ...settings('anthropic'), maxIterations: pause ? 3 : 6 });
+  const cb = callbacks({ onStepLimit() {} });
+  if (earlier) await loop.run('Earlier question', callbacks());
+  await loop.run('Read all four notes, then answer', cb, null, [], 'current-overflow');
+  if (pause) await loop.continueTurn(cb);
+  assert.deepEqual(cb.errors, []);
+  assert.equal(rejected, earlier ? 2 : 1);
+  assert.equal(summaries, earlier ? 2 : 1);
+  assert.equal(cb.executed.length, 4);
+  assert.equal(cb.texts.at(-1), 'Done');
+  assert.equal(loop.exportMessages()[0].turnId, 'current-overflow');
+});
+
+test('A failed current-turn overflow summary preserves completed writes and history', async () => {
+  const { app, files } = vaultApp();
+  const loop = new api.AgentLoop(app, { ...settings('anthropic'), maxIterations: 2 });
+  let before;
+  const requests = transport((body, index) => {
+    if (isSummaryRequest(body)) return { status: 400, json: { error: { message: 'Summary unavailable' } } };
+    if (index === 0) return response('anthropic', [call('created-once', 'create_file', { path: 'Receipt.md', content: 'Already written' })], 'tool_use');
+    before = JSON.stringify(loop.exportMessages());
+    return { status: 400, json: { error: { message: 'prompt is too long: too many input tokens' } } };
+  });
+  const cb = callbacks();
+  await loop.run('Create Receipt.md', cb);
+  assert.equal(requests.length, 3);
+  assert.equal(files.get('Receipt.md'), 'Already written');
+  assert.deepEqual(cb.executed, ['create_file']);
+  assert.match(cb.errors[0], /prompt is too long/);
+  assert.equal(JSON.stringify(loop.exportMessages()), before);
+});
 
 beforeEach(() => {
   api.clearOpenAIState();

@@ -300,6 +300,25 @@ function editingModel() {
 const sentText = body => JSON.stringify(body.messages.at(-1).content);
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
+test('An empty restored file list cannot enable partial Undo after continuing', async () => {
+  const { plugin, view, app, writes } = await chatSetup();
+  await app.vault.createFolder('Empty');
+  plugin.agent = new api.AgentLoop(app, { ...settings('anthropic'), maxIterations: 1 });
+  transport(() => response('anthropic', [call('delete-empty', 'delete_file', { path: 'Empty' })], 'tool_use'));
+  await view.handleUserMessage('Delete the folder then edit the plan', null);
+  assert.deepEqual(changesRow(plugin).files, []);
+  await plugin.saveChatHistory();
+  const restored = await chatSetup(JSON.parse(JSON.stringify(writes.at(-1))));
+  transport((_body, index) => index === 0
+    ? response('anthropic', [call('edit-plan', 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: 'Continued' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await restored.view.continueTurn();
+  const row = changesRow(restored.plugin);
+  assert.equal(restored.plugin.changeLogs.get(row).canUndo(), false);
+  await restored.view.undoChanges(row.turnId);
+  assert.equal(restored.files.get('Plan.md'), 'Continued');
+});
+
 test('Intervening manual edits during a pause make the combined answer wholly kept', async () => {
   const { plugin, view, files } = await chatSetup();
   plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });

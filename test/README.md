@@ -242,3 +242,8 @@ PR 56–59 CR regressions additionally cover manual changes between paused
 segments, folder descendant moves and path reuse, asynchronous Undo/Continue
 exclusion, compacted pause identity/read retention across restart, and
 emergency recovery of CJK tool results above the 30 MB request ceiling.
+
+Overflow recovery coverage includes Continue's initial request, current-turn
+summaries for models without native compaction, insufficient earlier-turn
+summaries, failed summaries preserving completed writes/history, and restored
+empty-folder deletions refusing partial Undo.

@@ -41,7 +41,7 @@ with the repairs (the original cases lacked these scenarios).
 
 ## Validation
 
-- 980 automated tests passed, zero failed.
+- 989 automated tests passed, zero failed.
 - TypeScript passed; Svelte check: zero errors and warnings; production build passed.
 - Native Obsidian: 14 real Svelte/view/loop/vault checks with synthetic provider
   transport. Multiple pauses/continues executed six tools once, retained
@@ -75,6 +75,15 @@ of a locally unsent request exceeding 30 MB explicitly bounds current-turn
 text too; ordinary requests retain the larger current-turn allowance.
 All three providers recover from a 110-result CJK batch without repeating
 those read tools, and legitimate folder path reuse stays undoable.
+
+A third review of `eea830c` found three P2 recovery gaps. Explicit context
+overflow now permits a bounded summary of completed current-turn work when
+earlier-turn compaction is insufficient, retaining its turn identity and
+leaving history unchanged if summarization fails. Emergency byte-size
+recovery also runs for the first request of Continue, while first-send
+preflight still restores the unsent draft. An explicitly empty restored
+changed-file list now marks the whole answer kept, covering empty-folder
+deletion followed by further edits after restart.
 
 The final current-head re-review outcome is recorded separately in the task
 handoff so recording that outcome does not change the commit being reviewed.

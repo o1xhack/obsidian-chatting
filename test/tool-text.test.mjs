@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { api, settings, text, call, response, transport, vaultApp, callbacks } from './harness.mjs';
 
-for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) test(`${provider}: oversized CJK results recover without replaying the read batch`, async () => {
+for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) for (const pause of [false, true]) test(`${provider}: oversized CJK results recover without replaying the read batch (pause=${pause})`, async () => {
   api.clearOpenAIState();
   api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'fake', accountId: 'fake' }) });
   const { app, files } = vaultApp();
@@ -10,8 +10,10 @@ for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) test(`${provide
   const requests = transport((_body, index) => index === 0
     ? response(provider, Array.from({ length: 110 }, (_, i) => call(`read-${i}`, 'read_document', { path: 'Large.md' })), 'tool_use', index)
     : response(provider, [text('Recovered.')], 'end_turn', index));
-  const cb = callbacks();
-  await new api.AgentLoop(app, { ...settings(provider), maxIterations: 2 }).run('Read the batch then answer', cb);
+  const cb = callbacks({ onStepLimit() {} });
+  const loop = new api.AgentLoop(app, { ...settings(provider), maxIterations: pause ? 1 : 2 });
+  await loop.run('Read the batch then answer', cb);
+  if (pause) await loop.continueTurn(cb);
   assert.deepEqual(cb.errors, []);
   assert.equal(requests.length, 2);
   assert.equal(cb.executed.length, 110);
