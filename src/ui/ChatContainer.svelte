@@ -16,7 +16,7 @@
   import type { VoiceViewState } from "../voice/controller";
   import { AttachmentPreparation } from "./attachment-preparation";
   import { withoutLargeVisibleToolText } from "../agent/history";
-  import { formatCost, formatTokens } from "../agent/usage";
+  import { contextShare, formatCost, formatTokens } from "../agent/usage";
 
   /** Where a ChatGPT account sees its plan's Codex usage. */
   const CHATGPT_USAGE_URL = "https://chatgpt.com/codex/settings/usage";
@@ -1220,8 +1220,9 @@
       <span class="ochatting-header-model">{displayModel || "No model"}</span>
     </div>
     {#if usage}
-      {@const share = usage.contextWindow ? Math.min(1, usage.contextTokens / usage.contextWindow) : 0}
-      <!-- How full the context is; a click shows the details -->
+      <!-- How full the context is (full: the compaction point); a click shows the details -->
+      {@const filled = contextShare(usage.contextTokens, usage.compactAt, usage.contextWindow)}
+      {@const share = filled ?? 0}
       <div class="ochatting-usage" bind:this={usageEl}>
         <button
           class="ochatting-icon-btn ochatting-usage-btn"
@@ -1230,11 +1231,11 @@
           onclick={() => usageOpen = !usageOpen}
           aria-expanded={usageOpen}
           aria-label={usage.plan ? "Context" : "Context and cost"}
-          title={usage.contextWindow ? `Context ${Math.round(share * 100)} % full` : `Context ${formatTokens(usage.contextTokens)} tokens`}
+          title={filled === undefined ? `Context ${formatTokens(usage.contextTokens)} tokens` : usage.compactAt !== undefined ? `Context ${Math.round(share * 100)} % of the way to compaction` : `Context ${Math.round(share * 100)} % full`}
         >
           <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
             <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2.5"></circle>
-            {#if usage.contextWindow}
+            {#if filled !== undefined}
               <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.5"
                 stroke-linecap="round" stroke-dasharray={`${(share * 47.12).toFixed(2)} 47.12`} transform="rotate(-90 10 10)"></circle>
             {/if}
@@ -1244,9 +1245,15 @@
           <div class="ochatting-usage-pop" role="dialog" aria-label={usage.plan ? "Context" : "Context and cost"}>
             <div class="ochatting-usage-row">
               <span>Context</span>
-              <span>{formatTokens(usage.contextTokens)}{usage.contextWindow ? ` of ${formatTokens(usage.contextWindow)} (${Math.round(share * 100)} %)` : " tokens"}</span>
+              <span>{formatTokens(usage.contextTokens)}{usage.contextWindow ? ` of ${formatTokens(usage.contextWindow)}` : " tokens"}{usage.compactAt === undefined && usage.contextWindow ? ` (${Math.round(share * 100)} %)` : ""}</span>
             </div>
-            {#if usage.contextWindow}
+            {#if usage.compactAt !== undefined}
+              <div class="ochatting-usage-row">
+                <span>Compacts at</span>
+                <span>{formatTokens(usage.compactAt)} ({Math.round(share * 100)} % reached)</span>
+              </div>
+            {/if}
+            {#if filled !== undefined}
               <div class="ochatting-usage-bar"><span style:width={`${(share * 100).toFixed(1)}%`}></span></div>
             {/if}
             <div class="ochatting-usage-row">
