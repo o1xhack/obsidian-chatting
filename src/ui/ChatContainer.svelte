@@ -16,7 +16,7 @@
   import type { VoiceViewState } from "../voice/controller";
   import { AttachmentPreparation } from "./attachment-preparation";
   import { withoutLargeVisibleToolText } from "../agent/history";
-  import { formatCost, formatTokens } from "../agent/usage";
+  import { contextShare, formatCost, formatTokens } from "../agent/usage";
 
   /** Where a ChatGPT account sees its plan's Codex usage. */
   const CHATGPT_USAGE_URL = "https://chatgpt.com/codex/settings/usage";
@@ -58,6 +58,8 @@
     steps?: ChatMessage[];
     /** Steps rows: opened into the steps and files. */
     stepsOpen?: boolean;
+    /** Steps rows: the turn ended without an answer (no check mark). */
+    unanswered?: boolean;
     /** Tool steps: opened into their parameters and result (built only then). */
     toolOpen?: boolean;
   }
@@ -117,7 +119,7 @@
     if (usageOpen && usageEl && event.target instanceof Node && !usageEl.contains(event.target)) usageOpen = false;
   }
 
-  /** A turn was cut off when Obsidian was ended in the background: offer Continue. */
+  /** A turn was cut off when Obsidian was ended in the background, or paused after all its steps: offer Continue. */
   let canContinue = $state(false);
 
   export function setContinue(show: boolean): void {
@@ -574,6 +576,7 @@
    * before the answer that reports the change (at the end without one).
    */
   export function addChanges(turnId: string, files: string[], state: ChangesState): void {
+    messages = messages.filter(m => m.type !== "changes" || m.turnId !== turnId);
     const row: ChatMessage = { id: nextId++, type: "changes", turnId, files, changesState: state };
     const start = messages.findIndex((m) => m.type === "user" && m.turnId === turnId);
     const later = messages.findIndex((m, i) => i > start && m.type === "user" && !!m.turnId && m.turnId !== turnId);
@@ -603,10 +606,10 @@
   export function foldTurn(turnId: string): void {
     const plan = foldPlan(messages, turnId);
     if (!plan) return;
-    const { at, steps, changes } = plan;
+    const { at, steps, changes, unanswered } = plan;
     const gone = new Set<ChatMessage>(changes ? [...steps, changes] : steps);
     const row: ChatMessage = {
-      id: nextId++, type: "steps", turnId, steps,
+      id: nextId++, type: "steps", turnId, steps, ...(unanswered ? { unanswered } : {}),
       ...(changes ? { files: changes.files, changesState: changes.changesState } : {}),
     };
     const kept = (m: ChatMessage) => !gone.has(m);
@@ -1218,8 +1221,9 @@
       <span class="ochatting-header-model">{displayModel || "No model"}</span>
     </div>
     {#if usage}
-      {@const share = usage.contextWindow ? Math.min(1, usage.contextTokens / usage.contextWindow) : 0}
-      <!-- How full the context is; a click shows the details -->
+      <!-- How full the context is (full: the compaction point); a click shows the details -->
+      {@const filled = contextShare(usage.contextTokens, usage.compactAt, usage.contextWindow)}
+      {@const share = filled ?? 0}
       <div class="ochatting-usage" bind:this={usageEl}>
         <button
           class="ochatting-icon-btn ochatting-usage-btn"
@@ -1228,11 +1232,11 @@
           onclick={() => usageOpen = !usageOpen}
           aria-expanded={usageOpen}
           aria-label={usage.plan ? "Context" : "Context and cost"}
-          title={usage.contextWindow ? `Context ${Math.round(share * 100)} % full` : `Context ${formatTokens(usage.contextTokens)} tokens`}
+          title={filled === undefined ? `Context ${formatTokens(usage.contextTokens)} tokens` : usage.compactAt !== undefined ? `Context ${Math.round(share * 100)} % of the way to compaction` : `Context ${Math.round(share * 100)} % full`}
         >
           <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
             <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2.5"></circle>
-            {#if usage.contextWindow}
+            {#if filled !== undefined}
               <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="2.5"
                 stroke-linecap="round" stroke-dasharray={`${(share * 47.12).toFixed(2)} 47.12`} transform="rotate(-90 10 10)"></circle>
             {/if}
@@ -1242,9 +1246,15 @@
           <div class="ochatting-usage-pop" role="dialog" aria-label={usage.plan ? "Context" : "Context and cost"}>
             <div class="ochatting-usage-row">
               <span>Context</span>
-              <span>{formatTokens(usage.contextTokens)}{usage.contextWindow ? ` of ${formatTokens(usage.contextWindow)} (${Math.round(share * 100)} %)` : " tokens"}</span>
+              <span>{formatTokens(usage.contextTokens)}{usage.contextWindow ? ` of ${formatTokens(usage.contextWindow)}` : " tokens"}{usage.compactAt === undefined && usage.contextWindow ? ` (${Math.round(share * 100)} %)` : ""}</span>
             </div>
-            {#if usage.contextWindow}
+            {#if usage.compactAt !== undefined}
+              <div class="ochatting-usage-row">
+                <span>Compacts at</span>
+                <span>{formatTokens(usage.compactAt)} ({Math.round(share * 100)} % reached)</span>
+              </div>
+            {/if}
+            {#if filled !== undefined}
               <div class="ochatting-usage-bar"><span style:width={`${(share * 100).toFixed(1)}%`}></span></div>
             {/if}
             <div class="ochatting-usage-row">
@@ -1504,6 +1514,9 @@
               <svg class="ochatting-tool-icon ochatting-steps-failed" aria-label={failed === 1 ? "A step failed" : `${failed} steps failed`} xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
             {:else if files.length}
               <svg class="ochatting-tool-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path><path d="M14 2v6h6"></path></svg>
+            {:else if msg.unanswered}
+              <!-- No answer followed: no check mark (the note or error below says why) -->
+              <svg class="ochatting-tool-icon" aria-label="Not finished" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M8 12h8"></path></svg>
             {:else}
               <svg class="ochatting-tool-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
             {/if}
@@ -1545,8 +1558,8 @@
           {/if}
         </details>
 
-      {:else if msg.type === "error" && (msg.errorKind === "stopped" || msg.errorKind === "compacted")}
-        <!-- Stopped before any of the answer arrived, or the earlier part summarized: a quiet note, not an error -->
+      {:else if msg.type === "error" && (msg.errorKind === "stopped" || msg.errorKind === "compacted" || msg.errorKind === "paused")}
+        <!-- Stopped before any of the answer arrived, the earlier part summarized, or all steps used: a quiet note, not an error -->
         <div class="ochatting-stopped-note">{msg.text}</div>
 
       {:else if msg.type === "changes"}
@@ -1606,7 +1619,7 @@
 
   {#if canContinue}
     <div class="ochatting-continue-row" role="status">
-      <span>The last answer was interrupted.</span>
+      <span>The last answer isn't finished.</span>
       <button class="mod-cta" type="button" onclick={continueTurn}>Continue</button>
     </div>
   {/if}

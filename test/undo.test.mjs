@@ -65,6 +65,111 @@ function fakeVault(initial) {
 
 const run = (app, changes, name, input) => api.executeTool(app, name, input, async () => 'yes', undefined, changes);
 
+for (const manual of [false, true]) test(`Rename-owned link updates preserve safe undo (manual=${manual})`, async () => {
+  const { app, files } = fakeVault({ 'Index.md': 'Original [[Old]]', 'Old.md': 'Target' });
+  const rename = app.fileManager.renameFile;
+  app.fileManager.renameFile = async (file, to) => {
+    const before = file.path.slice(0, -3), after = to.slice(0, -3);
+    await rename(file, to);
+    for (const [path, content] of files) files.set(path, content.replaceAll(`[[${before}]]`, `[[${after}]]`));
+  };
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Index.md', operation: 'find_replace', find: 'Original', content: 'First' });
+  if (manual) files.set('Index.md', files.get('Index.md') + '\nManual addition');
+  await run(app, changes, 'rename_file', { path: 'Old.md', new_path: 'New.md' });
+  await run(app, changes, 'edit_document', { path: 'Index.md', operation: 'find_replace', find: 'First', content: 'Second' });
+  assert.equal(changes.canUndo(), !manual);
+  if (manual) {
+    const kept = [...files];
+    assert.match((await changes.undo(app))[0], /Intervening/);
+    assert.deepEqual([...files], kept);
+  } else {
+    assert.deepEqual(await changes.conflicts(app), []);
+    assert.deepEqual(await changes.undo(app), []);
+    assert.equal(files.get('Index.md'), 'Original [[Old]]');
+    assert.equal(files.get('Old.md'), 'Target');
+  }
+});
+
+for (const phase of ['before-read', 'rename', 'after-read']) test(`Rename snapshot failure remains safe (${phase})`, async () => {
+  const { app, files } = fakeVault({ 'Index.md': 'Original [[Old]]', 'Old.md': 'Target' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Index.md', operation: 'find_replace', find: 'Original', content: 'First' });
+  const rename = app.fileManager.renameFile, read = app.vault.cachedRead;
+  let moved = false;
+  app.fileManager.renameFile = async (file, to) => {
+    if (phase === 'rename') throw new Error('Rename failed');
+    await rename(file, to); moved = true;
+  };
+  app.vault.cachedRead = async file => {
+    if (file.path === 'Index.md' && (phase === 'before-read' || (phase === 'after-read' && moved))) throw new Error('Read failed');
+    return read(file);
+  };
+  const result = await run(app, changes, 'rename_file', { path: 'Old.md', new_path: 'New.md' });
+  assert.equal(result.isError, phase !== 'after-read');
+  assert.equal(files.has('New.md'), phase === 'after-read');
+  if (phase === 'after-read') {
+    assert.equal(changes.canUndo(), false);
+    assert.match((await changes.undo(app))[0], /could not be verified/);
+  } else {
+    assert.equal(changes.canUndo(), true);
+    assert.deepEqual(changes.files(), ['Index.md']);
+  }
+});
+
+for (const external of [false, true]) for (const operation of ['edit', 'delete']) test(`Folder rename preserves undo continuity (${operation}, external=${external})`, async () => {
+  const { app, files } = fakeVault({ 'Drafts/A.md': 'Original' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Drafts/A.md', operation: 'replace_all', content: 'First' });
+  await run(app, changes, 'rename_file', { path: 'Drafts', new_path: 'Archive' });
+  if (external) files.set('Archive/A.md', 'First\nManual addition');
+  if (operation === 'edit') await run(app, changes, 'edit_document', { path: 'Archive/A.md', operation: 'find_replace', find: 'First', content: 'Second' });
+  else await run(app, changes, 'delete_file', { path: 'Archive/A.md' });
+  assert.equal(changes.canUndo(), !external);
+  if (external) {
+    const kept = [...files];
+    assert.match((await changes.undo(app))[0], /Intervening/);
+    assert.deepEqual([...files], kept);
+  } else {
+    assert.deepEqual(await changes.conflicts(app), []);
+    assert.deepEqual(await changes.undo(app), []);
+    assert.equal(files.get('Drafts/A.md'), 'Original');
+  }
+});
+
+test('Reusing a descendant path after a folder rename is still wholly undoable', async () => {
+  const { app, files } = fakeVault({ 'Drafts/A.md': 'Original' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Drafts/A.md', operation: 'replace_all', content: 'First' });
+  await run(app, changes, 'rename_file', { path: 'Drafts', new_path: 'Archive' });
+  await run(app, changes, 'create_file', { path: 'Drafts/A.md', content: 'New draft' });
+  assert.equal(changes.canUndo(), true);
+  assert.deepEqual(await changes.conflicts(app), []);
+  assert.deepEqual(await changes.undo(app), []);
+  assert.equal(files.get('Drafts/A.md'), 'Original');
+});
+
+for (const operation of ['edit', 'delete', 'rename-delete', 'recreate']) test(`Undo keeps intervening changes before ${operation}`, async () => {
+  const { app, files } = fakeVault({ 'Plan.md': 'Original' });
+  const changes = new api.ChangeLog();
+  await run(app, changes, 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: 'First AI edit' });
+  files.set('Plan.md', 'First AI edit\nManual addition');
+  if (operation === 'edit') {
+    await run(app, changes, 'edit_document', { path: 'Plan.md', operation: 'find_replace', find: 'First', content: 'Second' });
+  } else if (operation === 'recreate') {
+    files.delete('Plan.md');
+    await run(app, changes, 'create_file', { path: 'Plan.md', content: 'Recreated' });
+  } else {
+    const path = operation === 'rename-delete' ? 'Moved.md' : 'Plan.md';
+    if (path !== 'Plan.md') await run(app, changes, 'rename_file', { path: 'Plan.md', new_path: path });
+    await run(app, changes, 'delete_file', { path });
+  }
+  assert.equal(changes.canUndo(), false);
+  const beforeUndo = [...files];
+  assert.match((await changes.undo(app))[0], /Intervening/);
+  assert.deepEqual([...files], beforeUndo);
+});
+
 test('A failed trash operation does not leave a phantom deletion to undo', async () => {
   const { app, files } = fakeVault({ 'Plan.md': 'Keep me' });
   const changes = new api.ChangeLog();
@@ -246,6 +351,108 @@ function editingModel() {
 /** The text of a request's last message (the user turn). */
 const sentText = body => JSON.stringify(body.messages.at(-1).content);
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+test('An empty restored file list cannot enable partial Undo after continuing', async () => {
+  const { plugin, view, app, writes } = await chatSetup();
+  await app.vault.createFolder('Empty');
+  plugin.agent = new api.AgentLoop(app, { ...settings('anthropic'), maxIterations: 1 });
+  transport(() => response('anthropic', [call('delete-empty', 'delete_file', { path: 'Empty' })], 'tool_use'));
+  await view.handleUserMessage('Delete the folder then edit the plan', null);
+  assert.deepEqual(changesRow(plugin).files, []);
+  await plugin.saveChatHistory();
+  const restored = await chatSetup(JSON.parse(JSON.stringify(writes.at(-1))));
+  transport((_body, index) => index === 0
+    ? response('anthropic', [call('edit-plan', 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: 'Continued' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await restored.view.continueTurn();
+  const row = changesRow(restored.plugin);
+  assert.equal(restored.plugin.changeLogs.get(row).canUndo(), false);
+  await restored.view.undoChanges(row.turnId);
+  assert.equal(restored.files.get('Plan.md'), 'Continued');
+});
+
+test('Intervening manual edits during a pause make the combined answer wholly kept', async () => {
+  const { plugin, view, files } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  transport((_body, index) => index < 2
+    ? response('anthropic', [call(`edit-${index}`, 'edit_document', { path: 'Plan.md', operation: 'find_replace', find: index === 0 ? 'My' : 'First', content: index === 0 ? 'First' : 'Second' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await view.handleUserMessage('Edit twice', null);
+  files.set('Plan.md', files.get('Plan.md') + '\nManual addition');
+  await view.continueTurn();
+  await view.continueTurn();
+  const row = changesRow(plugin);
+  assert.equal(plugin.changeLogs.get(row).canUndo(), false);
+  await view.undoChanges(row.turnId);
+  assert.equal(files.get('Plan.md'), 'Second plan\nManual addition');
+});
+
+test('Continue cannot race an undo with a pending vault write', async () => {
+  const { plugin, view, files, app } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  const requests = editingModel();
+  await view.handleUserMessage('Rewrite my plan', null);
+  let finishWrite;
+  const modify = app.vault.modify;
+  app.vault.modify = (file, content) => new Promise(resolve => { finishWrite = async () => { await modify(file, content); resolve(); }; });
+  const undo = view.undoChanges(changesRow(plugin).turnId);
+  while (!finishWrite) await tick();
+  await view.continueTurn();
+  const count = requests.length;
+  await finishWrite();
+  await undo;
+  assert.equal(count, 1);
+  assert.equal(files.get('Plan.md'), 'My plan');
+  assert.equal(plugin.activeConversation.pendingTurn, undefined);
+});
+
+test('Edits across repeated step-limit pauses share one complete undo log', async () => {
+  const { plugin, view, files } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  const requests = transport((_body, index) => index < 2
+    ? response('anthropic', [call(`edit-${index}`, 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: `Edit ${index}` })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await view.handleUserMessage('Edit twice', null);
+  const turnId = plugin.activeConversation.pendingTurn.turnId;
+  await view.continueTurn();
+  await view.continueTurn();
+  const rows = plugin.chatHistory.filter(row => row.type === 'changes');
+  assert.equal(rows.length, 1);
+  assert.equal(requests.length, 3);
+  assert.equal(files.get('Plan.md'), 'Edit 1');
+  assert.deepEqual(await plugin.changeLogs.get(rows[0]).conflicts(plugin.app), []);
+  await view.undoChanges(turnId);
+  assert.equal(files.get('Plan.md'), 'My plan');
+});
+
+test('Undoing a paused answer dismisses Continue so stale edit receipts cannot be resumed', async () => {
+  const { plugin, view, files } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  editingModel();
+  await view.handleUserMessage('Rewrite my plan', null);
+  const turnId = plugin.activeConversation.pendingTurn.turnId;
+  await view.undoChanges(turnId);
+  assert.equal(files.get('Plan.md'), 'My plan');
+  assert.equal(plugin.activeConversation.pendingTurn, undefined);
+});
+
+test('Continuing after a reload keeps the full changed-file list without offering partial undo', async () => {
+  const { plugin, view, writes } = await chatSetup();
+  plugin.agent = new api.AgentLoop(plugin.app, { ...settings('anthropic'), maxIterations: 1 });
+  editingModel();
+  await view.handleUserMessage('Rewrite my plan', null);
+  await plugin.saveChatHistory();
+  const restored = await chatSetup(JSON.parse(JSON.stringify(writes.at(-1))));
+  restored.files.set('Plan.md', 'AI plan');
+  transport((_body, index) => index === 0
+    ? response('anthropic', [call('again', 'edit_document', { path: 'Plan.md', operation: 'replace_all', content: 'Final plan' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await restored.view.continueTurn();
+  const rows = restored.plugin.chatHistory.filter(row => row.type === 'changes');
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].files, ['Plan.md']);
+  assert.equal(restored.plugin.changeLogs.get(rows[0]).canUndo(), false);
+});
 
 // The changes row of the latest turn that has one.
 const changesRow = (plugin) => plugin.chatHistory.findLast((e) => e.type === 'changes');

@@ -218,6 +218,8 @@ interface RunningTurn {
   agent: AgentLoop;
   /** Some of the answer is on screen (streamed or whole, a step or a question). */
   answerShown: boolean;
+  /** The turn used all its steps: it keeps its pending mark, so Continue goes on. */
+  paused?: boolean;
   /** The answer being streamed, until the loop delivers it whole; `id` is its message while shown. */
   streaming: { id: number; text: string } | null;
   /** Tool steps still running, by tool name, with their row while shown. */
@@ -544,11 +546,12 @@ export class ObsidianChatView extends ItemView {
 
   /**
    * The shown conversation's turn was cut off (Obsidian was ended in the
-   * middle of it) and the model still owes an answer.
+   * middle of it) or paused after all its steps, and the model still owes
+   * an answer.
    */
   private canContinue(): boolean {
     const pending = this.plugin.activeConversation.pendingTurn;
-    return !this.running && !!pending && !pending.remoteEffectsPossible &&
+    return !this.running && !this.undoing && !!pending && !pending.remoteEffectsPossible &&
       this.plugin.chatHistory.some(row => row.type === "user" && row.turnId === pending.turnId) &&
       this.plugin.agent.owesAnswer(pending.turnId);
   }
@@ -1007,13 +1010,15 @@ export class ObsidianChatView extends ItemView {
 
   /**
    * Continue the turn that was cut off when Obsidian was ended in the
-   * middle of it: the agent runs on its history as saved, with no new user
-   * message; tool results already there aren't run again.
+   * middle of it, or paused after all its steps: the agent runs on its
+   * history as saved, with no new user message; tool results already there
+   * aren't run again.
    */
   async continueTurn(): Promise<void> {
     const pending = this.plugin.activeConversation.pendingTurn;
     if (!pending || !this.canContinue()) return;
-    const selection = this.plugin.chatHistory.find(row => row.type === "user" && row.turnId === pending.turnId)?.selection;
+    const original = this.plugin.chatHistory.find(row => row.type === "user" && row.turnId === pending.turnId)?.selection;
+    const selection = original && pending.selection?.filePath === original.filePath ? pending.selection : original;
     await this.runTurn(pending.turnId, (agent, callbacks) => agent.continueTurn(callbacks, selection));
   }
 
@@ -1059,12 +1064,17 @@ export class ObsidianChatView extends ItemView {
     // Saved with the chat when the app goes to the background; still there
     // at the next start, the turn was cut off. A new message only once it
     // is sent (`begin`).
-    if (!draft) conversation.pendingTurn = { turnId, startedAt: Date.now() };
+    if (!draft) conversation.pendingTurn = { ...conversation.pendingTurn, turnId, startedAt: Date.now() };
     chat.setContinue(false);
     // The input stays usable: what is sent now is added to this turn.
     chat.setBusy(true);
 
-    const changes = new ChangeLog();
+    const previousChanges = history.find(entry => entry.type === "changes" && entry.turnId === turnId && !entry.undone);
+    const changes = previousChanges
+      ? this.plugin.changeLogs.get(previousChanges) ?? new ChangeLog(previousChanges.files)
+      : new ChangeLog();
+    // Continue opens the earlier steps again; completion folds the whole answer once.
+    if (!draft) this.renderHistory(true);
     let notesRestored = false;
     const restoreNotes = () => {
       if (!notesRestored && draft?.notes.length) conversation.notes = [...new Set([...draft.notes, ...conversation.notes ?? []])];
@@ -1224,6 +1234,16 @@ export class ObsidianChatView extends ItemView {
           history.push({ type: "error", text: error });
           voice?.onError(error);
         },
+        onStepLimit: (steps, selection) => {
+          this.setThinking(turn, null);
+          this.endStream(turn, true);
+          const note = `Paused after ${steps} steps.`;
+          ui()?.addError(note, "paused");
+          history.push({ type: "error", text: note, errorKind: "paused" });
+          turn.paused = true;
+          if (selection && conversation.pendingTurn?.turnId === turnId) conversation.pendingTurn.selection = historySelection(selection);
+          voice?.onError(`${note} Continue in the chat to go on.`);
+        },
         // Added to the running turn (typed or spoken): shown where the agent took it in.
         onSteered: (text) => {
           this.endStream(turn, false);
@@ -1256,7 +1276,11 @@ export class ObsidianChatView extends ItemView {
       }
       turn.releaseScreen();
       release();
-      if (conversation.pendingTurn?.turnId === turnId) delete conversation.pendingTurn;
+      // A paused turn keeps its mark for Continue; no request is in flight, so nothing remote is uncertain.
+      if (conversation.pendingTurn?.turnId === turnId) {
+        if (turn.paused) delete conversation.pendingTurn.remoteEffectsPossible;
+        else delete conversation.pendingTurn;
+      }
       if (!changes.isEmpty()) this.addChanges(history, turnId, changes);
       // The turn is over: its steps fold into one row above the answer
       // (when the chat shows its conversation; a stopped turn too).
@@ -1279,6 +1303,8 @@ export class ObsidianChatView extends ItemView {
               }
             }
           }
+          // Paused after all its steps: Continue goes on.
+          shown.setContinue(this.canContinue());
           shown.setInputEnabled(true);
           shown.setBusy(false);
           shown.focus();
@@ -1335,9 +1361,11 @@ export class ObsidianChatView extends ItemView {
    * then send again). Shown only if `history` is the conversation on screen.
    */
   private addChanges(history: ChatHistoryEntry[], turnId: string, changes: ChangeLog): void {
-    const entry: ChatHistoryEntry = { type: "changes", turnId, files: changes.files() };
+    const prior = history.findIndex(item => item.type === "changes" && item.turnId === turnId && !item.undone);
+    const entry: ChatHistoryEntry = prior >= 0 ? history.splice(prior, 1)[0] : { type: "changes", turnId };
+    entry.files = changes.files();
     this.plugin.changeLogs.set(entry, changes);
-    if (!changes.canUndo()) new Notice("Undo snapshots exceeded their memory budget. This answer's files are kept; undo is unavailable.");
+    if (!changes.canUndo()) new Notice(`${changes.unavailableReason()} This answer's files are kept; undo is unavailable.`);
     const start = history.findIndex((item) => item.type === "user" && item.turnId === turnId);
     const later = history.findIndex((item, i) => i > start && item.type === "user" && !!item.turnId && item.turnId !== turnId);
     const end = later === -1 ? history.length : later;
@@ -1369,12 +1397,13 @@ export class ObsidianChatView extends ItemView {
     if (!entry || !log || entry.undone) return;
     if (!log.canUndo()) {
       this.renderHistory();
-      new Notice("Undo snapshots expired because their memory budget was exceeded. The files are kept.");
+      new Notice(`${log.unavailableReason()} The files are kept.`);
       return;
     }
     const app = this.plugin.app;
     const chat = this.chatContainer;
     this.undoing = true;
+    chat?.setContinue(false);
     chat?.setComposerLocked?.(true);
     chat?.setBusy(true);
     try {
@@ -1382,6 +1411,11 @@ export class ObsidianChatView extends ItemView {
       if (changed.length && !await confirmUndo(app, changed)) return;
       if (this.running || this.plugin.activeConversation !== conversation || this.plugin.changeLogs.get(entry) !== log) return;
       const failed = await log.undo(app);
+      // A continuation would trust tool receipts for changes just taken back.
+      if (conversation.pendingTurn?.turnId === turnId) {
+        delete conversation.pendingTurn;
+        chat?.setContinue(false);
+      }
       const complete = log.isEmpty();
       if (complete) {
         this.plugin.changeLogs.delete(entry);
@@ -1402,6 +1436,7 @@ export class ObsidianChatView extends ItemView {
       if (this.chatContainer === chat) {
         chat?.setComposerLocked?.(false);
         chat?.setBusy(false);
+        chat?.setContinue(this.canContinue());
       }
     }
   }

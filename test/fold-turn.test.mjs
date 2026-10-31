@@ -44,3 +44,19 @@ test('A single step without changes stays; one with changes folds; another turn 
   assert.deepEqual(api.foldPlan([user, read, changes, answer], 't1').steps, [read]);
   assert.equal(api.foldPlan([user, read, answer], 'other'), null);
 });
+
+test('A turn without an answer (an error, a pause, Stop) keeps its texts and says so', () => {
+  const user = row('user', { turnId: 't1' });
+  const lead = row('assistant', { text: 'The notes were cut off, so I read them again.' });
+  const read = row('tool-result');
+  const edit = row('tool-result');
+  const changes = row('changes', { turnId: 't1' });
+  const error = row('error', { text: 'Paused after 20 steps.' });
+  const plan = api.foldPlan([user, lead, read, edit, changes, error], 't1');
+  assert.deepEqual(plan.steps, [read, edit]);
+  assert.equal(plan.unanswered, true);
+  // With an answer the lead-in folds and the row is a finished one.
+  const answered = api.foldPlan([user, lead, read, edit, row('assistant', { text: 'Done.' })], 't1');
+  assert.deepEqual(answered.steps, [lead, read, edit]);
+  assert.equal(answered.unanswered, undefined);
+});

@@ -108,6 +108,9 @@ with headings, lists and tables, Excel sheets as CSV and PowerPoint in slide
 order; what a file becomes; each provider's form in a message and in a tool
 result such as `read_file` on a PDF, left out two turns later; attached
 files saved without their data, restored, and sent again on edit).
+`tool-text.test.mjs`: tool text (each result capped, a turn keeping all it
+read while earlier turns share the allowance, clipped once per turn; the
+same for the rows the chat shows).
 `skills.test.mjs`: skills (finding them in the skills folder, the list in
 the system prompt before `AGENTS.md`, `use_skill`, `/name` in a message and
 the `/` list, and the *Skills* settings with folder, list and New skill in
@@ -127,7 +130,8 @@ twice). `stream-desktop.test.mjs`: desktop streams through Node's `https`
 leaving saves; a request that failed or stalled in the background sent
 again at most twice, "Resuming…"; no `requestUrl()` fallback for a
 `fetch` failing in the background; the mobile stall watch, none on
-desktop; Continue after Obsidian was ended mid-turn and what dismisses it).
+desktop; Continue after Obsidian was ended mid-turn and what dismisses it;
+a turn that used all its steps pausing with Continue).
 `typed-steering.test.mjs`: typing while an answer runs (queued, taken in
 with the next step or run as the next turn; Stop and Clear drop it;
 cutting the history never starts at tool results with an added message).
@@ -144,11 +148,11 @@ last 20 turns and loading the earlier ones).
 `fold-turn.test.mjs`: which rows of a finished turn
 fold into one line above its answer (steps, a text that led into one, the
 changes row; not an ask_user question, the answer or a single step without
-changes). `usage.test.mjs`: each provider's token counts (cache reads and
+changes; a turn without an answer keeps its texts). `usage.test.mjs`: each provider's token counts (cache reads and
 writes, a compaction pass), the cost estimate, windows and prices from
 Anthropic's model list and pricing page, the Codex model list and OpenAI's
 documentation page (read once a day), the context ring with its compaction
-point and tokens used, saved with the chat and checked when loaded, gone
+point (full there, or at the window where none is known) and tokens used, saved with the chat and checked when loaded, gone
 after Clear; the ChatGPT plan without cost. `compaction.test.mjs`:
 compaction (Anthropic's threshold edit and beta header where the model has
 it, OpenAI's and the Codex route's `context_management`, what later requests
@@ -221,8 +225,31 @@ see the real server response in milliseconds. We only ship to
 Obsidian once the smoke test is green.
 
 
-Production regression tests also cover dynamic catalogs, 24-hour persistence, request deduplication, failure backoff, manual refresh, account changes during fetch, Anthropic pagination, the OpenAI model list (chat models only, newest first, no dated duplicates; `model-list.test.mjs`), stable Codex version discovery, GPT-6 reasoning metadata, and model/account isolation of native reasoning replay. Run `npm test`.
+Production regression tests also cover dynamic catalogs, 24-hour persistence, request deduplication, failure backoff, manual refresh, account changes during fetch, Anthropic pagination, the OpenAI model list (chat models only, newest first, no dated duplicates; `model-list.test.mjs`), stable Codex version discovery, GPT-6 reasoning metadata, model/account isolation of native reasoning replay, and the ChatGPT route naming each request's conversation for the prompt cache. Run `npm test`.
 
 Live validation results and their limits are recorded in [oauth-live-validation.md](oauth-live-validation.md).
 
 Portable-history retention also covers a delayed background summary alongside a normal answer, single-flight execution, safe installation, account-bound dispatch, independent cancellation, stale snapshots, usage totals, durable restore, switching/deleting/unloading a chat, and unrelated response cursors (`compaction.test.mjs`).
+
+`native-pr-56-59.mjs` runs the integrated pause/Continue, current-turn text,
+undo and context-ring UI in the dedicated desktop test vault. It uses real
+Obsidian/Svelte/view/loop/vault APIs with synthetic provider transport and a
+temporary helper plugin, removed afterward. It does not replace the installed
+chat plugin or save its conversations/settings. Existing non-QA vault files
+are hash-checked. This is not live-provider or physical-phone validation.
+
+PR 56–59 CR regressions additionally cover manual changes between paused
+segments, folder descendant moves and path reuse, asynchronous Undo/Continue
+exclusion, compacted pause identity/read retention across restart, and
+emergency recovery of CJK tool results above the 30 MB request ceiling.
+
+Overflow recovery coverage includes Continue's initial request, current-turn
+summaries for models without native compaction, insufficient earlier-turn
+summaries, failed summaries preserving completed writes/history, and restored
+empty-folder deletions refusing partial Undo.
+
+Current-turn overflow summaries retain a separate continuation identity and
+remain ineligible for edit/regenerate across restart. Rename tests cover
+Obsidian-owned link rewrites, prior manual edits, and read/rename failures;
+the native harness verifies real link-aware rename/Undo and restores the
+original automatic-link setting.

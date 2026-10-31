@@ -27,7 +27,7 @@ import { buildContext } from "./context";
 import { folderInstructionContext, instructionsGiven, rootInstructions, toolPaths } from "./instructions";
 import { findSkills, skillsPrompt } from "./skills";
 import { buildSystemPrompt, buildContextMessage, voiceTranscriptText } from "./system-prompt";
-import { cutBeforeTurn, editableTurn, fromLastCompaction, lastCompaction, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
+import { cutBeforeTurn, editableTurn, fromLastCompaction, lastCompaction, latestTurnId, newTurnId, withoutOldToolImages, withoutToolAttachments, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./history";
 
 import { debugLog } from "../debug";
 import { attachmentBudgetError } from "../files/attachments";
@@ -191,9 +191,13 @@ export class AgentLoop {
   private historyBusy = 0;
   private historyChanged = false;
 
-  constructor(app: App, settings: ChatSettings, private readonly onHistoryChanged?: () => void) {
+  /** Stable cache identity across this conversation's turns and restarts. */
+  private readonly conversationId: string;
+
+  constructor(app: App, settings: ChatSettings, private readonly onHistoryChanged?: () => void, conversationId?: string) {
     this.app = app;
     this.settings = settings;
+    this.conversationId = conversationId ?? newTurnId();
   }
 
   /** Abort a running loop (e.g. user navigates away) */
@@ -480,20 +484,26 @@ export class AgentLoop {
   }
 
   /**
-   * The request didn't fit: summarize what came before the running turn,
-   * once per turn, and send again. False when there is nothing before it
-   * or the summary failed.
+   * The request didn't fit: first summarize earlier turns. If the running
+   * turn itself is too large, summarize its completed work too, preserving
+   * its identity. An initial unsent user message is never summarized here.
    */
-  private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean): Promise<boolean> {
+  private async compactForOverflow(settings: ChatSettings, callbacks: AgentCallbacks, isStopped: () => boolean,
+    includeCurrent = false, turnId?: string): Promise<boolean> {
     this.cancelPortableHistory();
-    let start = this.messages.length - 1;
-    while (start >= 0 && !this.messages[start].turnId) start--;
+    const currentTurnId = turnId ?? latestTurnId(this.messages);
+    const last = this.messages.at(-1);
+    if (includeCurrent && (!currentTurnId || last?.role !== "user" || typeof last.content === "string" ||
+      !last.content.some(block => block.type === "tool_result"))) return false;
+    let start = includeCurrent ? this.messages.length : this.messages.length - 1;
+    if (!includeCurrent) while (start >= 0 && !this.messages[start].turnId) start--;
     if (start <= 0) return false;
     try {
       const summary = await this.summarize(settings, this.messages.slice(0, start), isStopped, callbacks.onUsage);
       if (isStopped()) return false;
-      this.messages = [summaryMessage(summary, summaryTurnId()), ...this.messages.slice(start)];
-      debugLog(this.app, "COMPACTED", { reason: "overflow" });
+      this.messages = [{ ...summaryMessage(summary, summaryTurnId()),
+        ...(includeCurrent ? { continuationTurnId: currentTurnId } : {}) }, ...this.messages.slice(start)];
+      debugLog(this.app, "COMPACTED", { reason: includeCurrent ? "current-turn overflow" : "overflow" });
       callbacks.onCompacted?.();
       return true;
     } catch (e) {
@@ -543,13 +553,10 @@ export class AgentLoop {
    * whose message never reached the history isn't continued as another).
    */
   owesAnswer(turnId?: string): boolean {
-    if (this.messages.at(-1)?.role !== "user") return false;
+    const last = this.messages.at(-1);
+    if (last?.role !== "user" && !(last?.role === "assistant" && last.awaitingContinuation === true)) return false;
     if (turnId === undefined) return true;
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const id = this.messages[i].turnId;
-      if (this.messages[i].role === "user" && id) return id === turnId;
-    }
-    return false;
+    return latestTurnId(this.messages) === turnId;
   }
 
   /** Export the full conversation as a readable markdown transcript */
@@ -727,6 +734,8 @@ ${mentioned.text}` : buildContextMessage(context);
       // What the last compaction covers goes; a new array only then, so
       // OpenAI keeps chaining and the prompt caches keep their prefix.
       this.messages = fromLastCompaction(this.messages);
+      // Earlier turns enter the shared allowance once, before the new request.
+      this.messages = withoutLargeToolText(this.messages);
       this.pruneToolImages();
 
       debugLog(this.app, "USER_MESSAGE", {
@@ -741,7 +750,7 @@ ${mentioned.text}` : buildContextMessage(context);
         fileNames: files.map((file) => file.fileName),
       });
 
-      await this.loop(version, callbacks, turnSettings, scope, beforeTurn);
+      await this.loop(version, callbacks, turnSettings, scope, beforeTurn, turnId);
     } finally {
       this.historyBusy--;
       if (!this.historyBusy) {
@@ -749,6 +758,7 @@ ${mentioned.text}` : buildContextMessage(context);
         this.flushHistoryChanged();
       }
     }
+
   }
 
   /**
@@ -764,12 +774,13 @@ ${mentioned.text}` : buildContextMessage(context);
       const version = ++this.runVersion;
       this.voiceTurn = false;
       if (!this.owesAnswer()) return;
+      const turnId = latestTurnId(this.messages);
       debugLog(this.app, "CONTINUE_TURN", { messages: this.messages.length });
       const currentServers = () => this.settings.mcpServers?.map(server => ({ ...server })) ?? [];
       const turnSettings = { ...this.settings, get mcpServers() { return currentServers(); } };
       await this.prepareContext(turnSettings, 0, callbacks, () => version !== this.runVersion);
       if (version !== this.runVersion) return;
-      await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined);
+      await this.loop(version, callbacks, turnSettings, selection ? { ...selection } : undefined, undefined, turnId);
     } finally {
       this.historyBusy--;
       if (!this.historyBusy) {
@@ -785,11 +796,12 @@ ${mentioned.text}` : buildContextMessage(context);
     callbacks: AgentCallbacks,
     turnSettings: ChatSettings,
     scope: SelectionScope | undefined,
-    beforeTurn?: UnifiedMessage[]
+    beforeTurn?: UnifiedMessage[],
+    turnId?: string
   ): Promise<void> {
     this.loopVersion = version;
     try {
-      await this.steps(version, callbacks, turnSettings, scope, beforeTurn);
+      await this.steps(version, callbacks, turnSettings, scope, beforeTurn, turnId);
     } finally {
       if (this.loopVersion === version) this.loopVersion = 0;
     }
@@ -801,7 +813,8 @@ ${mentioned.text}` : buildContextMessage(context);
     callbacks: AgentCallbacks,
     turnSettings: ChatSettings,
     scope: SelectionScope | undefined,
-    beforeTurn?: UnifiedMessage[]
+    beforeTurn?: UnifiedMessage[],
+    turnId?: string
   ): Promise<void> {
     const isStopped = () => version !== this.runVersion;
     const onTextDelta = (text: string) => {
@@ -815,8 +828,8 @@ ${mentioned.text}` : buildContextMessage(context);
     const maxIterations = turnSettings.maxIterations || 20;
     let undoBudgetReported = false;
     let resends = 0;
-    // A request too long for the model is summarized and sent again, once per turn.
-    let overflowCompacted = false;
+    // At most one earlier-history summary and one completed-current-turn summary.
+    let overflowCompactions = 0;
 
     for (let i = 0; i < maxIterations; i++) {
       if (isStopped()) return;
@@ -833,10 +846,18 @@ ${mentioned.text}` : buildContextMessage(context);
           response = await this.send(turnSettings, systemPrompt, isStopped, onTextDelta, callbacks.onRequestStarted);
         } catch (e) {
           if (isStopped()) return;
-          if (!overflowCompacted && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
-            overflowCompacted = true;
+          if (overflowCompactions < 2 && isContextOverflow(e) && !(e instanceof ProviderError && e.remoteEffectsPossible)) {
             callbacks.onThinking();
-            if (await this.compactForOverflow(turnSettings, callbacks, isStopped)) continue;
+            let compacted = false;
+            if (overflowCompactions === 0) {
+              overflowCompactions++;
+              compacted = await this.compactForOverflow(turnSettings, callbacks, isStopped);
+            }
+            if (!compacted && overflowCompactions < 2 && !isStopped()) {
+              overflowCompactions = 2;
+              compacted = await this.compactForOverflow(turnSettings, callbacks, isStopped, true, turnId);
+            }
+            if (compacted) continue;
             if (isStopped()) return;
           }
           const msg = e instanceof Error ? e.message : String(e);
@@ -867,10 +888,11 @@ ${mentioned.text}` : buildContextMessage(context);
             if (isStopped()) return;
             continue;
           }
-          // A later request grown over the size limit by tool attachments:
-          // drop them (and oversized tool text) once and send again.
-          if (i > 0 && e instanceof RequestBudgetError) {
-            const reduced = withoutLargeToolText(withoutToolAttachments(this.messages));
+          // A later request over the encoded byte limit cannot reach the
+          // provider's compaction. Drop tool attachments and apply the shared
+          // text allowance to the current turn too, then retry the request.
+          if ((i > 0 || beforeTurn === undefined) && e instanceof RequestBudgetError) {
+            const reduced = withoutLargeToolText(withoutToolAttachments(this.messages), false);
             if (reduced !== this.messages) {
               this.messages = reduced;
               clearOpenAIState();
@@ -958,7 +980,8 @@ ${mentioned.text}` : buildContextMessage(context);
       // Append assistant message to history
       this.messages.push({
         role: "assistant", content: response.content, replay: response.replay,
-        ...(response.compaction ? { compaction: response.compaction } : {}),
+        ...(response.stopReason === "pause_turn" ? { awaitingContinuation: true } : {}),
+        ...(response.compaction ? { compaction: response.compaction, ...(turnId ? { continuationTurnId: turnId } : {}) } : {}),
       });
       if (response.compaction) callbacks.onCompacted?.();
       if (response.compaction) void this.retainPortableHistory(turnSettings, callbacks);
@@ -1013,7 +1036,7 @@ ${mentioned.text}` : buildContextMessage(context);
           instructionSources.push(...discovered.sources);
         }
         if (callbacks.changes && !callbacks.changes.canUndo() && !undoBudgetReported) {
-          result.result += "\nUndo snapshots exceeded their memory budget. This answer's changes are kept; undo is unavailable for the entire answer.";
+          result.result += `\n${callbacks.changes.unavailableReason()} This answer's changes are kept; undo is unavailable for the entire answer.`;
           undoBudgetReported = true;
         }
         if (isStopped()) return;
@@ -1056,8 +1079,9 @@ ${mentioned.text}` : buildContextMessage(context);
       }
     }
 
-    // If we get here, we hit the iteration limit
-    callbacks.onError(
+    // All steps used: a pause the user can continue from (the history ends in tool results).
+    if (callbacks.onStepLimit) callbacks.onStepLimit(maxIterations, scope);
+    else callbacks.onError(
       `Reached maximum iterations (${maxIterations}). The task may be too complex for a single conversation turn.`
     );
   }
@@ -1108,7 +1132,7 @@ ${mentioned.text}` : buildContextMessage(context);
     let remoteStarted = false;
     try {
       return await sendMessage(settings, this.messages, TOOL_DEFINITIONS, systemPrompt, isStopped,
-        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; } });
+        { onTextDelta, signal: request.signal, onRequestStarted, onServerTool: () => { remoteStarted = true; }, conversationId: this.conversationId });
     } catch (e) {
       // Aborted, but not by Stop: the watch gave it up.
       if (e instanceof ProviderError && e.remoteEffectsPossible) throw e;

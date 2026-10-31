@@ -4,8 +4,8 @@
  * one-time migrations from older formats, and saving each attached image
  * and file once. Pure functions; `main.ts` reads and writes the files.
  */
-import { historySelection } from "./selection-history";
-import type { ChatHistoryEntry, FileAttachment, ImageAttachment, UnifiedMessage } from "./types";
+import { historySelection, isSavedSelection } from "./selection-history";
+import type { ChatHistoryEntry, FileAttachment, ImageAttachment, SelectionScope, UnifiedMessage } from "./types";
 import { assignLegacyTurnIds, fromLastCompaction, withoutOldToolImages, withoutLargeToolText, withoutLargeVisibleToolText, boundedToolText } from "./agent/history";
 import type { ConversationUsage } from "./agent/usage";
 
@@ -71,6 +71,8 @@ export type SavedConversation = Omit<ConversationRecord, "size" | "unloaded" | "
 
 /** The turn a conversation was running. */
 export interface PendingTurn {
+  /** The current selection after this answer's own edits, compacted to a fingerprint. */
+  selection?: SelectionScope;
   /** A lost response could have already run external tools; never offer replay. */
   remoteEffectsPossible?: boolean;
   turnId: string;
@@ -196,7 +198,8 @@ function savedRecord(item: StateRecord): ConversationRecord {
   // Optional, so no new format version: an older plugin just drops it.
   const pending = item.pendingTurn;
   const pendingTurn = isRecord(pending) && typeof pending.turnId === "string" && typeof pending.startedAt === "number"
-    ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}) }
+    ? { turnId: pending.turnId, startedAt: pending.startedAt, ...(pending.remoteEffectsPossible === true ? { remoteEffectsPossible: true } : {}),
+      ...(isSavedSelection(pending.selection) ? { selection: historySelection(pending.selection) } : {}) }
     : undefined;
   return {
     id: item.id as string,

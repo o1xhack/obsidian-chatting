@@ -43,6 +43,7 @@ export async function sendMessage(
   const options: StreamOptions = {
     signal: stream.signal,
     expectedAccountIdentity: stream.expectedAccountIdentity,
+    conversationId: stream.conversationId,
     onTextDelta: (text) => {
       shown = true;
       stream.onTextDelta?.(text);

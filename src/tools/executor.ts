@@ -791,8 +791,9 @@ async function renameFile(
 
   // fileManager.renameFile() updates all internal links automatically
   const from = file.path;
+  const recordRename = await changes?.renaming(app, from, normalizedNew);
   await app.fileManager.renameFile(file, normalizedNew);
-  changes?.renamed(from, normalizedNew);
+  await recordRename?.();
   return { result: `Renamed ${path} to ${normalizedNew}.`, isError: false };
 }
 

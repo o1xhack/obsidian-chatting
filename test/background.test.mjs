@@ -38,6 +38,7 @@ function fakeChat() {
     addToolCall(name, input) { chat.shown.push({ id: nextId, type: 'tool-call', toolName: name, toolInput: input }); return nextId++; },
     updateToolResult(id) { const msg = chat.shown.find(m => m.id === id); if (msg) msg.type = 'tool-result'; },
     addError(value) { chat.shown.push({ id: nextId++, type: 'error', text: value }); },
+    addChanges(turnId, files, state) { chat.shown.push({ id: nextId++, type: 'changes', turnId, files, changesState: state }); },
     showThinking(label = '') { chat.thinkingLabels.push(label); }, hideThinking() {},
     showAskUser(question) { if (question !== undefined) chat.addAssistantMessage(question); return new Promise(resolve => { chat.askUser = resolve; }); },
     cancelAskUser() { const resolve = chat.askUser; chat.askUser = null; resolve?.(''); },
@@ -469,6 +470,121 @@ test('A finished turn leaves no mark; Continue only while the model owes an answ
     assert.equal(chat.continueShown, false, action);
     assert.equal(plugin.conversations.find(c => c.id === 'c1')?.pendingTurn, undefined, action);
   }
+});
+
+for (const provider of ['anthropic', 'openai', 'chatgpt-oauth']) test(`${provider}: a turn that used all its steps pauses with Continue, which goes on without running a step again`, async () => {
+  api.setChatGPTOAuthService({ getUsableCredential: async () => ({ accessToken: 'fake', accountId: 'fake' }) });
+  const { plugin, view, chat, writes } = await chatSetup(provider);
+  plugin.settings.maxIterations = 2;
+  // With an MCP server on, the pause still offers Continue: no request is in flight.
+  if (provider === 'openai') plugin.settings.mcpServers = [{ id: 'qa', name: 'remote', url: 'https://remote.example/mcp', enabled: true }];
+  const requests = transport((body, index) => index < 2
+    ? response(provider, [call(`read${index}`, 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use', index)
+    : response(provider, [text('Done.')], 'end_turn', index));
+  await view.handleUserMessage('Read the template twice', null);
+  await tick();
+  assert.equal(requests.length, 2);
+  assert.ok(chat.shown.some(row => row.type === 'error' && row.text === 'Paused after 2 steps.'));
+  assert.deepEqual(plugin.chatHistory.filter(row => row.type === 'error'), [{ type: 'error', text: 'Paused after 2 steps.', errorKind: 'paused' }]);
+  assert.equal(chat.continueShown, true);
+  const mark = writes.at(-1).conversations[0].pendingTurn;
+  assert.ok(mark);
+  assert.equal(mark.remoteEffectsPossible, undefined);
+
+  await view.continueTurn();
+  await tick();
+  assert.equal(requests.length, 3);
+  // The steps already run are sent, not run again.
+  assert.equal(chat.shown.filter(row => row.type === 'tool-result' || row.type === 'tool-call').length, 2);
+  assert.equal(plugin.chatHistory.at(-1).text, 'Done.');
+  assert.equal(chat.continueShown, false);
+  assert.equal(writes.at(-1).conversations[0].pendingTurn, undefined);
+});
+
+test('Anthropic server pause at the step limit remains continuable after saving and reloading', async () => {
+  const { plugin, view, chat, writes } = await chatSetup('anthropic');
+  plugin.settings.maxIterations = 1;
+  const raw = [{ type: 'server_tool_use', id: 'search-paused', name: 'web_search', input: { query: 'test' } }];
+  const requests = transport((_body, index) => index === 0
+    ? response('anthropic', raw, 'pause_turn')
+    : response('anthropic', [text('Search finished')]));
+  await view.handleUserMessage('Search', null);
+  assert.equal(chat.continueShown, true);
+  await plugin.saveChatHistory();
+  const restored = await chatSetup('anthropic', JSON.parse(JSON.stringify(writes.at(-1))));
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, true);
+  await restored.view.continueTurn();
+  assert.deepEqual(requests[1].messages.at(-1), { role: 'assistant', content: raw });
+  assert.equal(restored.plugin.chatHistory.at(-1).text, 'Search finished');
+  assert.equal(restored.plugin.activeConversation.pendingTurn, undefined);
+});
+
+for (const restart of [false, true]) test(`A paused compacted turn keeps its identity and current reads (restart=${restart})`, async () => {
+  let state = await chatSetup('anthropic');
+  state.plugin.settings.maxIterations = 1;
+  state.app.vault.cachedRead = async file => file.path.endsWith('Case Template.md') ? 'R'.repeat(80000) : '';
+  const requests = transport((_body, index) => index < 4
+    ? response('anthropic', [...index === 0 ? [{ type: 'compaction', content: 'Summary of earlier context' }] : [], call(`read-${index}`, 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use')
+    : response('anthropic', [text('Done')]));
+  await state.view.handleUserMessage('Read four notes', null);
+  await state.plugin.saveChatHistory();
+  const turnId = state.plugin.activeConversation.pendingTurn.turnId;
+  assert.equal(state.plugin.agent.owesAnswer(turnId), true);
+  if (restart) {
+    state = await chatSetup('anthropic', JSON.parse(JSON.stringify(state.writes.at(-1))));
+    state.plugin.settings.maxIterations = 1;
+    state.app.vault.cachedRead = async file => file.path.endsWith('Case Template.md') ? 'R'.repeat(80000) : '';
+  }
+  for (let i = 0; i < 4; i++) await state.view.continueTurn();
+  assert.equal(requests.length, 5);
+  const results = requests[4].messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result');
+  assert.equal(results.length, 4);
+  assert.ok(results.every(block => typeof block.content === 'string' && block.content.length >= 80000 && !block.content.includes('Tool text truncated')));
+  assert.equal(state.plugin.chatHistory.at(-1).text, 'Done');
+});
+
+test('A current-turn overflow summary reloads as continuable but never editable', async () => {
+  const state = await chatSetup('anthropic');
+  state.plugin.settings.maxIterations = 1;
+  state.app.vault.cachedRead = async file => file.path.endsWith('Case Template.md') ? 'R'.repeat(80000) : '';
+  let reads = 0;
+  transport(body => {
+    if (JSON.stringify(body.system).includes('You write summaries')) return response('anthropic', [text('Three reads completed; read once more, then answer.')]);
+    const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result');
+    if (JSON.stringify(results).length > 220000) return { status: 400, json: { error: { message: 'prompt is too long: too many input tokens' } } };
+    return reads < 4 ? response('anthropic', [call(`read-${reads++}`, 'read_file', { path: 'Cases/Case Template.md' })], 'tool_use') : response('anthropic', [text('Done')]);
+  });
+  await state.view.handleUserMessage('Read four times', null);
+  const turnId = state.plugin.activeConversation.pendingTurn.turnId;
+  for (let i = 0; i < 3; i++) await state.view.continueTurn();
+  await state.plugin.saveChatHistory();
+  const restored = await chatSetup('anthropic', JSON.parse(JSON.stringify(state.writes.at(-1))));
+  restored.view.renderHistory();
+  assert.equal(restored.chat.continueShown, true);
+  assert.equal(restored.plugin.agent.canEditTurn(turnId), false);
+  assert.match(restored.plugin.agent.exportMessages()[0].turnId, /^summary-/);
+  await restored.view.continueTurn();
+  assert.equal(reads, 4);
+  assert.equal(restored.plugin.chatHistory.at(-1).text, 'Done');
+});
+
+for (const restart of [false, true]) for (const externalEdit of [false, true]) test(`Scoped pause keeps its updated selection (restart=${restart}, externalEdit=${externalEdit})`, async () => {
+  let state = await chatSetup('anthropic');
+  state.plugin.settings.maxIterations = 1;
+  transport((_body, index) => index > 1 ? response('anthropic', [text('Done')]) : response('anthropic', [call(`edit-${index}`, 'edit_document', {
+    path: 'Untitled.md', operation: 'find_replace', find: index === 0 ? 'rig' : 'NEW', content: index === 0 ? 'NEW' : 'OK',
+  })], 'tool_use'));
+  await state.view.handleUserMessage('Edit the selected text twice', { filePath: 'Untitled.md', text: 'rig', from: 1, sourceText: 'Original' });
+  assert.equal(await state.app.vault.cachedRead(state.app.vault.getFileByPath('Untitled.md')), 'ONEWinal');
+  await state.plugin.saveChatHistory();
+  const saved = JSON.parse(JSON.stringify(state.writes.at(-1)));
+  if (restart) state = await chatSetup('anthropic', saved);
+  await state.app.vault.process(state.app.vault.getFileByPath('Untitled.md'), () => externalEdit ? 'ONEWinal outside edit' : 'ONEWinal');
+  await state.view.continueTurn();
+  assert.equal(await state.app.vault.cachedRead(state.app.vault.getFileByPath('Untitled.md')), externalEdit ? 'ONEWinal outside edit' : 'OOKinal');
+  assert.equal(state.plugin.chatHistory.find(row => row.type === 'user' && row.turnId).selection.text, 'rig');
+  assert.equal(state.plugin.chatHistory.filter(row => row.type === 'tool-result').at(-1).toolResult.isError, externalEdit);
 });
 
 test('Continue only for the turn the API history ends in: a mark of a message that never reached it offers none', () => {
